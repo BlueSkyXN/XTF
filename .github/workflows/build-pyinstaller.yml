@@ -16,152 +16,115 @@ on:
     branches: [ main ]
 
 jobs:
-  build:
-    strategy:
-      matrix:
-        include:
-          - os: macos-latest
-            arch: arm64
-            python-version: '3.11'
-            artifact-name: 'XTF-macos-arm64-pyinstaller'
-          - os: windows-latest
-            arch: x86
-            python-version: '3.11'
-            artifact-name: 'XTF-windows-x86-pyinstaller'
-          - os: ubuntu-latest
-            arch: arm64
-            python-version: '3.11'
-            artifact-name: 'XTF-linux-arm64-pyinstaller'
-          - os: ubuntu-latest
-            arch: x86_64
-            python-version: '3.11'
-            artifact-name: 'XTF-linux-x86-pyinstaller'
-    
-    runs-on: ${{ matrix.os }}
+  build-macos:
+    runs-on: macos-latest
     
     steps:
     - uses: actions/checkout@v4
     
-    - name: Set up Python ${{ matrix.python-version }}
+    - name: Set up Python 3.11
       uses: actions/setup-python@v4
       with:
-        python-version: ${{ matrix.python-version }}
-        architecture: ${{ matrix.arch == 'x86' && 'x86' || 'x64' }}
+        python-version: '3.11'
+        architecture: 'arm64'
     
-    - name: Set up QEMU for ARM64 emulation (Linux)
-      if: matrix.os == 'ubuntu-latest' && matrix.arch == 'arm64'
-      uses: docker/setup-qemu-action@v3
-      with:
-        platforms: arm64
-    
-    - name: Build for Linux ARM64 using Docker
-      if: matrix.os == 'ubuntu-latest' && matrix.arch == 'arm64'
-      run: |
-        # Create a simple build script
-        cat > build_arm64.sh << 'EOF'
-        #!/bin/bash
-        set -e
-        
-        # Install dependencies
-        apt-get update
-        apt-get install -y python3 python3-pip
-        
-        # Install PyInstaller and dependencies
-        pip3 install pyinstaller pandas requests openpyxl
-        
-        # Build the executable
-        cd /workspace
-        python3 -m PyInstaller --onefile --name XTF XTF.py
-        
-        # Copy files to output
-        mkdir -p /output
-        cp dist/XTF /output/
-        cp config.example.json /output/
-        chmod +x /output/XTF
-        EOF
-        
-        chmod +x build_arm64.sh
-        
-        # Build using ARM64 container
-        docker run --rm --platform linux/arm64 \
-          -v $(pwd):/workspace \
-          -v $(pwd)/artifacts:/output \
-          ubuntu:22.04 \
-          bash /workspace/build_arm64.sh
-    
-    - name: Install dependencies (non-ARM64)
-      if: ${{ !(matrix.os == 'ubuntu-latest' && matrix.arch == 'arm64') }}
+    - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
         pip install pyinstaller
-        pip install -r requirements.txt || pip install pandas requests openpyxl
+        pip install pandas requests openpyxl
     
-    - name: Build with PyInstaller (Windows)
-      if: matrix.os == 'windows-latest'
+    - name: Build with PyInstaller
       run: |
         python -m PyInstaller --onefile --name XTF XTF.py
     
-    - name: Build with PyInstaller (macOS)
-      if: matrix.os == 'macos-latest'
-      run: |
-        python -m PyInstaller --onefile --name XTF XTF.py
-    
-    - name: Build with PyInstaller (Linux x86_64)
-      if: matrix.os == 'ubuntu-latest' && matrix.arch == 'x86_64'
-      run: |
-        python -m PyInstaller --onefile --name XTF XTF.py
-    
-    - name: Create artifact directory (non-ARM64)
-      if: ${{ !(matrix.os == 'ubuntu-latest' && matrix.arch == 'arm64') }}
+    - name: Create artifact directory
       run: |
         mkdir -p artifacts
     
-    - name: Copy executable to artifacts (Windows)
-      if: matrix.os == 'windows-latest'
-      run: |
-        copy dist\XTF.exe artifacts\
-        copy config.example.json artifacts\
-    
-    - name: Copy executable to artifacts (macOS)
-      if: matrix.os == 'macos-latest'
+    - name: Copy files to artifacts
       run: |
         cp dist/XTF artifacts/
         cp config.example.json artifacts/
         chmod +x artifacts/XTF
     
-    - name: Copy executable to artifacts (Linux x86_64)
-      if: matrix.os == 'ubuntu-latest' && matrix.arch == 'x86_64'
-      run: |
-        cp dist/XTF artifacts/
-        cp config.example.json artifacts/
-        chmod +x artifacts/XTF
-    
-    - name: Create README for artifact
+    - name: Create README
       run: |
         cat > artifacts/README.md << 'EOF'
         # XTF - Excel To Feishu Sync Tool
         
-        Built with PyInstaller for ${{ matrix.os }}-${{ matrix.arch }}
+        Built with PyInstaller for macOS ARM64
         
         ## Usage
         1. Copy config.example.json to config.json
         2. Edit config.json with your Feishu app credentials
-        3. Run the executable:
-           - Windows: `XTF.exe`
-           - macOS/Linux: `./XTF`
+        3. Run: `./XTF`
         
         ## Build Information
-        - OS: ${{ matrix.os }}
-        - Architecture: ${{ matrix.arch }}
-        - Python Version: ${{ matrix.python-version }}
+        - OS: macOS
+        - Architecture: ARM64
+        - Python Version: 3.11
         - Build Tool: PyInstaller
-        - Build Date: $(date)
-        - Commit SHA: ${{ github.sha }}
         EOF
     
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
-        name: ${{ matrix.artifact-name }}
+        name: XTF-macos-arm64-pyinstaller
+        path: artifacts/
+        retention-days: 30
+
+  build-windows:
+    runs-on: windows-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+        architecture: 'x64'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pyinstaller
+        pip install pandas requests openpyxl
+    
+    - name: Build with PyInstaller
+      run: |
+        python -m PyInstaller --onefile --name XTF XTF.py
+    
+    - name: Create artifact directory
+      run: |
+        mkdir artifacts
+    
+    - name: Copy files to artifacts
+      run: |
+        copy dist\XTF.exe artifacts\
+        copy config.example.json artifacts\
+    
+    - name: Create README
+      run: |
+        echo # XTF - Excel To Feishu Sync Tool > artifacts\README.md
+        echo. >> artifacts\README.md
+        echo Built with PyInstaller for Windows x64 >> artifacts\README.md
+        echo. >> artifacts\README.md
+        echo ## Usage >> artifacts\README.md
+        echo 1. Copy config.example.json to config.json >> artifacts\README.md
+        echo 2. Edit config.json with your Feishu app credentials >> artifacts\README.md
+        echo 3. Run: XTF.exe >> artifacts\README.md
+        echo. >> artifacts\README.md
+        echo ## Build Information >> artifacts\README.md
+        echo - OS: Windows >> artifacts\README.md
+        echo - Architecture: x64 >> artifacts\README.md
+        echo - Python Version: 3.11 >> artifacts\README.md
+        echo - Build Tool: PyInstaller >> artifacts\README.md
+    
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: XTF-windows-x64-pyinstaller
         path: artifacts/
         retention-days: 30
