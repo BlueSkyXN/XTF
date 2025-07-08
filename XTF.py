@@ -1462,16 +1462,16 @@ class ConfigManager:
         # 同步设置
         parser.add_argument('--sync-mode', type=str, 
                           choices=['full', 'incremental', 'overwrite', 'clone'],
-                          default='full', help='同步模式 (默认: full)')
+                          help='同步模式')
         parser.add_argument('--index-column', type=str, help='索引列名')
         
         # 性能设置
-        parser.add_argument('--batch-size', type=int, default=500, 
-                          help='批处理大小 (默认: 500)')
-        parser.add_argument('--rate-limit-delay', type=float, default=0.5,
-                          help='接口调用间隔秒数 (默认: 0.5)')
-        parser.add_argument('--max-retries', type=int, default=3,
-                          help='最大重试次数 (默认: 3)')
+        parser.add_argument('--batch-size', type=int,
+                          help='批处理大小')
+        parser.add_argument('--rate-limit-delay', type=float,
+                          help='接口调用间隔秒数')
+        parser.add_argument('--max-retries', type=int,
+                          help='最大重试次数')
         
         # 功能开关
         parser.add_argument('--no-create-fields', action='store_true',
@@ -1480,7 +1480,7 @@ class ConfigManager:
         # 日志设置
         parser.add_argument('--log-level', type=str, 
                           choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
-                          default='INFO', help='日志级别 (默认: INFO)')
+                          help='日志级别')
         
         return parser.parse_args()
     
@@ -1489,48 +1489,101 @@ class ConfigManager:
         """创建配置对象"""
         args = cls.parse_args()
         
-        # 尝试从配置文件加载
-        config_data = {}
+        # 先设置默认值
+        config_data = {
+            'sync_mode': 'full',
+            'batch_size': 500,
+            'rate_limit_delay': 0.5,
+            'max_retries': 3,
+            'create_missing_fields': True,
+            'log_level': 'INFO'
+        }
+        
+        # 尝试从配置文件加载，覆盖默认值
         if Path(args.config).exists():
             file_config = cls.load_from_file(args.config)
             if file_config:
                 config_data.update(file_config)
-                print(f"已加载配置文件: {args.config}")
+                print(f"✅ 已从配置文件加载参数: {args.config}")
+                
+                # 显示从配置文件加载的参数
+                loaded_params = []
+                for key, value in file_config.items():
+                    if key in config_data:
+                        loaded_params.append(f"{key}={value}")
+                if loaded_params:
+                    print(f"📋 配置文件参数: {', '.join(loaded_params)}")
+            else:
+                print(f"⚠️  配置文件 {args.config} 加载失败，使用默认值")
+        else:
+            print(f"⚠️  配置文件 {args.config} 不存在，使用默认值")
         
-        # 命令行参数覆盖文件配置
+        # 命令行参数覆盖文件配置（只有当明确提供时）
+        cli_overrides = []
+        
+        # 基础参数
         if args.file_path:
             config_data['file_path'] = args.file_path
+            cli_overrides.append(f"file_path={args.file_path}")
         if args.app_id:
             config_data['app_id'] = args.app_id
+            cli_overrides.append(f"app_id={args.app_id[:8]}...")
         if args.app_secret:
             config_data['app_secret'] = args.app_secret
+            cli_overrides.append(f"app_secret=***")
         if args.app_token:
             config_data['app_token'] = args.app_token
+            cli_overrides.append(f"app_token={args.app_token[:8]}...")
         if args.table_id:
             config_data['table_id'] = args.table_id
+            cli_overrides.append(f"table_id={args.table_id}")
         if args.index_column:
             config_data['index_column'] = args.index_column
+            cli_overrides.append(f"index_column={args.index_column}")
         
-        config_data['sync_mode'] = args.sync_mode
-        config_data['batch_size'] = args.batch_size
-        config_data['rate_limit_delay'] = args.rate_limit_delay
-        config_data['max_retries'] = args.max_retries
-        config_data['create_missing_fields'] = not args.no_create_fields
-        config_data['log_level'] = args.log_level
+        # 高级参数（只有明确提供时才覆盖）
+        if args.sync_mode is not None:
+            config_data['sync_mode'] = args.sync_mode
+            cli_overrides.append(f"sync_mode={args.sync_mode}")
+        if args.batch_size is not None:
+            config_data['batch_size'] = args.batch_size
+            cli_overrides.append(f"batch_size={args.batch_size}")
+        if args.rate_limit_delay is not None:
+            config_data['rate_limit_delay'] = args.rate_limit_delay
+            cli_overrides.append(f"rate_limit_delay={args.rate_limit_delay}")
+        if args.max_retries is not None:
+            config_data['max_retries'] = args.max_retries
+            cli_overrides.append(f"max_retries={args.max_retries}")
+        if args.no_create_fields:  # 这个是action='store_true'，只有指定时才为True
+            config_data['create_missing_fields'] = False
+            cli_overrides.append("create_missing_fields=False")
+        if args.log_level is not None:
+            config_data['log_level'] = args.log_level
+            cli_overrides.append(f"log_level={args.log_level}")
+        
+        # 显示命令行覆盖的参数
+        if cli_overrides:
+            print(f"🔧 命令行参数覆盖: {', '.join(cli_overrides)}")
         
         # 验证必需参数
         required_fields = ['file_path', 'app_id', 'app_secret', 'app_token', 'table_id']
         missing_fields = [f for f in required_fields if not config_data.get(f)]
         
         if missing_fields:
-            print(f"错误: 缺少必需参数: {', '.join(missing_fields)}")
-            print("请通过配置文件或命令行参数提供这些值")
+            print(f"\n❌ 错误: 缺少必需参数: {', '.join(missing_fields)}")
+            print("💡 请通过以下方式提供这些参数:")
+            print("   1. 在配置文件中设置")
+            print("   2. 通过命令行参数指定")
+            print("\n命令行参数示例:")
+            for field in missing_fields:
+                field_name = field.replace('_', '-')
+                print(f"   --{field_name} <值>")
             sys.exit(1)
         
         return SyncConfig(**config_data)
 
 
-def create_sample_config():
+def create_sample_config(config_file: str = "config.json"):
     """创建示例配置文件"""
     sample_config = {
         "file_path": "data.xlsx",
@@ -1547,13 +1600,14 @@ def create_sample_config():
         "log_level": "INFO"
     }
     
-    config_file = "config.json"
     if not Path(config_file).exists():
         ConfigManager.save_to_file(sample_config, config_file)
         print(f"已创建示例配置文件: {config_file}")
         print("请编辑配置文件并填入正确的参数值")
+        return True
     else:
         print(f"配置文件 {config_file} 已存在")
+        return False
 
 
 def main():
@@ -1564,42 +1618,57 @@ def main():
     print("=" * 70)
     
     try:
-        # 如果没有配置文件，创建示例配置
-        if not Path('config.json').exists():
-            create_sample_config()
+        # 先解析命令行参数以获取配置文件路径
+        import argparse
+        parser = argparse.ArgumentParser(add_help=False)
+        parser.add_argument('--config', '-c', type=str, default='config.json')
+        args, _ = parser.parse_known_args()
+        config_file_path = args.config
+        
+        # 如果指定的配置文件不存在，创建示例配置
+        if not Path(config_file_path).exists():
+            print(f"配置文件不存在: {config_file_path}")
+            if create_sample_config(config_file_path):
+                print(f"请编辑 {config_file_path} 文件并重新运行程序")
             return
         
         # 加载配置
         config = ConfigManager.create_config()
         
-        # 验证文件
-        file_path = Path(config.file_path)
-        if not file_path.exists():
-            print(f"错误: 文件不存在 - {file_path}")
-            return
-        
-        # 读取Excel文件
-        print(f"\n正在读取文件: {file_path}")
-        try:
-            df = pd.read_excel(file_path)
-            print(f"文件读取成功，共 {len(df)} 行，{len(df.columns)} 列")
-            print(f"列名: {', '.join(df.columns.tolist())}")
-        except Exception as e:
-            print(f"文件读取失败: {e}")
-            return
-        
-        # 显示同步配置
-        print(f"\n同步配置:")
+        # 显示加载的配置信息
+        print(f"\n📋 已加载配置:")
+        print(f"  配置文件: {config_file_path}")
+        print(f"  Excel文件: {config.file_path}")
         print(f"  同步模式: {config.sync_mode.value}")
         print(f"  索引列: {config.index_column or '未指定'}")
         print(f"  批处理大小: {config.batch_size}")
+        print(f"  接口调用间隔: {config.rate_limit_delay}秒")
+        print(f"  最大重试次数: {config.max_retries}")
         print(f"  自动创建字段: {'是' if config.create_missing_fields else '否'}")
+        print(f"  日志级别: {config.log_level}")
+        
+        # 验证文件
+        file_path = Path(config.file_path)
+        if not file_path.exists():
+            print(f"\n❌ 错误: Excel文件不存在 - {file_path}")
+            print("请检查配置文件中的 file_path 参数")
+            return
+        
+        # 读取Excel文件
+        print(f"\n📖 正在读取文件: {file_path}")
+        try:
+            df = pd.read_excel(file_path)
+            print(f"✅ 文件读取成功，共 {len(df)} 行，{len(df.columns)} 列")
+            print(f"📊 列名: {', '.join(df.columns.tolist())}")
+        except Exception as e:
+            print(f"❌ 文件读取失败: {e}")
+            return
         
         # 创建同步引擎
         sync_engine = XTFSyncEngine(config)
         
         # 执行同步
-        print(f"\n开始执行 {config.sync_mode.value} 同步...")
+        print(f"\n🚀 开始执行 {config.sync_mode.value} 同步...")
         start_time = time.time()
         
         success = sync_engine.sync(df)
@@ -1610,7 +1679,7 @@ def main():
         if success:
             print(f"\n✅ 同步完成！耗时: {duration:.2f} 秒")
         else:
-            print(f"\n❌ 同步过程中出现错误，请查看日志")
+            print(f"\n❌ 同步过程中出现错误，请查看日志文件")
             
     except KeyboardInterrupt:
         print("\n\n⚠️  用户中断操作")
