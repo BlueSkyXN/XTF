@@ -1,0 +1,133 @@
+name: Build with Nuitka
+
+on:
+  # Manual trigger
+  workflow_dispatch:
+  
+  # Trigger on changes to .py files in root directory
+  push:
+    paths:
+      - '*.py'
+    branches: [ main ]
+  
+  pull_request:
+    paths:
+      - '*.py'
+    branches: [ main ]
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: macos-latest
+            arch: arm64
+            python-version: '3.11'
+            artifact-name: 'XTF-macos-arm64-nuitka'
+          - os: windows-latest
+            arch: x86
+            python-version: '3.11'
+            artifact-name: 'XTF-windows-x86-nuitka'
+          - os: ubuntu-latest
+            arch: arm64
+            python-version: '3.11'
+            artifact-name: 'XTF-linux-arm64-nuitka'
+          - os: ubuntu-latest
+            arch: x86_64
+            python-version: '3.11'
+            artifact-name: 'XTF-linux-x86-nuitka'
+    
+    runs-on: ${{ matrix.os }}
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+        # Note: GitHub Actions runners don't support ARM64 natively for cross-compilation
+        # ARM64 builds will use the default architecture of the runner
+        architecture: ${{ matrix.arch == 'x86' && 'x86' || 'x64' }}
+    
+    - name: Set up cross-compilation for ARM64 on Ubuntu
+      if: matrix.os == 'ubuntu-latest' && matrix.arch == 'arm64'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+        echo "CC=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+        echo "CXX=aarch64-linux-gnu-g++" >> $GITHUB_ENV
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install nuitka
+        pip install -r requirements.txt || pip install pandas requests openpyxl
+    
+    - name: Build with Nuitka (Windows)
+      if: matrix.os == 'windows-latest'
+      run: |
+        python -m nuitka --onefile --output-filename=XTF.exe XTF.py
+    
+    - name: Build with Nuitka (macOS)
+      if: matrix.os == 'macos-latest'
+      run: |
+        python -m nuitka --onefile --output-filename=XTF XTF.py
+    
+    - name: Build with Nuitka (Linux x86_64)
+      if: matrix.os == 'ubuntu-latest' && matrix.arch == 'x86_64'
+      run: |
+        python -m nuitka --onefile --output-filename=XTF XTF.py
+    
+    - name: Build with Nuitka (Linux ARM64)
+      if: matrix.os == 'ubuntu-latest' && matrix.arch == 'arm64'
+      run: |
+        # For ARM64 cross-compilation, we need to use specific flags
+        python -m nuitka --onefile --output-filename=XTF --target-arch=aarch64 XTF.py
+    
+    - name: Create artifact directory
+      run: |
+        mkdir -p artifacts
+    
+    - name: Copy executable to artifacts (Windows)
+      if: matrix.os == 'windows-latest'
+      run: |
+        copy XTF.exe artifacts/
+        copy config.example.json artifacts/
+    
+    - name: Copy executable to artifacts (Unix)
+      if: matrix.os != 'windows-latest'
+      run: |
+        cp XTF artifacts/
+        cp config.example.json artifacts/
+        chmod +x artifacts/XTF
+    
+    - name: Create README for artifact
+      run: |
+        cat > artifacts/README.md << 'EOF'
+        # XTF - Excel To Feishu Sync Tool
+        
+        Built with Nuitka for ${{ matrix.os }}-${{ matrix.arch }}
+        
+        ## Usage
+        1. Copy config.example.json to config.json
+        2. Edit config.json with your Feishu app credentials
+        3. Run the executable:
+           - Windows: `XTF.exe`
+           - macOS/Linux: `./XTF`
+        
+        ## Build Information
+        - OS: ${{ matrix.os }}
+        - Architecture: ${{ matrix.arch }}
+        - Python Version: ${{ matrix.python-version }}
+        - Build Tool: Nuitka
+        - Build Date: $(date)
+        - Commit SHA: ${{ github.sha }}
+        EOF
+    
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ matrix.artifact-name }}
+        path: artifacts/
+        retention-days: 30
