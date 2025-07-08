@@ -61,12 +61,19 @@ pip install pandas requests uuid datetime pathlib
 
 ### 2. 配置文件
 
+#### 默认配置文件
 复制 `config.example.json` 为 `config.json`：
 ```bash
 cp config.example.json config.json
 ```
 
-编辑 `config.json`，填入实际参数：
+#### 自定义配置文件
+也可以创建自定义配置文件并通过 `--config` 参数指定：
+```bash
+python XTF.py --config my_config.json
+```
+
+编辑配置文件，填入实际参数：
 ```json
 {
   "file_path": "你的Excel文件.xlsx",
@@ -84,11 +91,27 @@ cp config.example.json config.json
 }
 ```
 
+### 3. 参数优先级
+
+XTF 使用以下参数优先级规则（**从低到高**）：
+1. **默认值** - 代码中的内置默认值
+2. **配置文件** - 从配置文件读取的参数
+3. **命令行参数** - 通过命令行指定的参数（最高优先级）
+
+这意味着：
+- 配置文件参数会覆盖默认值
+- 命令行参数会覆盖配置文件参数
+- 只有明确指定的命令行参数才会覆盖配置文件，未指定的保持配置文件值
+
 ## 🚀 使用方法
 
 ### 基础用法
 ```bash
+# 使用默认配置文件 (config.json)
 python XTF.py
+
+# 使用自定义配置文件
+python XTF.py --config my_config.json
 ```
 
 ### 命令行参数
@@ -99,11 +122,28 @@ python XTF.py --file-path data.xlsx --sync-mode incremental
 # 指定索引列
 python XTF.py --index-column "员工ID" --sync-mode full
 
-# 性能调优
-python XTF.py --batch-size 1000 --rate-limit-delay 0.3
+# 指定自定义配置文件
+python XTF.py --config production.json --sync-mode full
 
-# 调试模式
-python XTF.py --log-level DEBUG
+### 配置文件与命令行混合使用示例
+
+```bash
+# 使用配置文件设置基础参数，命令行覆盖特定参数
+python XTF.py --config prod.json --sync-mode incremental --batch-size 1000
+
+# 使用不同配置文件进行测试
+python XTF.py --config test.json --log-level DEBUG --batch-size 10
+
+# 临时覆盖配置文件中的性能参数
+python XTF.py --rate-limit-delay 0.1 --max-retries 5
+```
+
+### 自动创建配置文件
+
+如果指定的配置文件不存在，XTF会自动创建示例配置文件：
+```bash
+# 自动创建 my_config.json 示例配置文件
+python XTF.py --config my_config.json
 ```
 
 ### 完整参数列表
@@ -112,19 +152,31 @@ python XTF.py --help
 ```
 
 **主要参数说明:**
+
+**配置文件参数** (可在配置文件中设置，也可通过命令行覆盖)：
 - `--file-path`: Excel文件路径
 - `--sync-mode`: 同步模式 (full/incremental/overwrite/clone)
 - `--index-column`: 索引列名称
 - `--batch-size`: 批处理大小 (默认500)
 - `--rate-limit-delay`: API调用间隔秒数 (默认0.5)
 - `--max-retries`: 最大重试次数 (默认3)
-- `--log-level`: 日志级别 (DEBUG/INFO/WARNING/ERROR)
+- `--create-missing-fields`: 是否自动创建缺失字段 (默认true)
+- `--log-level`: 日志级别 (DEBUG/INFO/WARNING/ERROR，默认INFO)
+
+**命令行专用参数**：
+- `--config`: 指定配置文件路径 (默认config.json)
+
+**参数优先级说明**：
+- 默认值 < 配置文件 < 命令行参数
+- 只有明确指定的命令行参数才会覆盖配置文件值
+- 未指定的命令行参数保持配置文件或默认值
 
 ## 📊 同步模式详解
 
 ### 🔄 全量同步 (推荐)
 ```bash
 python XTF.py --sync-mode full --index-column "ID"
+# 或在配置文件中设置 "sync_mode": "full"
 ```
 - 根据索引列比对数据
 - 已存在的记录：更新内容
@@ -134,6 +186,7 @@ python XTF.py --sync-mode full --index-column "ID"
 ### ➕ 增量同步
 ```bash
 python XTF.py --sync-mode incremental --index-column "ID"
+# 或在配置文件中设置 "sync_mode": "incremental"
 ```
 - 根据索引列过滤数据
 - 已存在的记录：跳过
@@ -143,6 +196,7 @@ python XTF.py --sync-mode incremental --index-column "ID"
 ### 🔄 覆盖同步
 ```bash
 python XTF.py --sync-mode overwrite --index-column "ID"
+# 或在配置文件中设置 "sync_mode": "overwrite"
 ```
 - 删除远程表中索引值匹配的记录
 - 新增本地的全部记录
@@ -151,6 +205,7 @@ python XTF.py --sync-mode overwrite --index-column "ID"
 ### 🔄 克隆同步
 ```bash
 python XTF.py --sync-mode clone
+# 或在配置文件中设置 "sync_mode": "clone"
 ```
 - 清空远程表格全部数据
 - 新增本地的全部记录
@@ -195,32 +250,6 @@ XTF 智能识别并转换以下字段类型：
 - **WARNING**: 警告信息
 - **ERROR**: 错误信息
 
-### 查看日志
-```bash
-# 查看最新日志
-ls -la logs/
-tail -f logs/xtf_20241208_143022.log
-```
-
-## ⚡ 性能优化建议
-
-### 大数据量处理
-```bash
-# 增加批处理大小
-python XTF.py --batch-size 1000
-
-# 减少API调用间隔
-python XTF.py --rate-limit-delay 0.3
-```
-
-### 网络不稳定环境
-```bash
-# 增加重试次数
-python XTF.py --max-retries 5
-
-# 增加API调用间隔
-python XTF.py --rate-limit-delay 1.0
-```
 
 ## 🚨 注意事项
 
@@ -240,33 +269,50 @@ python XTF.py --rate-limit-delay 1.0
 - 建议先在测试环境验证
 - 重要数据请提前备份
 
-## 🔧 故障排除
+## 🔍 故障排查流程
 
-### 常见错误
+1. **检查配置文件**
+   ```bash
+   # 验证配置文件格式正确
+   python -c "import json; print(json.load(open('config.json')))"
+   ```
 
-**1. 认证失败**
-```
-错误: 获取访问令牌失败
-解决: 检查app_id和app_secret是否正确
-```
+2. **验证网络连接**
+   ```bash
+   # 测试与飞书API的连接
+   curl -v https://open.feishu.cn/open-apis/auth/v3/app_access_token/internal
+   ```
 
-**2. 表格不存在**
-```
-错误: app_token错误
-解决: 确认app_token和table_id是否正确
-```
+3. **检查API权限**
+   ```bash
+   # 程序会输出权限错误信息
+   python XTF.py --log-level DEBUG
+   ```
 
-**3. 权限不足**
-```
-错误: Permission denied
-解决: 确保应用有多维表格的管理权限
-```
+4. **故障隔离**
+   ```bash
+   # 使用最小数据集测试
+   head -n 10 data.xlsx > test.xlsx
+   python XTF.py --file-path test.xlsx --batch-size 2
+   ```
 
-**4. 字段类型错误**
-```
-错误: 字段类型转换失败
-解决: 检查Excel数据格式，确保与目标字段类型匹配
-```
+5. **查看详细日志**
+   ```bash
+   # 查找错误
+   grep -i error logs/xtf_*.log
+   
+   # 查找警告
+   grep -i warning logs/xtf_*.log
+   
+   # 查看API响应
+   grep -A 10 "API响应" logs/xtf_*.log
+   ```
+
+6. **调试类型转换问题**
+   ```bash
+   # 开启DEBUG级别日志查看数据转换过程
+   python XTF.py --log-level DEBUG | grep "转换"
+   ```
 
 ### 调试方法
 ```bash
@@ -276,19 +322,36 @@ python XTF.py --log-level DEBUG
 # 小批量测试
 python XTF.py --batch-size 10
 
+# 使用测试配置文件
+python XTF.py --config test_config.json --log-level DEBUG --batch-size 10
+
 # 查看完整错误信息
 cat logs/xtf_*.log | grep ERROR
 ```
 
-## 🔄 版本历史
+## 🔧 配置文件管理
 
-### v1.0.0
-- ✨ 支持四种同步模式
-- ✨ 智能字段类型转换
-- ✨ 企业级错误处理和重试机制
-- ✨ 性能优化和批处理
-- ✨ 详细日志和进度跟踪
+### 多环境配置
+```bash
+# 开发环境
+python XTF.py --config dev.json
 
----
+# 测试环境
+python XTF.py --config test.json
 
-**XTF** - 让Excel与飞书多维表格同步更智能、更高效！ 🚀
+# 生产环境
+python XTF.py --config prod.json
+```
+
+### 配置文件自动生成
+```bash
+# 生成默认配置文件
+python XTF.py --config my_config.json
+# 程序会自动创建 my_config.json 示例文件并退出
+
+# 然后编辑配置文件
+nano my_config.json
+
+# 使用配置文件运行
+python XTF.py --config my_config.json
+```
