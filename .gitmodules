@@ -1,0 +1,3 @@
+[submodule "docs/feishu-openapi-doc "]
+	path = docs/feishu-openapi-doc 
+	url = https://github.com/BlueSkyXN/Feishu_OpenAPI_DOC.git
