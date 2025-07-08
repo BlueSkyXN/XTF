@@ -145,10 +145,15 @@ class FeishuAPIClient:
         }
         
         response = self.api_client.call_api("POST", url, headers=headers, json=data)
-        result = response.json()
+        
+        try:
+            result = response.json()
+        except json.JSONDecodeError as e:
+            raise Exception(f"获取访问令牌响应解析失败: {e}, HTTP状态码: {response.status_code}")
         
         if result.get("code") != 0:
-            raise Exception(f"获取访问令牌失败: {result.get('msg')}")
+            error_msg = result.get('msg', '未知错误')
+            raise Exception(f"获取访问令牌失败: 错误码 {result.get('code')}, 错误信息: {error_msg}")
         
         self.tenant_access_token = result["tenant_access_token"]
         # 设置过期时间（提前5分钟刷新）
@@ -180,10 +185,15 @@ class FeishuAPIClient:
                 params["page_token"] = page_token
             
             response = self.api_client.call_api("GET", url, headers=headers, params=params)
-            result = response.json()
+            
+            try:
+                result = response.json()
+            except json.JSONDecodeError as e:
+                raise Exception(f"获取字段列表响应解析失败: {e}, HTTP状态码: {response.status_code}")
             
             if result.get("code") != 0:
-                raise Exception(f"获取字段列表失败: {result.get('msg')}")
+                error_msg = result.get('msg', '未知错误')
+                raise Exception(f"获取字段列表失败: 错误码 {result.get('code')}, 错误信息: {error_msg}")
             
             data = result.get("data", {})
             all_fields.extend(data.get("items", []))
@@ -204,10 +214,16 @@ class FeishuAPIClient:
         }
         
         response = self.api_client.call_api("POST", url, headers=headers, json=data)
-        result = response.json()
+        
+        try:
+            result = response.json()
+        except json.JSONDecodeError as e:
+            self.logger.error(f"创建字段 '{field_name}' 响应解析失败: {e}, HTTP状态码: {response.status_code}")
+            return False
         
         if result.get("code") != 0:
-            self.logger.error(f"创建字段 '{field_name}' 失败: {result.get('msg')}")
+            error_msg = result.get('msg', '未知错误')
+            self.logger.error(f"创建字段 '{field_name}' 失败: 错误码 {result.get('code')}, 错误信息: {error_msg}")
             return False
         
         self.logger.info(f"创建字段 '{field_name}' 成功")
@@ -228,10 +244,15 @@ class FeishuAPIClient:
         data = {}
         
         response = self.api_client.call_api("POST", url, headers=headers, params=params, json=data)
-        result = response.json()
+        
+        try:
+            result = response.json()
+        except json.JSONDecodeError as e:
+            raise Exception(f"搜索记录响应解析失败: {e}, HTTP状态码: {response.status_code}")
         
         if result.get("code") != 0:
-            raise Exception(f"搜索记录失败: {result.get('msg')}")
+            error_msg = result.get('msg', '未知错误')
+            raise Exception(f"搜索记录失败: 错误码 {result.get('code')}, 错误信息: {error_msg}")
         
         result_data = result.get("data", {})
         records = result_data.get("items", [])
@@ -269,12 +290,23 @@ class FeishuAPIClient:
         data = {"records": records}
         
         response = self.api_client.call_api("POST", url, headers=headers, params=params, json=data)
-        result = response.json()
         
-        if result.get("code") != 0:
-            self.logger.error(f"批量创建记录失败: {result.get('msg')}")
+        try:
+            result = response.json()
+        except json.JSONDecodeError as e:
+            self.logger.error(f"批量创建记录响应解析失败: {e}, HTTP状态码: {response.status_code}")
+            self.logger.debug(f"响应内容: {response.text[:500]}")
             return False
         
+        if result.get("code") != 0:
+            error_msg = result.get('msg', '未知错误')
+            self.logger.error(f"批量创建记录失败: 错误码 {result.get('code')}, 错误信息: {error_msg}")
+            # 记录详细的调试信息
+            self.logger.debug(f"创建失败的记录数量: {len(records)}")
+            self.logger.debug(f"API响应: {result}")
+            return False
+        
+        self.logger.debug(f"成功创建 {len(records)} 条记录")
         return True
     
     def batch_update_records(self, app_token: str, table_id: str, records: List[Dict]) -> bool:
@@ -291,12 +323,23 @@ class FeishuAPIClient:
         data = {"records": records}
         
         response = self.api_client.call_api("POST", url, headers=headers, params=params, json=data)
-        result = response.json()
         
-        if result.get("code") != 0:
-            self.logger.error(f"批量更新记录失败: {result.get('msg')}")
+        try:
+            result = response.json()
+        except json.JSONDecodeError as e:
+            self.logger.error(f"批量更新记录响应解析失败: {e}, HTTP状态码: {response.status_code}")
+            self.logger.debug(f"响应内容: {response.text[:500]}")
             return False
         
+        if result.get("code") != 0:
+            error_msg = result.get('msg', '未知错误')
+            self.logger.error(f"批量更新记录失败: 错误码 {result.get('code')}, 错误信息: {error_msg}")
+            # 记录详细的调试信息
+            self.logger.debug(f"更新失败的记录数量: {len(records)}")
+            self.logger.debug(f"API响应: {result}")
+            return False
+        
+        self.logger.debug(f"成功更新 {len(records)} 条记录")
         return True
     
     def batch_delete_records(self, app_token: str, table_id: str, record_ids: List[str]) -> bool:
@@ -306,12 +349,23 @@ class FeishuAPIClient:
         data = {"records": record_ids}
         
         response = self.api_client.call_api("POST", url, headers=headers, json=data)
-        result = response.json()
         
-        if result.get("code") != 0:
-            self.logger.error(f"批量删除记录失败: {result.get('msg')}")
+        try:
+            result = response.json()
+        except json.JSONDecodeError as e:
+            self.logger.error(f"批量删除记录响应解析失败: {e}, HTTP状态码: {response.status_code}")
+            self.logger.debug(f"响应内容: {response.text[:500]}")
             return False
         
+        if result.get("code") != 0:
+            error_msg = result.get('msg', '未知错误')
+            self.logger.error(f"批量删除记录失败: 错误码 {result.get('code')}, 错误信息: {error_msg}")
+            # 记录详细的调试信息
+            self.logger.debug(f"删除失败的记录数量: {len(record_ids)}")
+            self.logger.debug(f"API响应: {result}")
+            return False
+        
+        self.logger.debug(f"成功删除 {len(record_ids)} 条记录")
         return True
 
 
@@ -330,6 +384,13 @@ class XTFSyncEngine:
         self.setup_logging()
         self.logger = logging.getLogger(__name__)
         
+        # 添加类型转换统计
+        self.conversion_stats = {
+            'success': 0,
+            'failed': 0,
+            'warnings': []
+        }
+    
     def setup_logging(self):
         """设置日志"""
         log_dir = Path('logs')
@@ -389,16 +450,27 @@ class XTFSyncEngine:
                 if missing_fields:
                     self.logger.info(f"需要创建 {len(missing_fields)} 个缺失字段: {', '.join(missing_fields)}")
                     
+                    # 分析每个缺失字段的数据特征并创建合适类型的字段
                     for field_name in missing_fields:
+                        analysis = self.analyze_excel_column_data(df, field_name)
+                        suggested_type = analysis['suggested_feishu_type']
+                        confidence = analysis['confidence']
+                        
+                        self.logger.info(f"字段 '{field_name}': {analysis['analysis']}, "
+                                       f"建议类型: {self._get_field_type_name(suggested_type)} "
+                                       f"(置信度: {confidence:.1%})")
+                        
                         success = self.api_client.create_field(
                             self.config.app_token, 
                             self.config.table_id, 
-                            field_name
+                            field_name,
+                            suggested_type
                         )
                         if not success:
                             return False, field_types
-                        # 新创建的字段默认为文本类型
-                        field_types[field_name] = 1
+                        
+                        # 记录新创建字段的类型
+                        field_types[field_name] = suggested_type
                     
                     # 等待字段创建完成
                     time.sleep(2)
@@ -410,6 +482,15 @@ class XTFSyncEngine:
         except Exception as e:
             self.logger.error(f"字段检查失败: {e}")
             return False, {}
+    
+    def _get_field_type_name(self, field_type: int) -> str:
+        """获取字段类型的中文名称"""
+        type_names = {
+            1: "文本", 2: "数字", 3: "单选", 4: "多选", 5: "日期", 
+            7: "复选框", 11: "人员", 13: "电话", 15: "超链接", 
+            17: "附件", 18: "单向关联", 21: "双向关联", 22: "地理位置", 23: "群组"
+        }
+        return type_names.get(field_type, f"未知类型({field_type})")
     
     def get_index_value_hash(self, row: pd.Series) -> str:
         """计算索引值的哈希"""
@@ -433,60 +514,368 @@ class XTFSyncEngine:
         
         return index
     
-    def convert_field_value(self, field_name: str, value, field_types: Dict[str, int] = None):
-        """根据字段类型转换数值"""
+    def analyze_excel_column_data(self, df: pd.DataFrame, column_name: str) -> Dict[str, Any]:
+        """分析Excel列的数据特征，用于推断合适的飞书字段类型"""
+        column_data = df[column_name].dropna()
+        total_count = len(column_data)
+        
+        if total_count == 0:
+            return {
+                'primary_type': 'string',
+                'suggested_feishu_type': 1,  # 文本
+                'confidence': 0.5,
+                'analysis': '列为空，默认文本类型'
+            }
+        
+        # 数据类型统计
+        type_stats = {
+            'string': 0,
+            'number': 0,
+            'datetime': 0,
+            'boolean': 0
+        }
+        
+        unique_values = set()
+        for value in column_data:
+            unique_values.add(str(value))
+            
+            # 数值检测
+            if isinstance(value, (int, float)):
+                type_stats['number'] += 1
+            elif isinstance(value, str):
+                str_val = str(value).strip()
+                # 布尔值检测
+                if str_val.lower() in ['true', 'false', '是', '否', 'yes', 'no', '1', '0', 'on', 'off']:
+                    type_stats['boolean'] += 1
+                # 数字检测
+                elif self._is_number_string(str_val):
+                    type_stats['number'] += 1
+                # 时间戳检测
+                elif self._is_timestamp_string(str_val):
+                    type_stats['datetime'] += 1
+                # 日期格式检测
+                elif self._is_date_string(str_val):
+                    type_stats['datetime'] += 1
+                else:
+                    type_stats['string'] += 1
+            else:
+                type_stats['string'] += 1
+        
+        # 计算主要类型
+        primary_type = max(type_stats, key=type_stats.get)
+        confidence = type_stats[primary_type] / total_count
+        
+        # 推断飞书字段类型
+        suggested_type = self._suggest_feishu_field_type(
+            primary_type, unique_values, total_count, confidence
+        )
+        
+        return {
+            'primary_type': primary_type,
+            'suggested_feishu_type': suggested_type,
+            'confidence': confidence,
+            'unique_count': len(unique_values),
+            'total_count': total_count,
+            'type_distribution': type_stats,
+            'analysis': f'{primary_type}类型占比{confidence:.1%}'
+        }
+    
+    def _is_number_string(self, s: str) -> bool:
+        """检测字符串是否为数字"""
+        try:
+            float(s.replace(',', ''))  # 支持千分位分隔符
+            return True
+        except ValueError:
+            return False
+    
+    def _is_timestamp_string(self, s: str) -> bool:
+        """检测字符串是否为时间戳"""
+        if not s.isdigit():
+            return False
+        try:
+            timestamp = int(s)
+            # 检查是否是合理的时间戳范围（1970年到2100年）
+            return 0 <= timestamp <= 4102444800 or 0 <= timestamp <= 4102444800000
+        except ValueError:
+            return False
+    
+    def _is_date_string(self, s: str) -> bool:
+        """检测字符串是否为日期格式"""
+        date_patterns = [
+            r'\d{4}-\d{1,2}-\d{1,2}',  # 2024-01-01
+            r'\d{4}/\d{1,2}/\d{1,2}',  # 2024/01/01
+            r'\d{1,2}/\d{1,2}/\d{4}',  # 01/01/2024
+            r'\d{4}-\d{1,2}-\d{1,2} \d{1,2}:\d{1,2}:\d{1,2}',  # 2024-01-01 12:00:00
+        ]
+        import re
+        for pattern in date_patterns:
+            if re.match(pattern, s):
+                return True
+        return False
+    
+    def _suggest_feishu_field_type(self, primary_type: str, unique_values: set, 
+                                  total_count: int, confidence: float) -> int:
+        """根据数据特征推荐飞书字段类型"""
+        unique_count = len(unique_values)
+        
+        if primary_type == 'number':
+            return 2  # 数字字段
+        elif primary_type == 'datetime':
+            return 5  # 日期字段
+        elif primary_type == 'boolean':
+            return 7  # 复选框字段
+        elif primary_type == 'string':
+            # 字符串类型的细分判断
+            if unique_count <= 20 and unique_count / total_count <= 0.5:
+                # 唯一值较少且重复率高，推荐单选
+                return 3  # 单选字段
+            elif any(',' in str(v) or ';' in str(v) or '|' in str(v) for v in unique_values):
+                # 包含分隔符，可能是多选
+                return 4  # 多选字段
+            else:
+                return 1  # 文本字段
+        
+        return 1  # 默认文本字段
+    
+    def convert_field_value_safe(self, field_name: str, value, field_types: Dict[str, int] = None):
+        """安全的字段值转换，强制转换为飞书字段类型"""
         if pd.isnull(value):
             return None
             
-        # 如果没有字段类型信息，则按数据类型智能判断
+        # 如果没有字段类型信息，使用智能转换
         if field_types is None or field_name not in field_types:
             return self.smart_convert_value(value)
         
         field_type = field_types[field_name]
         
-        # 根据飞书字段类型转换
-        if field_type == 1:  # 文本
-            return str(value)
-        elif field_type == 2:  # 数字
-            try:
-                # 先尝试转为整数，再尝试浮点数
-                if isinstance(value, (int, float)):
-                    return value
-                str_val = str(value).strip()
-                if '.' in str_val:
-                    return float(str_val)
-                return int(str_val)
-            except (ValueError, TypeError):
-                return str(value)  # 转换失败时保持字符串
-        elif field_type == 5:  # 日期
-            return self.convert_to_timestamp(value)
-        elif field_type == 7:  # 复选框
-            return self.convert_to_boolean(value)
-        elif field_type == 3:  # 单选
-            return str(value)
-        elif field_type == 4:  # 多选
-            if isinstance(value, str):
-                # 如果是字符串，尝试按分隔符拆分
-                if ',' in value:
-                    return [v.strip() for v in value.split(',') if v.strip()]
-                elif ';' in value:
-                    return [v.strip() for v in value.split(';') if v.strip()]
-                elif '|' in value:
-                    return [v.strip() for v in value.split('|') if v.strip()]
-                else:
-                    return [str(value)]
-            elif isinstance(value, (list, tuple)):
-                return [str(v) for v in value if v]
+        # 强制转换为目标类型，按飞书字段类型进行转换
+        try:
+            converted_value = self._force_convert_to_feishu_type(value, field_name, field_type)
+            if converted_value is not None:
+                self.conversion_stats['success'] += 1
+                return converted_value
             else:
-                return [str(value)]
-        elif field_type == 13:  # 电话号码
+                self.conversion_stats['failed'] += 1
+                return None
+        except Exception as e:
+            self.logger.warning(f"字段 '{field_name}' 强制转换失败: {e}, 原始值: '{value}'")
+            self.conversion_stats['failed'] += 1
+            return None
+    
+    def _force_convert_to_feishu_type(self, value, field_name: str, field_type: int):
+        """强制转换值为指定的飞书字段类型"""
+        
+        if field_type == 1:  # 文本字段 - 所有值都可以转换为文本
             return str(value)
-        elif field_type == 22:  # 地理位置
+            
+        elif field_type == 2:  # 数字字段 - 强制转换为数字
+            return self._force_to_number(value, field_name)
+            
+        elif field_type == 3:  # 单选字段 - 转换为单个字符串
+            return self._force_to_single_choice(value, field_name)
+            
+        elif field_type == 4:  # 多选字段 - 转换为字符串数组
+            return self._force_to_multi_choice(value, field_name)
+            
+        elif field_type == 5:  # 日期字段 - 强制转换为时间戳
+            return self._force_to_timestamp(value, field_name)
+            
+        elif field_type == 7:  # 复选框字段 - 强制转换为布尔值
+            return self._force_to_boolean(value, field_name)
+            
+        elif field_type == 11:  # 人员字段
+            return self.convert_to_user_field(value)
+            
+        elif field_type == 13:  # 电话号码字段
             return str(value)
+            
+        elif field_type == 15:  # 超链接字段
+            return self.convert_to_url_field(value)
+            
+        elif field_type == 17:  # 附件字段
+            return self.convert_to_attachment_field(value)
+            
+        elif field_type in [18, 21]:  # 关联字段
+            return self.convert_to_link_field(value)
+            
+        elif field_type == 22:  # 地理位置字段
+            return str(value)
+            
+        elif field_type == 23:  # 群组字段
+            return self.convert_to_user_field(value)
+            
+        elif field_type in [19, 20, 1001, 1002, 1003, 1004, 1005]:  # 只读字段
+            self.logger.debug(f"字段 '{field_name}' 是只读字段，跳过设置")
+            return None
+            
         else:
-            # 其他类型默认转为字符串
+            # 未知类型，默认转为字符串
             return str(value)
     
+    def _force_to_number(self, value, field_name: str):
+        """强制转换为数字，处理各种异常情况"""
+        if isinstance(value, (int, float)):
+            return value
+        
+        if isinstance(value, str):
+            str_val = value.strip()
+            
+            # 处理空字符串
+            if not str_val:
+                return None
+                
+            # 处理常见的非数字表示
+            non_numeric_map = {
+                'null': None, 'n/a': None, 'na': None, '无': None, '空': None,
+                '待定': None, 'tbd': None, 'pending': None, '未知': None,
+            }
+            if str_val.lower() in non_numeric_map:
+                return non_numeric_map[str_val.lower()]
+            
+            # 清理数字字符串
+            cleaned = str_val.replace(',', '').replace('￥', '').replace('$', '').replace('%', '')
+            
+            try:
+                # 尝试转换为数字
+                if '.' in cleaned:
+                    return float(cleaned)
+                return int(cleaned)
+            except ValueError:
+                # 如果包含文字，尝试提取数字部分
+                import re
+                numbers = re.findall(r'-?\d+\.?\d*', cleaned)
+                if numbers:
+                    try:
+                        num = float(numbers[0]) if '.' in numbers[0] else int(numbers[0])
+                        self.logger.warning(f"字段 '{field_name}': 从 '{value}' 中提取数字 {num}")
+                        return num
+                    except ValueError:
+                        pass
+                
+                # 完全无法转换时，记录警告并返回None
+                self.logger.warning(f"字段 '{field_name}': 无法将 '{value}' 转换为数字，将忽略此值")
+                return None
+        
+        # 其他类型尝试直接转换
+        try:
+            return float(value)
+        except (ValueError, TypeError):
+            self.logger.warning(f"字段 '{field_name}': 无法将 {type(value).__name__} '{value}' 转换为数字")
+            return None
+    
+    def _force_to_single_choice(self, value, field_name: str):
+        """强制转换为单选值"""
+        if isinstance(value, str):
+            # 如果包含分隔符，取第一个值
+            for separator in [',', ';', '|', '\n']:
+                if separator in value:
+                    first_value = value.split(separator)[0].strip()
+                    if first_value:
+                        self.logger.info(f"字段 '{field_name}': 多值转单选，选择第一个值: '{first_value}'")
+                        return first_value
+            return value.strip()
+        
+        return str(value)
+    
+    def _force_to_multi_choice(self, value, field_name: str):
+        """强制转换为多选值数组"""
+        if isinstance(value, str):
+            # 尝试按分隔符拆分
+            for separator in [',', ';', '|', '\n']:
+                if separator in value:
+                    values = [v.strip() for v in value.split(separator) if v.strip()]
+                    return values if values else [str(value)]
+            return [value.strip()] if value.strip() else []
+        elif isinstance(value, (list, tuple)):
+            return [str(v) for v in value if v]
+        else:
+            return [str(value)]
+    
+    def _force_to_timestamp(self, value, field_name: str):
+        """强制转换为时间戳，增强日期解析能力"""
+        # 如果已经是数字时间戳
+        if isinstance(value, (int, float)):
+            if value > 2524608000:  # 毫秒级
+                return int(value)
+            elif value > 946684800:  # 秒级，转为毫秒级
+                return int(value * 1000)
+            else:
+                self.logger.warning(f"字段 '{field_name}': 数字 {value} 不在有效时间戳范围内")
+                return None
+        
+        if isinstance(value, str):
+            str_val = value.strip()
+            
+            # 处理纯数字字符串时间戳
+            if str_val.isdigit():
+                return self._force_to_timestamp(int(str_val), field_name)
+            
+            # 处理常见的非日期表示
+            if str_val.lower() in ['null', 'n/a', 'na', '无', '空', '待定', 'tbd']:
+                return None
+            
+            # 尝试解析各种日期格式
+            import datetime as dt
+            date_formats = [
+                '%Y-%m-%d %H:%M:%S',
+                '%Y-%m-%d',
+                '%Y/%m/%d %H:%M:%S',
+                '%Y/%m/%d',
+                '%m/%d/%Y',
+                '%d/%m/%Y',
+                '%Y年%m月%d日',
+                '%m月%d日',
+                '%Y-%m-%d %H:%M',
+                '%Y/%m/%d %H:%M'
+            ]
+            
+            for fmt in date_formats:
+                try:
+                    dt_obj = dt.datetime.strptime(str_val, fmt)
+                    return int(dt_obj.timestamp() * 1000)
+                except ValueError:
+                    continue
+            
+            # 如果都解析失败，记录警告
+            self.logger.warning(f"字段 '{field_name}': 无法解析日期格式 '{value}'，将忽略此值")
+            return None
+        
+        # 处理pandas时间戳
+        if hasattr(value, 'timestamp'):
+            return int(value.timestamp() * 1000)
+        
+        self.logger.warning(f"字段 '{field_name}': 无法将 {type(value).__name__} '{value}' 转换为时间戳")
+        return None
+    
+    def _force_to_boolean(self, value, field_name: str):
+        """强制转换为布尔值"""
+        if isinstance(value, bool):
+            return value
+        
+        if isinstance(value, (int, float)):
+            return bool(value)
+        
+        if isinstance(value, str):
+            str_val = value.strip().lower()
+            
+            # 真值映射
+            true_values = ['true', '是', 'yes', '1', 'on', 'checked', '对', '正确', 'ok', 'y']
+            # 假值映射
+            false_values = ['false', '否', 'no', '0', 'off', 'unchecked', '', '错', '错误', 'n']
+            
+            if str_val in true_values:
+                return True
+            elif str_val in false_values:
+                return False
+            else:
+                # 如果无法识别，按内容长度判断（非空为真）
+                result = len(str_val) > 0
+                self.logger.warning(f"字段 '{field_name}': 无法识别布尔值 '{value}'，按非空规则转换为 {result}")
+                return result
+        
+        # 其他类型按Python的bool()规则转换
+        return bool(value)
+
     def smart_convert_value(self, value):
         """智能转换数值类型（当没有字段类型信息时）"""
         if isinstance(value, bool):
@@ -581,6 +970,104 @@ class XTFSyncEngine:
                 return False
         return bool(value)
 
+    def convert_to_user_field(self, value):
+        """转换为人员字段格式"""
+        if pd.isnull(value) or not value:
+            return None
+        
+        # 如果已经是正确的字典格式
+        if isinstance(value, dict) and 'id' in value:
+            return [value]
+        elif isinstance(value, list):
+            # 如果是列表，检查每个元素
+            result = []
+            for item in value:
+                if isinstance(item, dict) and 'id' in item:
+                    result.append(item)
+                elif isinstance(item, str) and item.strip():
+                    result.append({"id": item.strip()})
+            return result if result else None
+        elif isinstance(value, str):
+            # 字符串格式，可能是用户ID或多个用户ID用分隔符分开
+            user_ids = []
+            if ',' in value:
+                user_ids = [uid.strip() for uid in value.split(',') if uid.strip()]
+            elif ';' in value:
+                user_ids = [uid.strip() for uid in value.split(';') if uid.strip()]
+            else:
+                user_ids = [value.strip()] if value.strip() else []
+            
+            return [{"id": uid} for uid in user_ids] if user_ids else None
+        
+        return None
+    
+    def convert_to_url_field(self, value):
+        """转换为超链接字段格式"""
+        if pd.isnull(value) or not value:
+            return None
+        
+        # 如果已经是正确的字典格式
+        if isinstance(value, dict) and 'link' in value:
+            return value
+        elif isinstance(value, str):
+            # 简单URL字符串
+            url_str = value.strip()
+            if url_str.startswith(('http://', 'https://')):
+                return {
+                    "text": url_str,
+                    "link": url_str
+                }
+            else:
+                # 不是有效URL，作为文本处理
+                return str(value)
+        
+        return str(value)
+    
+    def convert_to_attachment_field(self, value):
+        """转换为附件字段格式"""
+        if pd.isnull(value) or not value:
+            return None
+        
+        # 如果已经是正确的字典格式
+        if isinstance(value, dict) and 'file_token' in value:
+            return [value]
+        elif isinstance(value, list):
+            result = []
+            for item in value:
+                if isinstance(item, dict) and 'file_token' in item:
+                    result.append(item)
+                elif isinstance(item, str) and item.strip():
+                    result.append({"file_token": item.strip()})
+            return result if result else None
+        elif isinstance(value, str):
+            # 字符串格式，可能是file_token
+            token = value.strip()
+            return [{"file_token": token}] if token else None
+        
+        return None
+    
+    def convert_to_link_field(self, value):
+        """转换为关联字段格式"""
+        if pd.isnull(value) or not value:
+            return None
+        
+        # 如果已经是列表格式
+        if isinstance(value, list):
+            return [str(item) for item in value if item]
+        elif isinstance(value, str):
+            # 字符串格式，可能是record_id或多个record_id用分隔符分开
+            record_ids = []
+            if ',' in value:
+                record_ids = [rid.strip() for rid in value.split(',') if rid.strip()]
+            elif ';' in value:
+                record_ids = [rid.strip() for rid in value.split(';') if rid.strip()]
+            else:
+                record_ids = [value.strip()] if value.strip() else []
+            
+            return record_ids if record_ids else None
+        
+        return [str(value)] if value else None
+
     def df_to_records(self, df: pd.DataFrame, field_types: Dict[str, int] = None) -> List[Dict]:
         """将DataFrame转换为飞书记录格式"""
         records = []
@@ -588,7 +1075,7 @@ class XTFSyncEngine:
             fields = {}
             for k, v in row.to_dict().items():
                 if pd.notnull(v):
-                    converted_value = self.convert_field_value(str(k), v, field_types)
+                    converted_value = self.convert_field_value_safe(str(k), v, field_types)
                     if converted_value is not None:
                         fields[str(k)] = converted_value
             
@@ -607,7 +1094,8 @@ class XTFSyncEngine:
             batch_num = i // batch_size + 1
             
             try:
-                if processor_func(batch, *args, **kwargs):
+                # 修复参数传递顺序：先传递固定参数，再传递批次数据
+                if processor_func(*args, batch, **kwargs):
                     success_count += 1
                     self.logger.info(f"批次 {batch_num}/{total_batches} 处理成功 ({len(batch)} 条记录)")
                 else:
@@ -646,7 +1134,7 @@ class XTFSyncEngine:
             fields = {}
             for k, v in row.to_dict().items():
                 if pd.notnull(v):
-                    converted_value = self.convert_field_value(str(k), v, field_types)
+                    converted_value = self.convert_field_value_safe(str(k), v, field_types)
                     if converted_value is not None:
                         fields[str(k)] = converted_value
             
@@ -711,7 +1199,7 @@ class XTFSyncEngine:
                 fields = {}
                 for k, v in row.to_dict().items():
                     if pd.notnull(v):
-                        converted_value = self.convert_field_value(str(k), v, field_types)
+                        converted_value = self.convert_field_value_safe(str(k), v, field_types)
                         if converted_value is not None:
                             fields[str(k)] = converted_value
                 
@@ -806,6 +1294,13 @@ class XTFSyncEngine:
         self.logger.info(f"开始执行 {self.config.sync_mode.value} 同步模式")
         self.logger.info(f"数据源: {len(df)} 行 x {len(df.columns)} 列")
         
+        # 重置转换统计
+        self.conversion_stats = {
+            'success': 0,
+            'failed': 0,
+            'warnings': []
+        }
+        
         # 确保字段存在并获取字段类型信息
         success, field_types = self.ensure_fields_exist(df)
         if not success:
@@ -814,18 +1309,118 @@ class XTFSyncEngine:
         
         self.logger.info(f"获取到 {len(field_types)} 个字段的类型信息")
         
+        # 显示字段类型映射摘要
+        self._show_field_analysis_summary(df, field_types)
+        
+        # 预检查：分析数据与字段类型的匹配情况
+        self.logger.info("\n🔍 正在分析数据与字段类型匹配情况...")
+        mismatch_warnings = []
+        sample_size = min(50, len(df))  # 检查前50行作为样本
+        
+        for _, row in df.head(sample_size).iterrows():
+            for col_name, value in row.to_dict().items():
+                if pd.notnull(value) and col_name in field_types:
+                    field_type = field_types[col_name]
+                    # 简单的类型不匹配检测
+                    if field_type == 2 and isinstance(value, str):  # 数字字段但是字符串值
+                        if not self._is_number_string(str(value).strip()):
+                            mismatch_warnings.append(f"字段 '{col_name}' 是数字类型，但包含非数字值: '{value}'")
+                    elif field_type == 5 and isinstance(value, str):  # 日期字段但是字符串值
+                        if not (self._is_timestamp_string(str(value)) or self._is_date_string(str(value))):
+                            mismatch_warnings.append(f"字段 '{col_name}' 是日期类型，但包含非日期值: '{value}'")
+        
+        if mismatch_warnings:
+            unique_warnings = list(set(mismatch_warnings[:10]))  # 显示前10个唯一警告
+            self.logger.warning(f"发现 {len(set(mismatch_warnings))} 种数据类型不匹配情况（样本检查）:")
+            for warning in unique_warnings:
+                self.logger.warning(f"  • {warning}")
+            self.logger.info("程序将自动进行强制类型转换...")
+        else:
+            self.logger.info("✅ 数据类型匹配良好")
+        
         # 根据同步模式执行对应操作
+        sync_result = False
         if self.config.sync_mode == SyncMode.FULL:
-            return self.sync_full(df, field_types)
+            sync_result = self.sync_full(df, field_types)
         elif self.config.sync_mode == SyncMode.INCREMENTAL:
-            return self.sync_incremental(df, field_types)
+            sync_result = self.sync_incremental(df, field_types)
         elif self.config.sync_mode == SyncMode.OVERWRITE:
-            return self.sync_overwrite(df, field_types)
+            sync_result = self.sync_overwrite(df, field_types)
         elif self.config.sync_mode == SyncMode.CLONE:
-            return self.sync_clone(df, field_types)
+            sync_result = self.sync_clone(df, field_types)
         else:
             self.logger.error(f"不支持的同步模式: {self.config.sync_mode}")
             return False
+        
+        # 输出转换统计信息
+        self.report_conversion_stats()
+        
+        return sync_result
+    
+    def report_conversion_stats(self):
+        """输出数据转换统计报告"""
+        total_conversions = self.conversion_stats['success'] + self.conversion_stats['failed']
+        
+        if total_conversions > 0:
+            success_rate = (self.conversion_stats['success'] / total_conversions) * 100
+            
+            self.logger.info("=" * 60)
+            self.logger.info("🔄 数据类型转换统计报告")
+            self.logger.info("=" * 60)
+            self.logger.info(f"📊 总转换次数: {total_conversions}")
+            self.logger.info(f"✅ 成功转换: {self.conversion_stats['success']} ({success_rate:.1f}%)")
+            self.logger.info(f"❌ 失败转换: {self.conversion_stats['failed']}")
+            
+            if self.conversion_stats['failed'] > 0:
+                failure_rate = (self.conversion_stats['failed'] / total_conversions) * 100
+                self.logger.warning(f"失败率: {failure_rate:.1f}%")
+            
+            if self.conversion_stats['warnings']:
+                warning_count = len(self.conversion_stats['warnings'])
+                self.logger.info(f"⚠️  警告数量: {warning_count}")
+                
+                # 去重并统计相同警告的数量
+                warning_counts = {}
+                for warning in self.conversion_stats['warnings']:
+                    warning_counts[warning] = warning_counts.get(warning, 0) + 1
+                
+                self.logger.info("\n⚠️  数据转换警告详情:")
+                for warning, count in warning_counts.items():
+                    self.logger.warning(f"  [{count}次] {warning}")
+            
+            self.logger.info("\n💡 优化建议:")
+            if success_rate < 90:
+                self.logger.info("1. 数据质量较低，建议清理Excel数据")
+                self.logger.info("2. 检查数据格式是否标准化")
+            if self.conversion_stats['failed'] > 0:
+                self.logger.info("3. 查看上述警告，调整数据格式或飞书字段类型")
+                self.logger.info("4. 对于无法转换的字段，考虑使用文本类型")
+            
+            self.logger.info("\n📋 字段类型转换规则:")
+            self.logger.info("• 数字字段: 自动提取数值，清理货币符号和千分位")
+            self.logger.info("• 单选字段: 多值时自动选择第一个")
+            self.logger.info("• 多选字段: 支持逗号、分号、竖线分隔")
+            self.logger.info("• 日期字段: 支持多种日期格式自动识别")
+            self.logger.info("• 布尔字段: 智能识别是/否、true/false等")
+            
+            self.logger.info("=" * 60)
+        else:
+            self.logger.info("📊 没有进行数据类型转换")
+    
+    def _show_field_analysis_summary(self, df: pd.DataFrame, field_types: Dict[str, int]):
+        """显示字段分析摘要"""
+        self.logger.info("\n📋 字段类型映射摘要:")
+        self.logger.info("-" * 50)
+        
+        for col_name in df.columns:
+            if col_name in field_types:
+                field_type = field_types[col_name]
+                type_name = self._get_field_type_name(field_type)
+                self.logger.info(f"  {col_name} → {type_name} (类型码: {field_type})")
+            else:
+                self.logger.warning(f"  {col_name} → 未知字段类型")
+                
+        self.logger.info("-" * 50)
 
 
 class ConfigManager:
