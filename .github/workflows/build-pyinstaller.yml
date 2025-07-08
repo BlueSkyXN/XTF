@@ -48,25 +48,6 @@ jobs:
         cp config.example.json artifacts/
         chmod +x artifacts/XTF
     
-    - name: Create README
-      run: |
-        cat > artifacts/README.md << 'EOF'
-        # XTF - Excel To Feishu Sync Tool
-        
-        Built with PyInstaller for macOS ARM64
-        
-        ## Usage
-        1. Copy config.example.json to config.json
-        2. Edit config.json with your Feishu app credentials
-        3. Run: `./XTF`
-        
-        ## Build Information
-        - OS: macOS
-        - Architecture: ARM64
-        - Python Version: 3.11
-        - Build Tool: PyInstaller
-        EOF
-    
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
@@ -104,23 +85,6 @@ jobs:
       run: |
         copy dist\XTF.exe artifacts\
         copy config.example.json artifacts\
-    
-    - name: Create README
-      run: |
-        echo # XTF - Excel To Feishu Sync Tool > artifacts\README.md
-        echo. >> artifacts\README.md
-        echo Built with PyInstaller for Windows x64 >> artifacts\README.md
-        echo. >> artifacts\README.md
-        echo ## Usage >> artifacts\README.md
-        echo 1. Copy config.example.json to config.json >> artifacts\README.md
-        echo 2. Edit config.json with your Feishu app credentials >> artifacts\README.md
-        echo 3. Run: XTF.exe >> artifacts\README.md
-        echo. >> artifacts\README.md
-        echo ## Build Information >> artifacts\README.md
-        echo - OS: Windows >> artifacts\README.md
-        echo - Architecture: x64 >> artifacts\README.md
-        echo - Python Version: 3.11 >> artifacts\README.md
-        echo - Build Tool: PyInstaller >> artifacts\README.md
     
     - name: Upload artifact
       uses: actions/upload-artifact@v4
