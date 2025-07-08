@@ -1,0 +1,14 @@
+{
+  "file_path": "data.xlsx",
+  "app_id": "cli_your_app_id_here",
+  "app_secret": "your_app_secret_here",
+  "app_token": "your_app_token_here",
+  "table_id": "your_table_id_here",
+  "sync_mode": "full",
+  "index_column": "ID",
+  "batch_size": 500,
+  "rate_limit_delay": 0.5,
+  "max_retries": 3,
+  "create_missing_fields": true,
+  "log_level": "INFO"
+}
