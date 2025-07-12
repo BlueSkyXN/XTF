@@ -41,7 +41,12 @@ XTF (Excel To Feishu) 是一个强大的本地 Excel 表格到飞书多维表格
 
 ### Python 依赖
 ```bash
-pip install pandas requests uuid datetime pathlib
+pip install -r requirements.txt
+```
+
+或手动安装：
+```bash
+pip install pandas>=1.5.0 requests>=2.25.0 openpyxl>=3.0.0
 ```
 
 ### 系统要求
@@ -124,6 +129,7 @@ python XTF.py --index-column "员工ID" --sync-mode full
 
 # 指定自定义配置文件
 python XTF.py --config production.json --sync-mode full
+```
 
 ### 配置文件与命令行混合使用示例
 
@@ -155,12 +161,16 @@ python XTF.py --help
 
 **配置文件参数** (可在配置文件中设置，也可通过命令行覆盖)：
 - `--file-path`: Excel文件路径
+- `--app-id`: 飞书应用ID
+- `--app-secret`: 飞书应用密钥
+- `--app-token`: 多维表格应用Token
+- `--table-id`: 数据表ID
 - `--sync-mode`: 同步模式 (full/incremental/overwrite/clone)
 - `--index-column`: 索引列名称
 - `--batch-size`: 批处理大小 (默认500)
 - `--rate-limit-delay`: API调用间隔秒数 (默认0.5)
 - `--max-retries`: 最大重试次数 (默认3)
-- `--create-missing-fields`: 是否自动创建缺失字段 (默认true)
+- `--no-create-fields`: 不自动创建缺失字段 (默认自动创建)
 - `--log-level`: 日志级别 (DEBUG/INFO/WARNING/ERROR，默认INFO)
 
 **命令行专用参数**：
@@ -216,12 +226,13 @@ python XTF.py --sync-mode clone
 ```
 XTF/
 ├── XTF.py                 # 主程序
-├── config.json            # 配置文件
+├── config.json            # 配置文件 (运行时自动生成)
 ├── config.example.json    # 配置示例
 ├── README.md             # 说明文档
-├── logs/                 # 日志目录
+├── requirements.txt      # Python依赖
+├── logs/                 # 日志目录 (运行时自动创建)
 │   └── xtf_YYYYMMDD_HHMMSS.log
-└── docs/                 # API文档
+└── docs/                 # 文档目录
     └── feishu-openapi-doc/
 ```
 
@@ -229,14 +240,18 @@ XTF/
 
 XTF 智能识别并转换以下字段类型：
 
-| Excel类型 | 飞书类型 | 转换规则 |
-|-----------|----------|----------|
-| 文本 | 文本 | 直接转换 |
-| 数字 | 数字 | 保持数值类型 |
-| 日期 | 日期 | 转为毫秒级时间戳 |
-| true/false | 复选框 | 转为布尔值 |
-| 选项1,选项2 | 多选 | 按分隔符拆分 |
-| 选项1 | 单选 | 直接转换 |
+| Excel类型 | 飞书类型 | 类型码 | 转换规则 |
+|-----------|----------|--------|----------|
+| 文本 | 文本 | 1 | 直接转换 |
+| 数字 | 数字 | 2 | 保持数值类型，支持千分位分隔符 |
+| 日期/时间戳 | 日期 | 5 | 转为毫秒级时间戳，支持多种日期格式 |
+| true/false | 复选框 | 7 | 智能识别：true/false、是/否、yes/no、1/0等 |
+| 选项1,选项2 | 多选 | 4 | 按逗号、分号、竖线分隔 |
+| 选项1 | 单选 | 3 | 直接转换 |
+
+**其他支持的飞书字段类型:**
+- 人员 (11)、电话 (13)、超链接 (15)、附件 (17)
+- 单向关联 (18)、双向关联 (21)、地理位置 (22)、群组 (23)
 
 ## 📝 日志系统
 
@@ -274,10 +289,10 @@ XTF 智能识别并转换以下字段类型：
 - 克隆模式是唯一不依赖索引列的模式，适合数据完全重建场景
 
 ### API限制
-- 批量创建：最多1000条记录/次
-- 批量更新：最多1000条记录/次
-- 批量删除：最多500条记录/次
-- API频率：参考飞书官方限制
+- 批量创建：API无明确限制，程序默认批次500条
+- 批量更新：API无明确限制，程序默认批次500条
+- 批量删除：API无明确限制，程序默认批次500条
+- API频率：程序内置频率控制，默认0.5秒间隔
 
 ### 数据安全
 - 克隆模式会清空目标表格，请谨慎使用
