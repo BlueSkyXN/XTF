@@ -1,94 +1,148 @@
 name: Build with PyInstaller
 
 on:
-  # Manual trigger
   workflow_dispatch:
-  
-  # Trigger on changes to .py files in root directory
   push:
     paths:
       - '*.py'
-    branches: [ main ]
-  
+      - '*.yaml'
+      - '*.yml'
+    branches: [ main, dev ]
   pull_request:
     paths:
       - '*.py'
-    branches: [ main ]
+      - '*.yaml'
+      - '*.yml'
+    branches: [ main, dev ]
 
 jobs:
   build-macos:
     runs-on: macos-latest
-    
     steps:
     - uses: actions/checkout@v4
-    
     - name: Set up Python 3.11
       uses: actions/setup-python@v4
       with:
         python-version: '3.11'
         architecture: 'arm64'
-    
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
         pip install pyinstaller
         pip install pandas requests openpyxl
-    
-    - name: Build with PyInstaller
+    - name: Build XTF (模块化)
       run: |
         python -m PyInstaller --onefile --name XTF XTF.py
-    
-    - name: Create artifact directory
+    - name: Build Sheet
+      run: |
+        python -m PyInstaller --onefile --name XTF-Sheet lite/XTF_Sheet.py
+    - name: Build Bitable
+      run: |
+        python -m PyInstaller --onefile --name XTF-Bitable lite/XTF_Bitable.py
+    - name: Prepare artifacts
       run: |
         mkdir -p artifacts
-    
-    - name: Copy files to artifacts
-      run: |
         cp dist/XTF artifacts/
+        cp dist/XTF-Sheet artifacts/
+        cp dist/XTF-Bitable artifacts/
         cp config.example.yaml artifacts/
-        chmod +x artifacts/XTF
-    
-    - name: Upload artifact
+        cp config.example.yaml artifacts/config.yaml
+        chmod +x artifacts/XTF artifacts/XTF-Sheet artifacts/XTF-Bitable
+    - name: Prepare XTF artifact dir
+      run: |
+        mkdir -p artifacts/XTF-macos
+        cp artifacts/XTF artifacts/XTF-macos/
+        cp artifacts/config.yaml artifacts/XTF-macos/
+    - name: Prepare XTF-Sheet artifact dir
+      run: |
+        mkdir -p artifacts/XTF-Sheet-macos
+        cp artifacts/XTF-Sheet artifacts/XTF-Sheet-macos/
+        cp artifacts/config.yaml artifacts/XTF-Sheet-macos/
+    - name: Prepare XTF-Bitable artifact dir
+      run: |
+        mkdir -p artifacts/XTF-Bitable-macos
+        cp artifacts/XTF-Bitable artifacts/XTF-Bitable-macos/
+        cp artifacts/config.yaml artifacts/XTF-Bitable-macos/
+    - name: Upload XTF
       uses: actions/upload-artifact@v4
       with:
-        name: XTF-macos-arm64-pyinstaller
-        path: artifacts/
+        name: XTF-macos-arm64
+        path: artifacts/XTF-macos/
+        retention-days: 30
+    - name: Upload XTF-Sheet
+      uses: actions/upload-artifact@v4
+      with:
+        name: XTF-macos-arm64-sheet
+        path: artifacts/XTF-Sheet-macos/
+        retention-days: 30
+    - name: Upload XTF-Bitable
+      uses: actions/upload-artifact@v4
+      with:
+        name: XTF-macos-arm64-bitable
+        path: artifacts/XTF-Bitable-macos/
         retention-days: 30
 
   build-windows:
     runs-on: windows-latest
-    
     steps:
     - uses: actions/checkout@v4
-    
     - name: Set up Python 3.11
       uses: actions/setup-python@v4
       with:
         python-version: '3.11'
         architecture: 'x64'
-    
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
         pip install pyinstaller
         pip install pandas requests openpyxl
-    
-    - name: Build with PyInstaller
+    - name: Build XTF (模块化)
       run: |
         python -m PyInstaller --onefile --name XTF XTF.py
-    
-    - name: Create artifact directory
+    - name: Build Sheet
+      run: |
+        python -m PyInstaller --onefile --name XTF-Sheet lite/XTF_Sheet.py
+    - name: Build Bitable
+      run: |
+        python -m PyInstaller --onefile --name XTF-Bitable lite/XTF_Bitable.py
+    - name: Prepare artifacts
       run: |
         mkdir artifacts
-    
-    - name: Copy files to artifacts
-      run: |
         copy dist\XTF.exe artifacts\
+        copy dist\XTF-Sheet.exe artifacts\
+        copy dist\XTF-Bitable.exe artifacts\
         copy config.example.yaml artifacts\
-    
-    - name: Upload artifact
+        copy config.example.yaml artifacts\config.yaml
+    - name: Prepare XTF artifact dir
+      run: |
+        mkdir artifacts\XTF-windows
+        copy artifacts\XTF.exe artifacts\XTF-windows\
+        copy artifacts\config.yaml artifacts\XTF-windows\
+    - name: Prepare XTF-Sheet artifact dir
+      run: |
+        mkdir artifacts\XTF-Sheet-windows
+        copy artifacts\XTF-Sheet.exe artifacts\XTF-Sheet-windows\
+        copy artifacts\config.yaml artifacts\XTF-Sheet-windows\
+    - name: Prepare XTF-Bitable artifact dir
+      run: |
+        mkdir artifacts\XTF-Bitable-windows
+        copy artifacts\XTF-Bitable.exe artifacts\XTF-Bitable-windows\
+        copy artifacts\config.yaml artifacts\XTF-Bitable-windows\
+    - name: Upload XTF
       uses: actions/upload-artifact@v4
       with:
-        name: XTF-windows-x64-pyinstaller
-        path: artifacts/
+        name: XTF-windows-x64
+        path: artifacts/XTF-windows/
+        retention-days: 30
+    - name: Upload XTF-Sheet
+      uses: actions/upload-artifact@v4
+      with:
+        name: XTF-windows-x64-sheet
+        path: artifacts/XTF-Sheet-windows/
+        retention-days: 30
+    - name: Upload XTF-Bitable
+      uses: actions/upload-artifact@v4
+      with:
+        name: XTF-windows-x64-bitable
+        path: artifacts/XTF-Bitable-windows/
         retention-days: 30
