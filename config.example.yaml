@@ -1,0 +1,24 @@
+# XTF (Excel To Feishu) 配置文件 - YAML版本
+# 支持四种同步模式：全量、增量、覆盖、克隆
+
+# 基础配置
+file_path: "data.xlsx"                    # Excel文件路径
+app_id: "cli_your_app_id_here"           # 飞书应用ID
+app_secret: "your_app_secret_here"       # 飞书应用密钥
+app_token: "your_app_token_here"         # 多维表格应用Token
+table_id: "your_table_id_here"           # 数据表ID
+
+# 同步设置
+sync_mode: "full"                        # 同步模式: full(全量), incremental(增量), overwrite(覆盖), clone(克隆)
+index_column: "ID"                       # 索引列名，用于记录比对
+
+# 性能设置
+batch_size: 500                          # 批处理大小
+rate_limit_delay: 0.5                    # 接口调用间隔(秒)
+max_retries: 3                           # 最大重试次数
+
+# 字段管理
+create_missing_fields: true              # 是否自动创建缺失字段
+
+# 日志设置
+log_level: "INFO"                        # 日志级别: DEBUG, INFO, WARNING, ERROR

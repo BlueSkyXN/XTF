@@ -8,7 +8,7 @@ XTF (Excel To Feishu) - 本地表格同步到飞书多维表格工具
 
 import pandas as pd
 import requests
-import json
+import yaml
 import time
 import logging
 import argparse
@@ -42,7 +42,7 @@ class SyncConfig:
     
     # 同步设置
     sync_mode: SyncMode = SyncMode.FULL
-    index_column: str = None  # 索引列名，用于记录比对
+    index_column: Optional[str] = None  # 索引列名，用于记录比对
     
     # 性能设置
     batch_size: int = 500  # 批处理大小
@@ -77,7 +77,7 @@ class RateLimiter:
 
 class RetryableAPIClient:
     """可重试的API客户端"""
-    def __init__(self, max_retries: int = 3, rate_limiter: RateLimiter = None):
+    def __init__(self, max_retries: int = 3, rate_limiter: Optional[RateLimiter] = None):
         self.max_retries = max_retries
         self.rate_limiter = rate_limiter or RateLimiter()
         self.logger = logging.getLogger(__name__)
@@ -148,7 +148,7 @@ class FeishuAPIClient:
         
         try:
             result = response.json()
-        except json.JSONDecodeError as e:
+        except ValueError as e:
             raise Exception(f"获取访问令牌响应解析失败: {e}, HTTP状态码: {response.status_code}")
         
         if result.get("code") != 0:
@@ -188,7 +188,7 @@ class FeishuAPIClient:
             
             try:
                 result = response.json()
-            except json.JSONDecodeError as e:
+            except ValueError as e:
                 raise Exception(f"获取字段列表响应解析失败: {e}, HTTP状态码: {response.status_code}")
             
             if result.get("code") != 0:
@@ -217,7 +217,7 @@ class FeishuAPIClient:
         
         try:
             result = response.json()
-        except json.JSONDecodeError as e:
+        except ValueError as e:
             self.logger.error(f"创建字段 '{field_name}' 响应解析失败: {e}, HTTP状态码: {response.status_code}")
             return False
         
@@ -229,14 +229,14 @@ class FeishuAPIClient:
         self.logger.info(f"创建字段 '{field_name}' 成功")
         return True
     
-    def search_records(self, app_token: str, table_id: str, page_token: str = None, 
+    def search_records(self, app_token: str, table_id: str, page_token: Optional[str] = None,
                       page_size: int = 500) -> Tuple[List[Dict], Optional[str]]:
         """搜索记录"""
         url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/search"
         headers = self.get_auth_headers()
         
         # 分页参数应该作为查询参数，不是请求体
-        params = {"page_size": page_size}
+        params: Dict[str, Union[int, str]] = {"page_size": page_size}
         if page_token:
             params["page_token"] = page_token
         
@@ -247,7 +247,7 @@ class FeishuAPIClient:
         
         try:
             result = response.json()
-        except json.JSONDecodeError as e:
+        except ValueError as e:
             raise Exception(f"搜索记录响应解析失败: {e}, HTTP状态码: {response.status_code}")
         
         if result.get("code") != 0:
@@ -293,7 +293,7 @@ class FeishuAPIClient:
         
         try:
             result = response.json()
-        except json.JSONDecodeError as e:
+        except ValueError as e:
             self.logger.error(f"批量创建记录响应解析失败: {e}, HTTP状态码: {response.status_code}")
             self.logger.debug(f"响应内容: {response.text[:500]}")
             return False
@@ -326,7 +326,7 @@ class FeishuAPIClient:
         
         try:
             result = response.json()
-        except json.JSONDecodeError as e:
+        except ValueError as e:
             self.logger.error(f"批量更新记录响应解析失败: {e}, HTTP状态码: {response.status_code}")
             self.logger.debug(f"响应内容: {response.text[:500]}")
             return False
@@ -352,7 +352,7 @@ class FeishuAPIClient:
         
         try:
             result = response.json()
-        except json.JSONDecodeError as e:
+        except ValueError as e:
             self.logger.error(f"批量删除记录响应解析失败: {e}, HTTP状态码: {response.status_code}")
             self.logger.debug(f"响应内容: {response.text[:500]}")
             return False
@@ -492,7 +492,7 @@ class XTFSyncEngine:
         }
         return type_names.get(field_type, f"未知类型({field_type})")
     
-    def get_index_value_hash(self, row: pd.Series) -> str:
+    def get_index_value_hash(self, row: pd.Series) -> Optional[str]:
         """计算索引值的哈希"""
         if self.config.index_column and self.config.index_column in row:
             value = str(row[self.config.index_column])
@@ -562,7 +562,7 @@ class XTFSyncEngine:
                 type_stats['string'] += 1
         
         # 计算主要类型
-        primary_type = max(type_stats, key=type_stats.get)
+        primary_type = max(type_stats.keys(), key=lambda k: type_stats[k])
         confidence = type_stats[primary_type] / total_count
         
         # 推断飞书字段类型
@@ -637,7 +637,7 @@ class XTFSyncEngine:
         
         return 1  # 默认文本字段
     
-    def convert_field_value_safe(self, field_name: str, value, field_types: Dict[str, int] = None):
+    def convert_field_value_safe(self, field_name: str, value, field_types: Optional[Dict[str, int]] = None):
         """安全的字段值转换，强制转换为飞书字段类型"""
         if pd.isnull(value):
             return None
@@ -1068,7 +1068,7 @@ class XTFSyncEngine:
         
         return [str(value)] if value else None
 
-    def df_to_records(self, df: pd.DataFrame, field_types: Dict[str, int] = None) -> List[Dict]:
+    def df_to_records(self, df: pd.DataFrame, field_types: Optional[Dict[str, int]] = None) -> List[Dict]:
         """将DataFrame转换为飞书记录格式"""
         records = []
         for _, row in df.iterrows():
@@ -1106,7 +1106,7 @@ class XTFSyncEngine:
         self.logger.info(f"批处理完成: {success_count}/{total_batches} 个批次成功")
         return success_count == total_batches
         
-    def sync_full(self, df: pd.DataFrame, field_types: Dict[str, int] = None) -> bool:
+    def sync_full(self, df: pd.DataFrame, field_types: Optional[Dict[str, int]] = None) -> bool:
         """全量同步：已存在索引值的更新，不存在的新增"""
         self.logger.info("开始全量同步...")
         
@@ -1171,7 +1171,7 @@ class XTFSyncEngine:
         
         return update_success and create_success
     
-    def sync_incremental(self, df: pd.DataFrame, field_types: Dict[str, int] = None) -> bool:
+    def sync_incremental(self, df: pd.DataFrame, field_types: Optional[Dict[str, int]] = None) -> bool:
         """增量同步：只新增不存在索引值的记录"""
         self.logger.info("开始增量同步...")
         
@@ -1218,7 +1218,7 @@ class XTFSyncEngine:
             self.logger.info("没有新记录需要同步")
             return True
     
-    def sync_overwrite(self, df: pd.DataFrame, field_types: Dict[str, int] = None) -> bool:
+    def sync_overwrite(self, df: pd.DataFrame, field_types: Optional[Dict[str, int]] = None) -> bool:
         """覆盖同步：删除已存在索引值的记录，然后新增全部记录"""
         self.logger.info("开始覆盖同步...")
         
@@ -1260,7 +1260,7 @@ class XTFSyncEngine:
         
         return delete_success and create_success
     
-    def sync_clone(self, df: pd.DataFrame, field_types: Dict[str, int] = None) -> bool:
+    def sync_clone(self, df: pd.DataFrame, field_types: Optional[Dict[str, int]] = None) -> bool:
         """克隆同步：清空全部已有记录，然后新增全部记录"""
         self.logger.info("开始克隆同步...")
         
@@ -1428,22 +1428,22 @@ class ConfigManager:
     
     @staticmethod
     def load_from_file(config_file: str) -> Optional[Dict[str, Any]]:
-        """从文件加载配置"""
+        """从YAML文件加载配置"""
         try:
             with open(config_file, 'r', encoding='utf-8') as f:
-                return json.load(f)
+                return yaml.safe_load(f)
         except FileNotFoundError:
             print(f"配置文件不存在: {config_file}")
             return None
-        except json.JSONDecodeError as e:
-            print(f"配置文件格式错误: {e}")
+        except yaml.YAMLError as e:
+            print(f"YAML配置文件格式错误: {e}")
             return None
     
     @staticmethod
     def save_to_file(config: Dict[str, Any], config_file: str):
-        """保存配置到文件"""
+        """保存配置到YAML文件"""
         with open(config_file, 'w', encoding='utf-8') as f:
-            json.dump(config, f, ensure_ascii=False, indent=2)
+            yaml.dump(config, f, default_flow_style=False, allow_unicode=True, indent=2)
     
     @staticmethod
     def parse_args() -> argparse.Namespace:
@@ -1451,8 +1451,8 @@ class ConfigManager:
         parser = argparse.ArgumentParser(description='XTF - Excel To Feishu 同步工具')
         
         # 基础配置
-        parser.add_argument('--config', '-c', type=str, default='config.json',
-                          help='配置文件路径 (默认: config.json)')
+        parser.add_argument('--config', '-c', type=str, default='config.yaml',
+                          help='配置文件路径 (默认: config.yaml)')
         parser.add_argument('--file-path', type=str, help='Excel文件路径')
         parser.add_argument('--app-id', type=str, help='飞书应用ID')
         parser.add_argument('--app-secret', type=str, help='飞书应用密钥')
@@ -1583,7 +1583,7 @@ class ConfigManager:
         return SyncConfig(**config_data)
 
 
-def create_sample_config(config_file: str = "config.json"):
+def create_sample_config(config_file: str = "config.yaml"):
     """创建示例配置文件"""
     sample_config = {
         "file_path": "data.xlsx",
@@ -1621,7 +1621,7 @@ def main():
         # 先解析命令行参数以获取配置文件路径
         import argparse
         parser = argparse.ArgumentParser(add_help=False)
-        parser.add_argument('--config', '-c', type=str, default='config.json')
+        parser.add_argument('--config', '-c', type=str, default='config.yaml')
         args, _ = parser.parse_known_args()
         config_file_path = args.config
         
