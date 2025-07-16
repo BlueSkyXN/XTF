@@ -45,7 +45,7 @@ jobs:
     - name: Copy files to artifacts
       run: |
         cp dist/XTF artifacts/
-        cp config.example.json artifacts/
+        cp config.example.yaml artifacts/
         chmod +x artifacts/XTF
     
     - name: Upload artifact
@@ -84,7 +84,7 @@ jobs:
     - name: Copy files to artifacts
       run: |
         copy dist\XTF.exe artifacts\
-        copy config.example.json artifacts\
+        copy config.example.yaml artifacts\
     
     - name: Upload artifact
       uses: actions/upload-artifact@v4
