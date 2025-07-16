@@ -5,14 +5,20 @@ on:
   push:
     paths:
       - '*.py'
+      - '**/*.py'
       - '*.yaml'
+      - '**/*.yaml'
       - '*.yml'
+      - '**/*.yml'
     branches: [ main, dev ]
   pull_request:
     paths:
       - '*.py'
+      - '**/*.py'
       - '*.yaml'
+      - '**/*.yaml'
       - '*.yml'
+      - '**/*.yml'
     branches: [ main, dev ]
 
 jobs:
@@ -29,7 +35,7 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install pyinstaller
-        pip install pandas requests openpyxl
+        pip install -r requirements.txt
     - name: Build XTF (模块化)
       run: |
         python -m PyInstaller --onefile --name XTF XTF.py
@@ -95,7 +101,7 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install pyinstaller
-        pip install pandas requests openpyxl
+        pip install -r requirements.txt
     - name: Build XTF (模块化)
       run: |
         python -m PyInstaller --onefile --name XTF XTF.py
