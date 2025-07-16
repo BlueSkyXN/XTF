@@ -1,6 +1,15 @@
 # XTF - Excel To Feishu 智能同步工具
 
-XTF (Excel To Feishu) 是一个企业级的本地 Excel 表格到飞书多维表格的智能同步工具。支持四种同步模式，具备智能字段管理、类型转换、频率控制、重试机制等企业级功能特性。
+XTF (Excel To Feishu) 是一个企业级的本地 Excel 表格到飞书平台的智能同步工具。支持多维表格和电子表格两种目标平台，具备四种同步模式，智能字段管理、类型转换、频率控制、重试机制等企业级功能特性。
+
+## 🎯 双平台支持
+
+| 工具 | 目标平台 | 适用场景 |
+|------|----------|----------|
+| **XTF.py** | 飞书多维表格 | 结构化数据管理，复杂字段类型，记录级操作 |
+| **XTF_Sheet.py** | 飞书电子表格 | 表格数据处理，简单数据类型，单元格级操作 |
+
+两个工具共享相同的配置文件，XTF.py 使用多维表格相关配置，XTF_Sheet.py 使用电子表格相关配置。
 
 ## ✨ 核心特性
 
@@ -60,41 +69,52 @@ pip install pandas>=1.5.0 requests>=2.25.0 openpyxl>=3.0.0 PyYAML>=6.0.0
 | `app_secret` | 应用密钥 | 应用凭证页面 |
 | `app_token` | 多维表格应用Token | 多维表格分享链接中提取 |
 | `table_id` | 数据表ID | 多维表格URL中提取 |
+| `spreadsheet_token` | 电子表格Token | 电子表格分享链接中提取 |
+| `sheet_id` | 工作表ID | 电子表格URL中提取 |
 
-### 2. 配置文件设置
+### 2. 统一配置文件
 
 #### 创建配置文件
 ```bash
-# 复制示例配置文件
-cp config.example.yaml config.yaml
+# 编辑现有配置文件
+vim config.yaml
 
 # 或让程序自动创建
 python XTF.py --config my_config.yaml
 ```
 
-#### 配置文件格式 (YAML)
+#### 统一配置文件格式 (YAML)
 ```yaml
-# XTF 配置文件
+# XTF 统一配置文件 - 支持多维表格和电子表格
+# XTF.py 使用多维表格相关配置，XTF_Sheet.py 使用电子表格相关配置
+
+# 基础配置
 file_path: "data.xlsx"                    # Excel文件路径
-app_id: "cli_your_app_id_here"           # 飞书应用ID
-app_secret: "your_app_secret_here"       # 飞书应用密钥
-app_token: "your_app_token_here"         # 多维表格应用Token
-table_id: "your_table_id_here"           # 数据表ID
+app_id: "cli_your_app_id"                 # 飞书应用ID
+app_secret: "your_app_secret"             # 飞书应用密钥
+
+# 多维表格配置 (XTF.py 使用)
+app_token: "your_app_token"               # 多维表格应用Token
+table_id: "your_table_id"                 # 数据表ID
+create_missing_fields: true               # 是否自动创建缺失字段
+
+# 电子表格配置 (XTF_Sheet.py 使用)
+spreadsheet_token: "your_spreadsheet_token"  # 电子表格Token
+sheet_id: "your_sheet_id"                 # 工作表ID
+start_row: 1                              # 开始行号
+start_column: "A"                         # 开始列号
 
 # 同步设置
-sync_mode: "full"                        # 同步模式
-index_column: "ID"                       # 索引列名
+sync_mode: "full"                         # 同步模式
+index_column: "ID"                        # 索引列名
 
 # 性能设置
-batch_size: 500                          # 批处理大小
-rate_limit_delay: 0.5                    # 接口调用间隔(秒)
-max_retries: 3                           # 最大重试次数
-
-# 功能开关
-create_missing_fields: true              # 自动创建缺失字段
+batch_size: 500                           # 批处理大小
+rate_limit_delay: 0.5                     # 接口调用间隔(秒)
+max_retries: 3                            # 最大重试次数
 
 # 日志设置
-log_level: "INFO"                        # 日志级别
+log_level: "INFO"                         # 日志级别
 ```
 
 ### 3. 参数优先级
@@ -112,15 +132,31 @@ XTF 使用三层参数优先级 (**从低到高**)：
 ## 🚀 使用方法
 
 ### 基础使用
+
+#### 多维表格同步
 ```bash
-# 使用默认配置文件 (config.yaml)
+# 使用相同的配置文件，XTF.py 自动使用多维表格配置
+python XTF.py                              # 使用默认配置文件
+python XTF.py --config my_config.yaml      # 使用自定义配置文件
+```
+
+#### 电子表格同步
+```bash
+# 使用相同的配置文件，XTF_Sheet.py 自动使用电子表格配置
+python XTF_Sheet.py                        # 使用默认配置文件
+python XTF_Sheet.py --config my_config.yaml # 使用自定义配置文件
+```
+
+#### 使用示例
+```bash
+# 编辑配置文件，同时填入多维表格和电子表格配置
+vim config.yaml
+
+# 同步到多维表格
 python XTF.py
 
-# 使用自定义配置文件
-python XTF.py --config my_config.yaml
-
-# 显示帮助信息
-python XTF.py --help
+# 同步到电子表格
+python XTF_Sheet.py
 ```
 
 ### 命令行参数覆盖
@@ -217,15 +253,17 @@ python XTF.py --sync-mode clone
 
 ```
 XTF/
-├── XTF.py                      # 主程序文件
-├── config.yaml                 # 主配置文件 (YAML格式)
+├── XTF.py                      # 多维表格同步工具
+├── XTF_Sheet.py                # 电子表格同步工具
+├── config.yaml                 # 统一配置文件 (支持双平台)
 ├── config.example.yaml         # 配置文件示例
 ├── requirements.txt            # Python依赖清单
 ├── README.md                   # 项目文档
 ├── LICENSE                     # 开源协议
 ├── .gitignore                  # Git忽略文件
 ├── logs/                       # 日志目录 (自动创建)
-│   └── xtf_YYYYMMDD_HHMMSS.log # 按时间戳命名的日志文件
+│   ├── xtf_YYYYMMDD_HHMMSS.log         # 多维表格同步日志
+│   └── xtf_sheet_YYYYMMDD_HHMMSS.log   # 电子表格同步日志
 └── docs/                       # 飞书API文档
     └── feishu-openapi-doc/     # 飞书开放API文档集合
 ```

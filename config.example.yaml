@@ -1,24 +1,30 @@
-# XTF (Excel To Feishu) 配置文件 - YAML版本
-# 支持四种同步模式：全量、增量、覆盖、克隆
+# XTF 统一配置文件示例
+# XTF.py 使用多维表格相关配置，XTF_Sheet.py 使用电子表格相关配置
 
 # 基础配置
 file_path: "data.xlsx"                    # Excel文件路径
-app_id: "cli_your_app_id_here"           # 飞书应用ID
-app_secret: "your_app_secret_here"       # 飞书应用密钥
-app_token: "your_app_token_here"         # 多维表格应用Token
-table_id: "your_table_id_here"           # 数据表ID
+app_id: "cli_your_app_id_here"            # 飞书应用ID
+app_secret: "your_app_secret_here"        # 飞书应用密钥
+
+# 多维表格配置 (XTF.py 使用)
+app_token: "your_app_token_here"          # 多维表格应用Token
+table_id: "your_table_id_here"            # 数据表ID
+create_missing_fields: true               # 是否自动创建缺失字段
+
+# 电子表格配置 (XTF_Sheet.py 使用)
+spreadsheet_token: "your_spreadsheet_token_here"  # 电子表格Token
+sheet_id: "your_sheet_id_here"            # 工作表ID
+start_row: 1                              # 开始行号
+start_column: "A"                         # 开始列号
 
 # 同步设置
-sync_mode: "full"                        # 同步模式: full(全量), incremental(增量), overwrite(覆盖), clone(克隆)
-index_column: "ID"                       # 索引列名，用于记录比对
+sync_mode: "full"                         # 同步模式: full/incremental/overwrite/clone
+index_column: "ID"                        # 索引列名，用于记录比对
 
 # 性能设置
-batch_size: 500                          # 批处理大小
-rate_limit_delay: 0.5                    # 接口调用间隔(秒)
-max_retries: 3                           # 最大重试次数
-
-# 字段管理
-create_missing_fields: true              # 是否自动创建缺失字段
+batch_size: 500                           # 批处理大小
+rate_limit_delay: 0.5                     # 接口调用间隔(秒)
+max_retries: 3                            # 最大重试次数
 
 # 日志设置
-log_level: "INFO"                        # 日志级别: DEBUG, INFO, WARNING, ERROR
+log_level: "INFO"                         # 日志级别: DEBUG/INFO/WARNING/ERROR
