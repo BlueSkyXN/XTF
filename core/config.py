@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-配置管理模块
-提供同步配置和配置管理功能
+统一配置管理模块
+提供多维表格和电子表格的统一配置管理
 """
 
 import yaml
@@ -22,15 +22,31 @@ class SyncMode(Enum):
     CLONE = "clone"             # 克隆同步：清空全部，然后新增全部
 
 
+class TargetType(Enum):
+    """目标类型枚举"""
+    BITABLE = "bitable"    # 多维表格
+    SHEET = "sheet"        # 电子表格
+
+
 @dataclass
 class SyncConfig:
-    """同步配置"""
+    """统一同步配置"""
     # 基础配置
     file_path: str
     app_id: str
     app_secret: str
-    app_token: str
-    table_id: str
+    target_type: TargetType
+    
+    # 多维表格配置（target_type=bitable时使用）
+    app_token: Optional[str] = None
+    table_id: Optional[str] = None
+    create_missing_fields: bool = True
+    
+    # 电子表格配置（target_type=sheet时使用）
+    spreadsheet_token: Optional[str] = None
+    sheet_id: Optional[str] = None
+    start_row: int = 1  # 开始行号（1-based）
+    start_column: str = "A"  # 开始列号
     
     # 同步设置
     sync_mode: SyncMode = SyncMode.FULL
@@ -41,19 +57,26 @@ class SyncConfig:
     rate_limit_delay: float = 0.5  # 接口调用间隔
     max_retries: int = 3  # 最大重试次数
     
-    # 字段管理
-    create_missing_fields: bool = True
-    
     # 日志设置
     log_level: str = "INFO"
     
     def __post_init__(self):
         if isinstance(self.sync_mode, str):
             self.sync_mode = SyncMode(self.sync_mode)
+        if isinstance(self.target_type, str):
+            self.target_type = TargetType(self.target_type)
+        
+        # 验证必需参数
+        if self.target_type == TargetType.BITABLE:
+            if not self.app_token or not self.table_id:
+                raise ValueError("多维表格模式需要app_token和table_id")
+        elif self.target_type == TargetType.SHEET:
+            if not self.spreadsheet_token or not self.sheet_id:
+                raise ValueError("电子表格模式需要spreadsheet_token和sheet_id")
 
 
 class ConfigManager:
-    """配置管理器"""
+    """统一配置管理器"""
     
     @staticmethod
     def load_from_file(config_file: str) -> Optional[Dict[str, Any]]:
@@ -75,9 +98,46 @@ class ConfigManager:
             yaml.dump(config, f, default_flow_style=False, allow_unicode=True, indent=2)
     
     @staticmethod
+    def parse_target_type() -> TargetType:
+        """解析目标类型"""
+        parser = argparse.ArgumentParser(description='XTF - Excel To Feishu 统一同步工具')
+        
+        # 添加目标类型参数
+        parser.add_argument('--target-type', type=str, 
+                          choices=['bitable', 'sheet'],
+                          help='目标类型: bitable(多维表格) 或 sheet(电子表格)')
+        parser.add_argument('--config', '-c', type=str, default='config.yaml',
+                          help='配置文件路径 (默认: config.yaml)')
+        
+        # 只解析已知参数，忽略其他参数
+        args, _ = parser.parse_known_args()
+        
+        # 如果没有指定目标类型，尝试从配置文件推断
+        if not args.target_type:
+            if Path(args.config).exists():
+                try:
+                    config_data = ConfigManager.load_from_file(args.config)
+                    if config_data:
+                        # 如果配置中有app_token和table_id，推断为多维表格
+                        if config_data.get('app_token') and config_data.get('table_id'):
+                            return TargetType.BITABLE
+                        # 如果配置中有spreadsheet_token和sheet_id，推断为电子表格
+                        elif config_data.get('spreadsheet_token') and config_data.get('sheet_id'):
+                            return TargetType.SHEET
+                except Exception:
+                    pass
+            
+            # 默认使用多维表格
+            print("⚠️  未指定目标类型，默认使用多维表格模式")
+            print("💡 可以通过 --target-type bitable|sheet 指定目标类型")
+            return TargetType.BITABLE
+        
+        return TargetType(args.target_type)
+    
+    @staticmethod
     def parse_args() -> argparse.Namespace:
         """解析命令行参数"""
-        parser = argparse.ArgumentParser(description='XTF - Excel To Feishu 同步工具')
+        parser = argparse.ArgumentParser(description='XTF - Excel To Feishu 统一同步工具')
         
         # 基础配置
         parser.add_argument('--config', '-c', type=str, default='config.yaml',
@@ -85,8 +145,20 @@ class ConfigManager:
         parser.add_argument('--file-path', type=str, help='Excel文件路径')
         parser.add_argument('--app-id', type=str, help='飞书应用ID')
         parser.add_argument('--app-secret', type=str, help='飞书应用密钥')
+        parser.add_argument('--target-type', type=str, choices=['bitable', 'sheet'],
+                          help='目标类型: bitable(多维表格) 或 sheet(电子表格)')
+        
+        # 多维表格配置
         parser.add_argument('--app-token', type=str, help='多维表格应用Token')
         parser.add_argument('--table-id', type=str, help='数据表ID')
+        parser.add_argument('--no-create-fields', action='store_true',
+                          help='不自动创建缺失字段')
+        
+        # 电子表格配置
+        parser.add_argument('--spreadsheet-token', type=str, help='电子表格Token')
+        parser.add_argument('--sheet-id', type=str, help='工作表ID')
+        parser.add_argument('--start-row', type=int, help='开始行号')
+        parser.add_argument('--start-column', type=str, help='开始列号')
         
         # 同步设置
         parser.add_argument('--sync-mode', type=str, 
@@ -99,10 +171,6 @@ class ConfigManager:
         parser.add_argument('--rate-limit-delay', type=float, help='接口调用间隔秒数')
         parser.add_argument('--max-retries', type=int, help='最大重试次数')
         
-        # 功能开关
-        parser.add_argument('--no-create-fields', action='store_true',
-                          help='不自动创建缺失字段')
-        
         # 日志设置
         parser.add_argument('--log-level', type=str, 
                           choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
@@ -113,17 +181,33 @@ class ConfigManager:
     @classmethod
     def create_config(cls) -> SyncConfig:
         """创建配置对象"""
+        # 先获取目标类型
+        target_type = cls.parse_target_type()
+        
         args = cls.parse_args()
         
-        # 先设置默认值
-        config_data = {
-            'sync_mode': 'full',
-            'batch_size': 500,
-            'rate_limit_delay': 0.5,
-            'max_retries': 3,
-            'create_missing_fields': True,
-            'log_level': 'INFO'
-        }
+        # 根据目标类型设置默认值
+        if target_type == TargetType.BITABLE:
+            config_data = {
+                'target_type': target_type.value,
+                'sync_mode': 'full',
+                'batch_size': 500,
+                'rate_limit_delay': 0.5,
+                'max_retries': 3,
+                'create_missing_fields': True,
+                'log_level': 'INFO'
+            }
+        else:  # SHEET
+            config_data = {
+                'target_type': target_type.value,
+                'sync_mode': 'full',
+                'start_row': 1,
+                'start_column': 'A',
+                'batch_size': 1000,
+                'rate_limit_delay': 0.1,
+                'max_retries': 3,
+                'log_level': 'INFO'
+            }
         
         # 尝试从配置文件加载，覆盖默认值
         if Path(args.config).exists():
@@ -144,7 +228,10 @@ class ConfigManager:
         else:
             print(f"⚠️  配置文件 {args.config} 不存在，使用默认值")
         
-        # 命令行参数覆盖文件配置（只有当明确提供时）
+        # 确保target_type在配置数据中
+        config_data['target_type'] = target_type.value
+        
+        # 命令行参数覆盖文件配置
         cli_overrides = []
         
         # 基础参数
@@ -157,17 +244,39 @@ class ConfigManager:
         if args.app_secret:
             config_data['app_secret'] = args.app_secret
             cli_overrides.append(f"app_secret=***")
+        if args.target_type:
+            config_data['target_type'] = args.target_type
+            cli_overrides.append(f"target_type={args.target_type}")
+        
+        # 多维表格参数
         if args.app_token:
             config_data['app_token'] = args.app_token
             cli_overrides.append(f"app_token={args.app_token[:8]}...")
         if args.table_id:
             config_data['table_id'] = args.table_id
             cli_overrides.append(f"table_id={args.table_id}")
+        if args.no_create_fields:
+            config_data['create_missing_fields'] = False
+            cli_overrides.append("create_missing_fields=False")
+        
+        # 电子表格参数
+        if args.spreadsheet_token:
+            config_data['spreadsheet_token'] = args.spreadsheet_token
+            cli_overrides.append(f"spreadsheet_token={args.spreadsheet_token[:8]}...")
+        if args.sheet_id:
+            config_data['sheet_id'] = args.sheet_id
+            cli_overrides.append(f"sheet_id={args.sheet_id}")
+        if args.start_row is not None:
+            config_data['start_row'] = args.start_row
+            cli_overrides.append(f"start_row={args.start_row}")
+        if args.start_column:
+            config_data['start_column'] = args.start_column
+            cli_overrides.append(f"start_column={args.start_column}")
+        
+        # 通用参数
         if args.index_column:
             config_data['index_column'] = args.index_column
             cli_overrides.append(f"index_column={args.index_column}")
-        
-        # 高级参数（只有明确提供时才覆盖）
         if args.sync_mode is not None:
             config_data['sync_mode'] = args.sync_mode
             cli_overrides.append(f"sync_mode={args.sync_mode}")
@@ -180,9 +289,6 @@ class ConfigManager:
         if args.max_retries is not None:
             config_data['max_retries'] = args.max_retries
             cli_overrides.append(f"max_retries={args.max_retries}")
-        if args.no_create_fields:  # 这个是action='store_true'，只有指定时才为True
-            config_data['create_missing_fields'] = False
-            cli_overrides.append("create_missing_fields=False")
         if args.log_level is not None:
             config_data['log_level'] = args.log_level
             cli_overrides.append(f"log_level={args.log_level}")
@@ -192,7 +298,12 @@ class ConfigManager:
             print(f"🔧 命令行参数覆盖: {', '.join(cli_overrides)}")
         
         # 验证必需参数
-        required_fields = ['file_path', 'app_id', 'app_secret', 'app_token', 'table_id']
+        required_fields = ['file_path', 'app_id', 'app_secret']
+        if target_type == TargetType.BITABLE:
+            required_fields.extend(['app_token', 'table_id'])
+        else:  # SHEET
+            required_fields.extend(['spreadsheet_token', 'sheet_id'])
+        
         missing_fields = [f for f in required_fields if not config_data.get(f)]
         
         if missing_fields:
@@ -209,22 +320,41 @@ class ConfigManager:
         return SyncConfig(**config_data)
 
 
-def create_sample_config(config_file: str = "config.yaml"):
+def create_sample_config(config_file: str = "config.yaml", target_type: TargetType = TargetType.BITABLE):
     """创建示例配置文件"""
-    sample_config = {
-        "file_path": "data.xlsx",
-        "app_id": "cli_your_app_id",
-        "app_secret": "your_app_secret",
-        "app_token": "your_app_token",
-        "table_id": "your_table_id",
-        "sync_mode": "full",
-        "index_column": "ID",
-        "batch_size": 500,
-        "rate_limit_delay": 0.5,
-        "max_retries": 3,
-        "create_missing_fields": True,
-        "log_level": "INFO"
-    }
+    if target_type == TargetType.BITABLE:
+        sample_config = {
+            "file_path": "data.xlsx",
+            "app_id": "cli_your_app_id",
+            "app_secret": "your_app_secret",
+            "target_type": "bitable",
+            "app_token": "your_app_token",
+            "table_id": "your_table_id",
+            "sync_mode": "full",
+            "index_column": "ID",
+            "batch_size": 500,
+            "rate_limit_delay": 0.5,
+            "max_retries": 3,
+            "create_missing_fields": True,
+            "log_level": "INFO"
+        }
+    else:  # SHEET
+        sample_config = {
+            "file_path": "data.xlsx",
+            "app_id": "cli_your_app_id",
+            "app_secret": "your_app_secret",
+            "target_type": "sheet",
+            "spreadsheet_token": "your_spreadsheet_token",
+            "sheet_id": "your_sheet_id",
+            "sync_mode": "full",
+            "index_column": "ID",
+            "start_row": 1,
+            "start_column": "A",
+            "batch_size": 1000,
+            "rate_limit_delay": 0.1,
+            "max_retries": 3,
+            "log_level": "INFO"
+        }
     
     if not Path(config_file).exists():
         ConfigManager.save_to_file(sample_config, config_file)
@@ -234,3 +364,12 @@ def create_sample_config(config_file: str = "config.yaml"):
     else:
         print(f"配置文件 {config_file} 已存在")
         return False
+
+
+def get_target_description(target_type: TargetType) -> str:
+    """获取目标类型的描述"""
+    descriptions = {
+        TargetType.BITABLE: "多维表格 (支持智能字段管理、复杂数据类型)",
+        TargetType.SHEET: "电子表格 (简单快速、适合基础数据同步)"
+    }
+    return descriptions.get(target_type, "未知类型")

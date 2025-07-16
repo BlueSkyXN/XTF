@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-数据转换模块
-提供Excel数据到飞书字段格式的转换功能
+统一数据转换模块
+提供多维表格和电子表格的数据转换功能
 """
 
 import re
@@ -12,12 +12,20 @@ import logging
 from typing import Dict, Any, List, Optional
 import datetime as dt
 
+from .config import TargetType
+
 
 class DataConverter:
-    """数据转换器"""
+    """统一数据转换器"""
     
-    def __init__(self):
-        """初始化数据转换器"""
+    def __init__(self, target_type: TargetType):
+        """
+        初始化数据转换器
+        
+        Args:
+            target_type: 目标类型（多维表格或电子表格）
+        """
+        self.target_type = target_type
         self.logger = logging.getLogger(__name__)
         
         # 类型转换统计
@@ -42,8 +50,10 @@ class DataConverter:
             return hashlib.md5(value.encode('utf-8')).hexdigest()
         return None
     
+    # ========== 多维表格转换方法 ==========
+    
     def build_record_index(self, records: List[Dict], index_column: Optional[str]) -> Dict[str, Dict]:
-        """构建记录索引"""
+        """构建多维表格记录索引"""
         index = {}
         if not index_column:
             return index
@@ -189,82 +199,72 @@ class DataConverter:
         return type_names.get(field_type, f"未知类型({field_type})")
     
     def convert_field_value_safe(self, field_name: str, value, field_types: Optional[Dict[str, int]] = None):
-        """安全的字段值转换，强制转换为飞书字段类型"""
+        """安全的字段值转换"""
         if pd.isnull(value):
             return None
+        
+        # 多维表格模式使用复杂转换
+        if self.target_type == TargetType.BITABLE:
+            # 如果没有字段类型信息，使用智能转换
+            if field_types is None or field_name not in field_types:
+                return self.smart_convert_value(value)
             
-        # 如果没有字段类型信息，使用智能转换
-        if field_types is None or field_name not in field_types:
-            return self.smart_convert_value(value)
-        
-        field_type = field_types[field_name]
-        
-        # 强制转换为目标类型，按飞书字段类型进行转换
-        try:
-            converted_value = self._force_convert_to_feishu_type(value, field_name, field_type)
-            if converted_value is not None:
-                self.conversion_stats['success'] += 1
-                return converted_value
-            else:
+            field_type = field_types[field_name]
+            
+            # 强制转换为目标类型，按飞书字段类型进行转换
+            try:
+                converted_value = self._force_convert_to_feishu_type(value, field_name, field_type)
+                if converted_value is not None:
+                    self.conversion_stats['success'] += 1
+                    return converted_value
+                else:
+                    self.conversion_stats['failed'] += 1
+                    return None
+            except Exception as e:
+                self.logger.warning(f"字段 '{field_name}' 强制转换失败: {e}, 原始值: '{value}'")
                 self.conversion_stats['failed'] += 1
                 return None
-        except Exception as e:
-            self.logger.warning(f"字段 '{field_name}' 强制转换失败: {e}, 原始值: '{value}'")
-            self.conversion_stats['failed'] += 1
-            return None
+        else:
+            # 电子表格模式使用简单转换
+            return self.simple_convert_value(value)
     
     def _force_convert_to_feishu_type(self, value, field_name: str, field_type: int):
         """强制转换值为指定的飞书字段类型"""
-        
         if field_type == 1:  # 文本字段 - 所有值都可以转换为文本
             return str(value)
-            
         elif field_type == 2:  # 数字字段 - 强制转换为数字
             return self._force_to_number(value, field_name)
-            
         elif field_type == 3:  # 单选字段 - 转换为单个字符串
             return self._force_to_single_choice(value, field_name)
-            
         elif field_type == 4:  # 多选字段 - 转换为字符串数组
             return self._force_to_multi_choice(value, field_name)
-            
         elif field_type == 5:  # 日期字段 - 强制转换为时间戳
             return self._force_to_timestamp(value, field_name)
-            
         elif field_type == 7:  # 复选框字段 - 强制转换为布尔值
             return self._force_to_boolean(value, field_name)
-            
         elif field_type == 11:  # 人员字段
             return self.convert_to_user_field(value)
-            
         elif field_type == 13:  # 电话号码字段
             return str(value)
-            
         elif field_type == 15:  # 超链接字段
             return self.convert_to_url_field(value)
-            
         elif field_type == 17:  # 附件字段
             return self.convert_to_attachment_field(value)
-            
         elif field_type in [18, 21]:  # 关联字段
             return self.convert_to_link_field(value)
-            
         elif field_type == 22:  # 地理位置字段
             return str(value)
-            
         elif field_type == 23:  # 群组字段
             return self.convert_to_user_field(value)
-            
         elif field_type in [19, 20, 1001, 1002, 1003, 1004, 1005]:  # 只读字段
             self.logger.debug(f"字段 '{field_name}' 是只读字段，跳过设置")
             return None
-            
         else:
             # 未知类型，默认转为字符串
             return str(value)
     
     def _force_to_number(self, value, field_name: str):
-        """强制转换为数字，处理各种异常情况"""
+        """强制转换为数字"""
         if isinstance(value, (int, float)):
             return value
         
@@ -342,7 +342,7 @@ class DataConverter:
             return [str(value)]
     
     def _force_to_timestamp(self, value, field_name: str):
-        """强制转换为时间戳，增强日期解析能力"""
+        """强制转换为时间戳"""
         # 如果已经是数字时间戳
         if isinstance(value, (int, float)):
             if value > 2524608000:  # 毫秒级
@@ -458,6 +458,21 @@ class DataConverter:
                     pass
         return str(value)
     
+    def simple_convert_value(self, value):
+        """简单转换数值类型（电子表格模式）"""
+        if pd.isnull(value):
+            return ""
+        else:
+            # 转换为字符串或基本类型
+            if isinstance(value, (int, float)):
+                return value
+            elif isinstance(value, bool):
+                return value
+            else:
+                return str(value)
+    
+    # ========== 复杂字段类型转换（多维表格专用） ==========
+    
     def convert_to_user_field(self, value):
         """转换为人员字段格式"""
         if pd.isnull(value) or not value:
@@ -556,8 +571,83 @@ class DataConverter:
         
         return [str(value)] if value else None
 
+    # ========== 电子表格转换方法 ==========
+    
+    def build_data_index(self, df: pd.DataFrame, index_column: Optional[str]) -> Dict[str, int]:
+        """构建电子表格数据索引（哈希 -> 行号）"""
+        index = {}
+        if not index_column:
+            return index
+        
+        for idx, row in df.iterrows():
+            index_hash = self.get_index_value_hash(row, index_column)
+            if index_hash:
+                index[index_hash] = idx
+        
+        return index
+    
+    def column_number_to_letter(self, col_num: int) -> str:
+        """将列号转换为字母（1->A, 2->B, ..., 26->Z, 27->AA）"""
+        result = ""
+        while col_num > 0:
+            col_num -= 1
+            result = chr(65 + col_num % 26) + result
+            col_num //= 26
+        return result
+    
+    def column_letter_to_number(self, col_letter: str) -> int:
+        """将列字母转换为数字（A->1, B->2, ..., Z->26, AA->27）"""
+        result = 0
+        for char in col_letter:
+            result = result * 26 + (ord(char) - ord('A') + 1)
+        return result
+    
+    def df_to_values(self, df: pd.DataFrame, include_headers: bool = True) -> List[List[Any]]:
+        """将DataFrame转换为电子表格值格式"""
+        values = []
+        
+        # 添加表头
+        if include_headers:
+            values.append(df.columns.tolist())
+        
+        # 添加数据行
+        for _, row in df.iterrows():
+            row_values = []
+            for value in row:
+                converted_value = self.simple_convert_value(value)
+                row_values.append(converted_value)
+            values.append(row_values)
+        
+        return values
+    
+    def values_to_df(self, values: List[List[Any]]) -> pd.DataFrame:
+        """将电子表格值格式转换为DataFrame"""
+        if not values:
+            return pd.DataFrame()
+        
+        # 第一行作为表头
+        headers = values[0] if values else []
+        data_rows = values[1:] if len(values) > 1 else []
+        
+        # 创建DataFrame
+        if data_rows:
+            df = pd.DataFrame(data_rows, columns=headers)
+        else:
+            df = pd.DataFrame(columns=headers)
+        
+        return df
+    
+    def get_range_string(self, sheet_id: str, start_row: int, start_col: str, end_row: int, end_col: str) -> str:
+        """生成范围字符串"""
+        return f"{sheet_id}!{start_col}{start_row}:{end_col}{end_row}"
+
+    # ========== 统一接口方法 ==========
+    
     def df_to_records(self, df: pd.DataFrame, field_types: Optional[Dict[str, int]] = None) -> List[Dict]:
-        """将DataFrame转换为飞书记录格式"""
+        """将DataFrame转换为飞书记录格式（多维表格模式）"""
+        if self.target_type != TargetType.BITABLE:
+            raise ValueError("df_to_records 只支持多维表格模式")
+        
         records = []
         for _, row in df.iterrows():
             fields = {}
@@ -611,11 +701,14 @@ class DataConverter:
                 self.logger.info("4. 对于无法转换的字段，考虑使用文本类型")
             
             self.logger.info("\n📋 字段类型转换规则:")
-            self.logger.info("• 数字字段: 自动提取数值，清理货币符号和千分位")
-            self.logger.info("• 单选字段: 多值时自动选择第一个")
-            self.logger.info("• 多选字段: 支持逗号、分号、竖线分隔")
-            self.logger.info("• 日期字段: 支持多种日期格式自动识别")
-            self.logger.info("• 布尔字段: 智能识别是/否、true/false等")
+            if self.target_type == TargetType.BITABLE:
+                self.logger.info("• 数字字段: 自动提取数值，清理货币符号和千分位")
+                self.logger.info("• 单选字段: 多值时自动选择第一个")
+                self.logger.info("• 多选字段: 支持逗号、分号、竖线分隔")
+                self.logger.info("• 日期字段: 支持多种日期格式自动识别")
+                self.logger.info("• 布尔字段: 智能识别是/否、true/false等")
+            else:
+                self.logger.info("• 电子表格模式: 保持原始数据类型，简单转换")
             
             self.logger.info("=" * 60)
         else:

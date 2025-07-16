@@ -6,10 +6,12 @@
 from .auth import FeishuAuth
 from .base import RateLimiter, RetryableAPIClient
 from .bitable import BitableAPI
+from .sheet import SheetAPI
 
 __all__ = [
     'FeishuAuth',
-    'RateLimiter', 
+    'RateLimiter',
     'RetryableAPIClient',
-    'BitableAPI'
+    'BitableAPI',
+    'SheetAPI'
 ]
