@@ -338,6 +338,15 @@ class DataConverter:
         
         return 1  # 默认文本字段
     
+    def _suggest_feishu_field_type_raw(self) -> tuple:
+        """
+        原值策略 - 所有字段都使用文本类型，保持原始数据
+        
+        Returns:
+            (字段类型, 推荐理由)
+        """
+        return 1, "raw策略，所有字段使用文本类型保持原值"
+    
     def _suggest_feishu_field_type_base(self, primary_type: str, unique_values: set, 
                                        total_count: int, confidence: float) -> tuple:
         """
@@ -506,7 +515,9 @@ class DataConverter:
         # 4. 应用字段类型策略
         unique_values = set(str(v) for v in df[column_name].dropna())
         
-        if strategy == FieldTypeStrategy.BASE.value:
+        if strategy == FieldTypeStrategy.RAW.value:
+            suggested_type, reason = self._suggest_feishu_field_type_raw()
+        elif strategy == FieldTypeStrategy.BASE.value:
             suggested_type, reason = self._suggest_feishu_field_type_base(
                 analysis['primary_type'], unique_values, analysis['total_count'], analysis['confidence']
             )
@@ -966,15 +977,51 @@ class DataConverter:
         if not values:
             return pd.DataFrame()
         
+        # 清理数据：移除完全空的行和列
+        cleaned_values = []
+        for row in values:
+            # 移除行尾的空值
+            while row and (row[-1] is None or row[-1] == '' or str(row[-1]).strip() == ''):
+                row = row[:-1]
+            # 如果行不为空，则保留
+            if row and any(cell is not None and str(cell).strip() != '' for cell in row):
+                cleaned_values.append(row)
+        
+        if not cleaned_values:
+            return pd.DataFrame()
+        
         # 第一行作为表头
-        headers = values[0] if values else []
-        data_rows = values[1:] if len(values) > 1 else []
+        headers = cleaned_values[0] if cleaned_values else []
+        data_rows = cleaned_values[1:] if len(cleaned_values) > 1 else []
+        
+        # 清理表头：移除空的列名
+        valid_headers = []
+        valid_col_indices = []
+        for i, header in enumerate(headers):
+            if header is not None and str(header).strip() != '':
+                valid_headers.append(str(header).strip())
+                valid_col_indices.append(i)
+        
+        # 如果没有有效的表头，返回空DataFrame
+        if not valid_headers:
+            return pd.DataFrame()
+        
+        # 清理数据行：只保留有效列的数据
+        cleaned_data_rows = []
+        for row in data_rows:
+            cleaned_row = []
+            for i in valid_col_indices:
+                if i < len(row):
+                    cleaned_row.append(row[i])
+                else:
+                    cleaned_row.append(None)
+            cleaned_data_rows.append(cleaned_row)
         
         # 创建DataFrame
-        if data_rows:
-            df = pd.DataFrame(data_rows, columns=headers)
+        if cleaned_data_rows:
+            df = pd.DataFrame(cleaned_data_rows, columns=valid_headers)
         else:
-            df = pd.DataFrame(columns=headers)
+            df = pd.DataFrame(columns=valid_headers)
         
         return df
     
@@ -1054,3 +1101,106 @@ class DataConverter:
             self.logger.info("=" * 60)
         else:
             self.logger.info("📊 没有进行数据类型转换")
+    
+    def generate_sheet_field_config(self, df: pd.DataFrame, strategy: str = 'base', 
+                                   config = None) -> Dict[str, Any]:
+        """
+        为电子表格生成智能字段配置
+        
+        Args:
+            df: Excel数据
+            strategy: 字段类型策略
+            config: 配置对象
+            
+        Returns:
+            字段配置字典 {
+                'dropdown_configs': [{'column': 'A', 'options': [...], 'colors': [...]}],
+                'date_columns': ['B', 'C'],
+                'number_columns': ['D', 'E']
+            }
+        """
+        field_config = {
+            'dropdown_configs': [],
+            'date_columns': [],
+            'number_columns': []
+        }
+        
+        for column_name in df.columns:
+            # 分析每列数据
+            analysis = self.analyze_excel_column_data_enhanced(df, column_name, strategy, config)
+            
+            # 根据分析结果生成配置
+            if analysis['suggested_feishu_type'] == 3:  # 单选
+                # 生成下拉列表配置
+                unique_values = list(set(str(v) for v in df[column_name].dropna()))
+                if len(unique_values) <= 20:  # 合理的选项数量
+                    colors = self._generate_option_colors(unique_values)
+                    field_config['dropdown_configs'].append({
+                        'column': column_name,
+                        'options': unique_values,
+                        'colors': colors,
+                        'multiple': False
+                    })
+            elif analysis['suggested_feishu_type'] == 4:  # 多选
+                # 生成多选下拉列表配置
+                all_options = set()
+                for value in df[column_name].dropna():
+                    value_str = str(value)
+                    # 按分隔符拆分
+                    for sep in [',', ';', '|']:
+                        if sep in value_str:
+                            all_options.update(opt.strip() for opt in value_str.split(sep))
+                            break
+                    else:
+                        all_options.add(value_str)
+                
+                if len(all_options) <= 30:  # 多选允许更多选项
+                    colors = self._generate_option_colors(list(all_options))
+                    field_config['dropdown_configs'].append({
+                        'column': column_name,
+                        'options': list(all_options),
+                        'colors': colors,
+                        'multiple': True
+                    })
+            elif analysis['suggested_feishu_type'] == 5:  # 日期
+                field_config['date_columns'].append(column_name)
+            elif analysis['suggested_feishu_type'] == 2:  # 数字
+                field_config['number_columns'].append(column_name)
+        
+        return field_config
+    
+    def _generate_option_colors(self, options: List[str]) -> List[str]:
+        """
+        为下拉列表选项生成颜色
+        
+        Args:
+            options: 选项列表
+            
+        Returns:
+            颜色列表
+        """
+        # 预定义的颜色集合
+        color_palette = [
+            "#1FB6C1",  # 浅蓝色
+            "#F006C2",  # 玫红色
+            "#FB16C3",  # 粉红色
+            "#FFB6C1",  # 淡粉色
+            "#32CD32",  # 绿色
+            "#FF6347",  # 番茄色
+            "#9370DB",  # 紫色
+            "#FFD700",  # 金色
+            "#FF8C00",  # 橙色
+            "#20B2AA",  # 青色
+            "#9400D3",  # 深紫色
+            "#FF1493",  # 深粉色
+            "#00CED1",  # 深绿松石色
+            "#FF69B4",  # 热粉色
+            "#8A2BE2",  # 蓝紫色
+        ]
+        
+        # 循环使用颜色
+        colors = []
+        for i, option in enumerate(options):
+            colors.append(color_palette[i % len(color_palette)])
+        
+        return colors

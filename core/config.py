@@ -19,6 +19,7 @@ class FieldTypeStrategy(Enum):
     BASE = "base"                 # 基础策略 - 仅创建文本/数字/日期三种基础类型【默认】
     AUTO = "auto"                 # 自动策略 - 增加Excel类型检测（单选多选等）
     INTELLIGENCE = "intelligence" # 智能策略 - 基于置信度算法，仅支持配置文件
+    RAW = "raw"                   # 原值策略 - 不应用任何格式化，保持原始数据
 
 
 class SyncMode(Enum):

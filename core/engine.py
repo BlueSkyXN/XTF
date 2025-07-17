@@ -220,15 +220,45 @@ class XTFSyncEngine:
         if self.config.target_type != TargetType.SHEET:
             return pd.DataFrame()
             
-        # 先获取一个较大的范围来确定实际数据范围
-        range_str = f"{self.config.sheet_id}!A1:ZZ10000"
+        # 先尝试获取一个合理的范围
+        # 如果失败，尝试更小的范围，最终返回空DataFrame表示需要使用clone模式
+        ranges_to_try = [
+            f"{self.config.sheet_id}!A1:ZZ1000",  # 最多1000行
+            f"{self.config.sheet_id}!A1:Z500",    # 最多500行，Z列
+            f"{self.config.sheet_id}!A1:J100",    # 最多100行，J列
+            f"{self.config.sheet_id}!A1:E50"      # 最多50行，E列
+        ]
         
-        try:
-            values = self.api.get_sheet_data(self.config.spreadsheet_token, range_str)
-            return self.converter.values_to_df(values)
-        except Exception as e:
-            self.logger.warning(f"获取当前电子表格数据失败: {e}")
-            return pd.DataFrame()
+        for range_str in ranges_to_try:
+            try:
+                values = self.api.get_sheet_data(self.config.spreadsheet_token, range_str)
+                df = self.converter.values_to_df(values)
+                if not df.empty:
+                    # 检查是否包含有效数据（至少有一行数据包含非空值）
+                    has_valid_data = False
+                    for _, row in df.iterrows():
+                        if any(pd.notnull(val) and str(val).strip() != '' for val in row):
+                            has_valid_data = True
+                            break
+                    
+                    if has_valid_data:
+                        self.logger.info(f"成功获取电子表格数据: {len(df)} 行 x {len(df.columns)} 列")
+                        return df
+                    else:
+                        # 数据全为空，当作表格为空
+                        self.logger.info("电子表格数据全为空")
+                        return pd.DataFrame()
+                else:
+                    # 如果数据为空，说明表格确实是空的
+                    self.logger.info("电子表格为空")
+                    return pd.DataFrame()
+            except Exception as e:
+                self.logger.debug(f"尝试范围 {range_str} 失败: {e}")
+                continue
+        
+        # 所有范围都失败了，可能表格数据过大，返回空DataFrame触发clone模式
+        self.logger.warning("无法获取电子表格数据，可能数据量过大，将使用覆盖模式")
+        return pd.DataFrame()
     
     # ========== 统一同步方法 ==========
     
@@ -455,6 +485,7 @@ class XTFSyncEngine:
         
         if current_df.empty:
             self.logger.info("电子表格为空，新增全部数据")
+            # 使用克隆同步（会先写入数据再设置格式）
             return self.sync_clone(df)
         
         # 构建索引
@@ -625,8 +656,150 @@ class XTFSyncEngine:
         
         self.logger.info(f"克隆同步计划: 清空现有数据，新增 {len(df)} 行")
         
-        # 直接写入数据（会覆盖现有数据）
-        return self.api.write_sheet_data(self.config.spreadsheet_token, range_str, values)
+        # 先写入数据（会覆盖现有数据）
+        write_success = self.api.write_sheet_data(self.config.spreadsheet_token, range_str, values)
+        
+        # 数据写入成功后，再应用智能字段配置
+        if write_success:
+            if not self._setup_sheet_intelligence(df):
+                self.logger.warning("智能字段配置失败，但数据同步已完成")
+        
+        return write_success
+    
+    def _setup_sheet_intelligence(self, df: pd.DataFrame) -> bool:
+        """
+        为电子表格设置智能字段配置
+        
+        Args:
+            df: 数据DataFrame
+            
+        Returns:
+            是否设置成功
+        """
+        if self.config.target_type != TargetType.SHEET:
+            return True
+        
+        # 不同策略的配置范围不同
+        strategy_name = self.config.field_type_strategy.value
+        self.logger.info(f"开始电子表格智能字段配置 ({strategy_name}策略)...")
+        
+        # raw策略：不应用任何格式化，直接返回成功
+        if strategy_name == 'raw':
+            self.logger.info("raw策略：跳过所有格式化，保持原始数据")
+            return True
+        
+        # 生成字段配置
+        field_config = self.converter.generate_sheet_field_config(
+            df, self.config.field_type_strategy.value, self.config
+        )
+        
+        success = True
+        
+        # 1. 配置下拉列表 (base策略跳过)
+        if strategy_name != 'base':
+            for dropdown_config in field_config['dropdown_configs']:
+                column_name = dropdown_config['column']
+                
+                # 计算列索引
+                col_index = list(df.columns).index(column_name)
+                col_letter = self.converter.column_number_to_letter(col_index + 1)
+                
+                # 设置下拉列表范围 (从第2行开始，避免覆盖标题)
+                actual_end_row = len(df) + 1  # +1 for header row
+                range_str = f"{self.config.sheet_id}!{col_letter}2:{col_letter}{actual_end_row}"
+                
+                # 确保使用SheetAPI并检查token
+                if not isinstance(self.api, SheetAPI):
+                    self.logger.error("API类型不匹配，需要SheetAPI")
+                    continue
+                    
+                if not self.config.spreadsheet_token:
+                    self.logger.error("电子表格Token为空")
+                    continue
+                
+                # 设置下拉列表
+                dropdown_success = self.api.set_dropdown_validation(
+                    self.config.spreadsheet_token,
+                    range_str,
+                    dropdown_config['options'],
+                    dropdown_config['multiple'],
+                    dropdown_config['colors']
+                )
+                
+                if dropdown_success:
+                    self.logger.info(f"成功为列 '{column_name}' 设置下拉列表")
+                else:
+                    self.logger.error(f"为列 '{column_name}' 设置下拉列表失败")
+                    # 不设置success = False，允许继续其他列的操作
+        else:
+            self.logger.info("base策略跳过下拉列表配置")
+        
+        # 2. 配置日期格式
+        if field_config['date_columns'] and isinstance(self.api, SheetAPI) and self.config.spreadsheet_token:
+            date_ranges = []
+            for column_name in field_config['date_columns']:
+                col_index = list(df.columns).index(column_name)
+                col_letter = self.converter.column_number_to_letter(col_index + 1)
+                actual_end_row = len(df) + 1  # +1 for header row
+                range_str = f"{self.config.sheet_id}!{col_letter}2:{col_letter}{actual_end_row}"
+                date_ranges.append(range_str)
+            
+            # 设置日期格式
+            date_success = self.api.set_date_format(
+                self.config.spreadsheet_token,
+                date_ranges,
+                "yyyy/MM/dd"
+            )
+            
+            if date_success:
+                self.logger.info(f"成功为 {len(date_ranges)} 个日期列设置格式")
+            else:
+                self.logger.error("设置日期格式失败")
+                # 不设置success = False，允许继续其他操作
+        
+        # 3. 配置数字格式
+        if field_config['number_columns'] and isinstance(self.api, SheetAPI) and self.config.spreadsheet_token:
+            number_ranges = []
+            for column_name in field_config['number_columns']:
+                col_index = list(df.columns).index(column_name)
+                col_letter = self.converter.column_number_to_letter(col_index + 1)
+                actual_end_row = len(df) + 1  # +1 for header row
+                range_str = f"{self.config.sheet_id}!{col_letter}2:{col_letter}{actual_end_row}"
+                number_ranges.append(range_str)
+            
+            # 设置数字格式
+            number_success = self.api.set_number_format(
+                self.config.spreadsheet_token,
+                number_ranges,
+                "#,##0.00"
+            )
+            
+            if number_success:
+                self.logger.info(f"成功为 {len(number_ranges)} 个数字列设置格式")
+            else:
+                self.logger.error("设置数字格式失败")
+                # 不设置success = False，允许继续其他操作
+        
+        # 输出配置摘要
+        dropdown_count = len(field_config['dropdown_configs']) if strategy_name != 'base' else 0
+        date_count = len(field_config['date_columns'])
+        number_count = len(field_config['number_columns'])
+        total_configs = dropdown_count + date_count + number_count
+        
+        if total_configs > 0:
+            config_summary = []
+            if dropdown_count > 0:
+                config_summary.append(f"{dropdown_count}个下拉列表")
+            if date_count > 0:
+                config_summary.append(f"{date_count}个日期格式")
+            if number_count > 0:
+                config_summary.append(f"{number_count}个数字格式")
+            
+            self.logger.info(f"智能字段配置完成: {', '.join(config_summary)}")
+        else:
+            self.logger.info("未检测到需要智能配置的字段")
+        
+        return success
     
     def sync(self, df: pd.DataFrame) -> bool:
         """执行同步"""

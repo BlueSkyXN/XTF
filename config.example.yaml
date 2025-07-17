@@ -12,14 +12,6 @@ app_token: "your_app_token_here"          # 多维表格应用Token
 table_id: "your_table_id_here"            # 数据表ID
 create_missing_fields: true               # 是否自动创建缺失字段
 
-# 智能字段类型配置
-field_type_strategy: "base"                # 字段类型策略: base/auto/intelligence
-
-# Intelligence策略专用配置（仅在使用intelligence策略时生效）
-intelligence_date_confidence: 0.85         # 日期类型置信度
-intelligence_choice_confidence: 0.9        # 选择类型置信度
-intelligence_boolean_confidence: 0.95      # 布尔类型置信度
-
 # 电子表格配置 (target_type: sheet)
 spreadsheet_token: "your_spreadsheet_token_here"  # 电子表格Token
 sheet_id: "your_sheet_id_here"            # 工作表ID
@@ -34,6 +26,33 @@ index_column: "ID"                        # 索引列名，用于记录比对
 batch_size: 500                           # 批处理大小
 rate_limit_delay: 0.5                     # 接口调用间隔(秒)
 max_retries: 3                            # 最大重试次数
+
+# 智能字段类型配置 (支持多维表格和电子表格)
+field_type_strategy: "base"                # 字段类型策略: base/auto/intelligence/raw
+
+# Intelligence策略专用配置（仅在使用intelligence策略时生效）
+intelligence_date_confidence: 0.85         # 日期类型置信度
+intelligence_choice_confidence: 0.9        # 选择类型置信度
+intelligence_boolean_confidence: 0.95      # 布尔类型置信度
+
+# 智能字段类型策略说明:
+# - raw策略: 【保持原值】
+#   * 多维表格: 所有字段创建为文本类型，不进行数据类型转换
+#   * 电子表格: 不应用任何格式化，保持Excel原始数据和格式
+# - base策略: 【基础智能】
+#   * 多维表格: 自动识别文本/数字/日期三种基础类型
+#   * 电子表格: 自动设置日期/数字格式，不创建下拉列表
+# - auto策略: 【增强智能】
+#   * 多维表格: 在基础类型上增加Excel验证检测（单选/多选）
+#   * 电子表格: 基于Excel数据验证设置下拉列表，自动设置日期/数字格式
+# - intelligence策略: 【最强智能】
+#   * 多维表格: 基于置信度算法智能创建所有字段类型
+#   * 电子表格: 基于数据分析智能创建下拉列表、日期格式、数字格式
+#     - 单选下拉列表: 唯一值≤20个的字符串字段
+#     - 多选下拉列表: 包含分隔符的字符串字段
+#     - 日期格式: 自动设置为yyyy/MM/dd格式
+#     - 数字格式: 自动设置为#,##0.00格式
+#     - 颜色标记: 自动为下拉列表选项分配颜色
 
 # 日志设置
 log_level: "INFO"                         # 日志级别: DEBUG/INFO/WARNING/ERROR

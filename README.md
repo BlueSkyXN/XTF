@@ -9,7 +9,7 @@ XTF 通过主入口 [`XTF.py`](XTF.py) 支持**多维表格**（bitable）和**�
 ## ✨ 核心特性
 
 - 🔄 四种智能同步模式（全量、增量、覆盖、克隆）
-- 🎯 智能字段管理与类型推断（保守/激进/Excel感知三种策略）
+- 🎯 智能字段管理与类型推断（原值/基础/自动/智能四种策略）
 - 📊 大数据批量处理与性能优化
 - 🛡️ 频率控制与智能重试
 - 📝 详细日志与转换统计报告
@@ -50,7 +50,7 @@ XTF 通过主入口 [`XTF.py`](XTF.py) 支持**多维表格**（bitable）和**�
 | app_token             | str     | -      | 多维表格应用 Token           |
 | table_id              | str     | -      | 多维表格数据表 ID            |
 | create_missing_fields | bool    | true   | 自动创建缺失字段             |
-| field_type_strategy   | str     | base | 字段类型策略：base/auto/intelligence |
+| field_type_strategy   | str     | base | 字段类型策略：raw/base/auto/intelligence |
 | intelligence_date_confidence | float | 0.85 | Intelligence策略日期类型置信度 |
 | intelligence_choice_confidence | float | 0.9 | Intelligence策略选择类型置信度 |
 | intelligence_boolean_confidence | float | 0.95 | Intelligence策略布尔类型置信度 |
@@ -83,6 +83,7 @@ python XTF.py --target-type sheet --config config.yaml
 ### 常用参数
 
 - `--sync-mode` 同步模式（full/incremental/overwrite/clone）
+- `--field-type-strategy` 字段类型策略（raw/base/auto/intelligence）
 - `--index-column` 索引列名
 - `--batch-size` 批处理大小
 - `--log-level` 日志级别
@@ -104,20 +105,27 @@ python XTF.py --target-type sheet --config config.yaml
 
 ## 🧠 智能字段类型选择机制
 
-### 三种字段类型策略
+### 四种字段类型策略
+
+- **原值策略 (raw)** - 完全保持原值 🛡️
+  - **多维表格**: 所有字段创建为文本类型，不进行数据类型转换
+  - **电子表格**: 不应用任何格式化，保持Excel原始数据和格式
+  - 适合数据完整性要求极高的场景
 
 - **基础策略 (base)** - 默认推荐 ⭐
-  - 仅创建文本(1)/数字(2)/日期(5)三种基础类型
+  - **多维表格**: 仅创建文本(1)/数字(2)/日期(5)三种基础类型
+  - **电子表格**: 自动设置日期/数字格式，不创建下拉列表
   - 最大化数据同步成功率，适合企业级应用
-  - 所有其他情况一律使用文本类型
 
 - **自动策略 (auto)**
-  - 在基础类型上增加Excel类型检测
+  - **多维表格**: 在基础类型上增加Excel类型检测
+  - **电子表格**: 基于Excel数据验证设置下拉列表
   - 仅在检测到Excel数据验证时推荐单选/多选
   - 适合标准化Excel模板和表单
 
 - **智能策略 (intelligence)**
-  - 基于置信度算法积极推荐各种字段类型
+  - **多维表格**: 基于置信度算法积极推荐各种字段类型
+  - **电子表格**: 基于数据分析智能创建下拉列表、格式化
   - 支持所有类型，仅支持配置文件调整参数
   - 适合高质量数据和高级用户
 
@@ -145,6 +153,9 @@ python XTF.py --target-type sheet --config config.yaml
 ### 配置示例
 
 ```bash
+# 使用原值策略（完全保持原值）
+python XTF.py --field-type-strategy raw
+
 # 使用基础策略（默认推荐）
 python XTF.py --field-type-strategy base
 
@@ -158,6 +169,7 @@ python XTF.py --field-type-strategy intelligence
 **详细机制说明**：请参阅 [智能字段类型选择机制文档](docs/智能字段类型选择机制.md)
 
 **策略选择建议**：
+- 🛡️ **数据完整性**: `raw` 策略完全保持原值
 - 🔰 **首次使用**: `base` 策略确保稳定
 - 📋 **标准Excel**: `auto` 策略保持一致性
 - 🧠 **高级功能**: `intelligence` 策略最大化功能
@@ -171,7 +183,7 @@ XTF/
 ├── XTF.py                  # 主入口
 ├── api/                    # 飞书 API 封装
 ├── core/                   # 配置、同步引擎、数据转换
-├── lite/                   # 兼容旧版电子表格脚本
+├── lite/                   # 旧版脚本
 ├── config.example.yaml     # 配置示例
 ├── requirements.txt        # 依赖
 ├── docs/feishu-openapi-doc # 飞书 OpenAPI 文档库
@@ -212,6 +224,26 @@ XTF/
 
 ---
 
+## 🛡️ 错误处理与稳定性
+
+### 网格限制自动处理
+
+XTF 会自动处理电子表格的网格限制问题：
+
+- **智能顺序**: 先写入数据扩展网格，再设置格式
+- **范围验证**: 自动检查格式化范围是否超出网格限制
+- **优雅降级**: 跳过无效范围，只处理有效范围
+- **详细日志**: 记录处理结果便于调试
+
+### 数据完整性保护
+
+- **原值策略**: `raw` 策略确保数据不会因为类型转换而丢失
+- **容错机制**: 即使格式化失败，数据同步仍会成功完成
+- **批量重试**: 网络错误或临时故障时自动重试
+- **增量恢复**: 支持中断后的增量同步
+
+---
+
 ## 📚 API 文档与二次开发
 
 - 内置 [`docs/feishu-openapi-doc`](docs/feishu-openapi-doc/README.md) 为 AI 友好型飞书 OpenAPI Markdown 文档，便于查阅与扩展开发。
@@ -220,9 +252,3 @@ XTF/
   - [`core/engine.py`](core/engine.py): `XTFSyncEngine` 统一同步主流程，支持四种模式。
   - [`core/converter.py`](core/converter.py): `DataConverter` 字段类型推断与强制转换。
   - [`api/bitable.py`](api/bitable.py), [`api/sheet.py`](api/sheet.py): 飞书 API 封装，支持批量操作、重试、频控。
-
----
-
-## 📞 联系与支持
-
-如有问题或建议，欢迎提交 Issue 或 PR。
