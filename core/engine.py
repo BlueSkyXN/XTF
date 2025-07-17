@@ -11,7 +11,7 @@ import logging
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Dict, Any, List, Union
+from typing import Optional, Dict, Any, List, Union, Tuple
 
 from .config import SyncConfig, SyncMode, TargetType
 from .converter import DataConverter
@@ -95,7 +95,7 @@ class XTFSyncEngine:
             self.logger.warning(f"获取字段类型失败: {e}，将使用智能类型检测")
             return {}
 
-    def ensure_fields_exist(self, df: pd.DataFrame) -> tuple[bool, Dict[str, int]]:
+    def ensure_fields_exist(self, df: pd.DataFrame) -> Tuple[bool, Dict[str, int]]:
         """确保多维表格所需字段存在"""
         if self.config.target_type != TargetType.BITABLE:
             return True, {}

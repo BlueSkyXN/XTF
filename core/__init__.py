@@ -13,7 +13,6 @@ from .config import (
 )
 from .converter import DataConverter
 from .engine import XTFSyncEngine
-# main 已内嵌到 XTF.py，无需单独导出
 
 __all__ = [
     "SyncConfig",
@@ -24,16 +23,4 @@ __all__ = [
     "get_target_description",
     "DataConverter",
     "XTFSyncEngine",
-]
-
-__all__ = [
-    "SyncConfig",
-    "SyncMode",
-    "TargetType",
-    "ConfigManager",
-    "create_sample_config",
-    "get_target_description",
-    "DataConverter",
-    "XTFSyncEngine",
-    "main",
 ]

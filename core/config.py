@@ -118,8 +118,15 @@ class ConfigManager:
                 try:
                     config_data = ConfigManager.load_from_file(args.config)
                     if config_data:
+                        # 首先检查 target_type 参数
+                        if config_data.get('target_type'):
+                            target_type_val = config_data.get('target_type')
+                            if target_type_val == 'bitable':
+                                return TargetType.BITABLE
+                            elif target_type_val == 'sheet':
+                                return TargetType.SHEET
                         # 如果配置中有app_token和table_id，推断为多维表格
-                        if config_data.get('app_token') and config_data.get('table_id'):
+                        elif config_data.get('app_token') and config_data.get('table_id'):
                             return TargetType.BITABLE
                         # 如果配置中有spreadsheet_token和sheet_id，推断为电子表格
                         elif config_data.get('spreadsheet_token') and config_data.get('sheet_id'):

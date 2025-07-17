@@ -1,17 +1,18 @@
 # XTF 统一配置文件示例
-# XTF.py 使用多维表格相关配置，XTF_Sheet.py 使用电子表格相关配置
+# 支持多维表格和电子表格两种目标平台，通过 target_type 参数指定
 
 # 基础配置
 file_path: "data.xlsx"                    # Excel文件路径
 app_id: "cli_your_app_id_here"            # 飞书应用ID
 app_secret: "your_app_secret_here"        # 飞书应用密钥
+target_type: "bitable"                    # 目标类型: bitable(多维表格) 或 sheet(电子表格)
 
-# 多维表格配置 (XTF.py 使用)
+# 多维表格配置 (target_type: bitable)
 app_token: "your_app_token_here"          # 多维表格应用Token
 table_id: "your_table_id_here"            # 数据表ID
 create_missing_fields: true               # 是否自动创建缺失字段
 
-# 电子表格配置 (XTF_Sheet.py 使用)
+# 电子表格配置 (target_type: sheet)
 spreadsheet_token: "your_spreadsheet_token_here"  # 电子表格Token
 sheet_id: "your_sheet_id_here"            # 工作表ID
 start_row: 1                              # 开始行号
