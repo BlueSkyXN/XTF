@@ -12,6 +12,14 @@ app_token: "your_app_token_here"          # 多维表格应用Token
 table_id: "your_table_id_here"            # 数据表ID
 create_missing_fields: true               # 是否自动创建缺失字段
 
+# 智能字段类型配置
+field_type_strategy: "base"                # 字段类型策略: base/auto/intelligence
+
+# Intelligence策略专用配置（仅在使用intelligence策略时生效）
+intelligence_date_confidence: 0.85         # 日期类型置信度
+intelligence_choice_confidence: 0.9        # 选择类型置信度
+intelligence_boolean_confidence: 0.95      # 布尔类型置信度
+
 # 电子表格配置 (target_type: sheet)
 spreadsheet_token: "your_spreadsheet_token_here"  # 电子表格Token
 sheet_id: "your_sheet_id_here"            # 工作表ID

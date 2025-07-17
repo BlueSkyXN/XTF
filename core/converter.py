@@ -67,6 +67,72 @@ class DataConverter:
         
         return index
     
+    def _detect_excel_validation(self, df: pd.DataFrame, column_name: str) -> tuple:
+        """
+        检测Excel列是否包含数据验证(下拉列表)
+        
+        Returns:
+            (是否有验证, 验证类型描述)
+        """
+        try:
+            # 方法1: 检查pandas是否保留了Excel验证信息
+            if hasattr(df, '_excel_validation_info'):
+                validation_info = df._excel_validation_info.get(column_name)
+                if validation_info:
+                    return True, validation_info.get('type', 'unknown')
+            
+            # 方法2: 基于数据模式推断
+            column_data = df[column_name].dropna()
+            if len(column_data) == 0:
+                return False, "empty"
+            
+            unique_values = set(str(v) for v in column_data)
+            unique_count = len(unique_values)
+            total_count = len(column_data)
+            
+            # 下拉列表特征检测
+            validation_indicators = []
+            
+            # 特征1: 极少的唯一值且高重复率
+            if unique_count <= 8 and unique_count / total_count <= 0.3:
+                validation_indicators.append("low_unique_high_repeat")
+            
+            # 特征2: 值都是简短的标识符
+            if all(len(str(v)) <= 20 for v in unique_values):
+                validation_indicators.append("short_identifiers")
+            
+            # 特征3: 没有特殊字符和复杂格式
+            if all(not re.search(r'[^\w\s\-_()(（）)]', str(v)) for v in unique_values):
+                validation_indicators.append("simple_format")
+            
+            # 特征4: 值看起来像枚举选项
+            enum_patterns = [
+                r'^(状态|级别|类型|分类)[\w\s]*$',  # 状态类
+                r'^(高|中|低)$',                   # 等级类
+                r'^(是|否|true|false)$',          # 布尔类
+                r'^(完成|进行中|待开始|已取消)$',    # 流程状态
+                r'^[A-Z]{1,3}$',                  # 简短代码
+            ]
+            
+            enum_matches = sum(
+                1 for v in unique_values 
+                if any(re.match(pattern, str(v), re.IGNORECASE) for pattern in enum_patterns)
+            )
+            
+            if enum_matches >= unique_count * 0.6:  # 60%以上匹配枚举模式
+                validation_indicators.append("enum_pattern")
+            
+            # 判断是否可能是下拉列表
+            if len(validation_indicators) >= 3:
+                return True, f"suspected_dropdown({','.join(validation_indicators)})"
+            elif len(validation_indicators) >= 2 and unique_count <= 5:
+                return True, f"possible_dropdown({','.join(validation_indicators)})"
+            
+            return False, "no_validation_detected"
+            
+        except Exception as e:
+            return False, f"detection_error: {e}"
+    
     def analyze_excel_column_data(self, df: pd.DataFrame, column_name: str) -> Dict[str, Any]:
         """分析Excel列的数据特征，用于推断合适的飞书字段类型"""
         column_data = df[column_name].dropna()
@@ -118,7 +184,7 @@ class DataConverter:
         primary_type = max(type_stats.keys(), key=lambda k: type_stats[k])
         confidence = type_stats[primary_type] / total_count
         
-        # 推断飞书字段类型
+        # 推断飞书字段类型 (传统方法，保持兼容性)
         suggested_type = self._suggest_feishu_field_type(
             primary_type, unique_values, total_count, confidence
         )
@@ -143,31 +209,102 @@ class DataConverter:
     
     def _is_timestamp_string(self, s: str) -> bool:
         """检测字符串是否为时间戳"""
+        is_timestamp, _ = self._is_timestamp_enhanced(s)
+        return is_timestamp
+    
+    def _is_timestamp_enhanced(self, s: str) -> tuple:
+        """增强的时间戳检测"""
+        from datetime import datetime
+        
         if not s.isdigit():
-            return False
+            return False, 0.0
+        
         try:
             timestamp = int(s)
-            # 检查是否是合理的时间戳范围（1970年到2100年）
-            return 0 <= timestamp <= 4102444800 or 0 <= timestamp <= 4102444800000
+            current_year = datetime.now().year
+            
+            # 秒级时间戳: 1970-2050年
+            if 946684800 <= timestamp <= 2524608000:  # 2000-2050
+                confidence = 0.9 if 1640995200 <= timestamp <= 1893456000 else 0.7  # 2022-2030更高置信度
+                return True, confidence
+                
+            # 毫秒级时间戳: 1970-2050年  
+            elif 946684800000 <= timestamp <= 2524608000000:
+                confidence = 0.85
+                return True, confidence
+                
+            # 微秒级(Excel有时导出): 过于长的数字降低置信度
+            elif len(s) >= 13:
+                return True, 0.3
+                
         except ValueError:
-            return False
+            pass
+            
+        return False, 0.0
     
     def _is_date_string(self, s: str) -> bool:
         """检测字符串是否为日期格式"""
+        is_date, _, _ = self._is_date_string_enhanced(s)
+        return is_date
+    
+    def _is_date_string_enhanced(self, s: str) -> tuple:
+        """
+        增强的日期检测，返回(是否日期, 置信度, 检测到的格式)
+        """
+        from datetime import datetime
+        
+        s = s.strip()
+        if not s:
+            return False, 0.0, ""
+        
+        # 扩展的日期格式模式 (按常见程度排序)
         date_patterns = [
-            r'\d{4}-\d{1,2}-\d{1,2}',  # 2024-01-01
-            r'\d{4}/\d{1,2}/\d{1,2}',  # 2024/01/01
-            r'\d{1,2}/\d{1,2}/\d{4}',  # 01/01/2024
-            r'\d{4}-\d{1,2}-\d{1,2} \d{1,2}:\d{1,2}:\d{1,2}',  # 2024-01-01 12:00:00
+            # 标准ISO格式 (最高置信度)
+            (r'^\d{4}-\d{2}-\d{2}$', '%Y-%m-%d', 0.95),                    # 2024-01-01
+            (r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$', '%Y-%m-%d %H:%M:%S', 0.95), # 2024-01-01 12:30:45
+            (r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$', '%Y-%m-%d %H:%M', 0.9),   # 2024-01-01 12:30
+            
+            # 常见分隔符格式
+            (r'^\d{4}/\d{1,2}/\d{1,2}$', '%Y/%m/%d', 0.85),               # 2024/1/1
+            (r'^\d{1,2}/\d{1,2}/\d{4}$', '%m/%d/%Y', 0.7),                # 1/1/2024 (存在歧义)
+            (r'^\d{1,2}-\d{1,2}-\d{4}$', '%m-%d-%Y', 0.7),                # 1-1-2024
+            
+            # 中文格式
+            (r'^\d{4}年\d{1,2}月\d{1,2}日$', '%Y年%m月%d日', 0.9),         # 2024年1月1日
+            (r'^\d{1,2}月\d{1,2}日$', '%m月%d日', 0.8),                    # 1月1日
+            (r'^\d{4}\.\d{1,2}\.\d{1,2}$', '%Y.%m.%d', 0.8),              # 2024.1.1
+            
+            # Excel常见格式
+            (r'^\d{4}-\d{1,2}-\d{1,2}T\d{2}:\d{2}:\d{2}', '%Y-%m-%dT%H:%M:%S', 0.95), # ISO时间
         ]
-        for pattern in date_patterns:
+        
+        for pattern, fmt, base_confidence in date_patterns:
             if re.match(pattern, s):
-                return True
-        return False
+                try:
+                    # 尝试解析验证日期有效性
+                    if 'T' in fmt:  # ISO格式特殊处理
+                        parsed_date = datetime.fromisoformat(s.replace('T', ' ')[:19])
+                    else:
+                        parsed_date = datetime.strptime(s, fmt)
+                    
+                    # 合理性检查: 1900-2100年
+                    if 1900 <= parsed_date.year <= 2100:
+                        # 根据完整性调整置信度
+                        if parsed_date.hour == 0 and parsed_date.minute == 0:
+                            confidence = base_confidence * 0.95  # 纯日期略降置信度
+                        else:
+                            confidence = base_confidence  # 包含时间信息高置信度
+                        
+                        return True, confidence, fmt
+                        
+                except ValueError:
+                    continue  # 格式匹配但解析失败，继续下一个
+        
+        return False, 0.0, ""
     
     def _suggest_feishu_field_type(self, primary_type: str, unique_values: set, 
                                   total_count: int, confidence: float) -> int:
-        """根据数据特征推荐飞书字段类型"""
+        """根据数据特征推荐飞书字段类型 (保留兼容方法，建议使用analyze_excel_column_data_enhanced)"""
         unique_count = len(unique_values)
         
         if primary_type == 'number':
@@ -189,6 +326,119 @@ class DataConverter:
         
         return 1  # 默认文本字段
     
+    def _suggest_feishu_field_type_base(self, primary_type: str, unique_values: set, 
+                                       total_count: int, confidence: float) -> tuple:
+        """
+        基础策略 - 仅创建文本/数字/日期三种基础类型
+        
+        Returns:
+            (字段类型, 推荐理由)
+        """
+        # 1. 数字类型
+        if primary_type == 'number' and confidence >= 0.8:
+            return 2, f"数字类型，置信度{confidence:.1%}"
+        
+        # 2. 日期类型 - 需要高置信度
+        if primary_type == 'datetime' and confidence >= 0.85:
+            return 5, f"日期类型，置信度{confidence:.1%}"
+        
+        # 3. 所有其他情况都使用文本类型
+        if primary_type == 'datetime':
+            return 1, f"日期格式置信度不够({confidence:.1%})，使用文本类型"
+        elif primary_type == 'number':
+            return 1, f"数字格式置信度不够({confidence:.1%})，使用文本类型"
+        else:
+            return 1, "基础策略，使用文本类型"
+    
+    def _suggest_feishu_field_type_auto(self, primary_type: str, unique_values: set, 
+                                       total_count: int, confidence: float,
+                                       has_excel_validation: bool = False) -> tuple:
+        """
+        自动策略 - 在基础类型上增加Excel类型检测（单选多选等）
+        
+        Args:
+            has_excel_validation: 是否检测到Excel数据验证(下拉列表等)
+        
+        Returns:
+            (字段类型, 推荐理由)
+        """
+        unique_count = len(unique_values)
+        
+        # 1. 基础类型：数字
+        if primary_type == 'number' and confidence >= 0.8:
+            return 2, f"数字类型，置信度{confidence:.1%}"
+        
+        # 2. 基础类型：日期
+        if primary_type == 'datetime' and confidence >= 0.85:
+            return 5, f"日期类型，置信度{confidence:.1%}"
+        
+        # 3. Excel类型检测：仅在检测到Excel验证时推荐
+        if primary_type == 'string' and has_excel_validation:
+            if unique_count <= 15 and unique_count / total_count <= 0.4:
+                return 3, f"Excel下拉列表，唯一值{unique_count}个，推荐单选"
+            elif any(',' in str(v) or ';' in str(v) or '|' in str(v) for v in unique_values):
+                return 4, f"Excel下拉列表包含分隔符，推荐多选"
+        
+        # 4. 所有其他情况使用文本类型
+        if primary_type == 'datetime':
+            return 1, f"日期格式置信度不够({confidence:.1%})，使用文本类型"
+        elif primary_type == 'number':
+            return 1, f"数字格式置信度不够({confidence:.1%})，使用文本类型"
+        else:
+            return 1, "未检测到Excel验证，使用文本类型"
+    
+    def _suggest_feishu_field_type_intelligence(self, primary_type: str, unique_values: set, 
+                                               total_count: int, confidence: float,
+                                               config) -> tuple:
+        """
+        智能策略 - 基于置信度算法，使用配置文件中的阈值
+        
+        Returns:
+            (字段类型, 推荐理由)
+        """
+        unique_count = len(unique_values)
+        
+        # 1. 数字类型
+        if primary_type == 'number' and confidence >= 0.8:
+            return 2, f"数字类型，置信度{confidence:.1%}"
+        
+        # 2. 日期类型
+        if primary_type == 'datetime' and confidence >= getattr(config, 'intelligence_date_confidence', 0.85):
+            return 5, f"日期类型，置信度{confidence:.1%}"
+        
+        # 3. 布尔类型
+        if (primary_type == 'boolean' and 
+            confidence >= getattr(config, 'intelligence_boolean_confidence', 0.95) and 
+            unique_count <= 3):
+            return 7, f"布尔类型，置信度{confidence:.1%}"
+        
+        # 4. 字符串类型的智能判断
+        if primary_type == 'string':
+            choice_threshold = getattr(config, 'intelligence_choice_confidence', 0.9)
+            # 单选检测
+            if (unique_count <= 20 and 
+                unique_count / total_count <= 0.5 and
+                confidence >= choice_threshold):
+                return 3, f"智能判断为单选（{unique_count}个选项，置信度{confidence:.1%}）"
+            
+            # 多选检测
+            elif (any(',' in str(v) or ';' in str(v) or '|' in str(v) for v in unique_values) and
+                  confidence >= choice_threshold):
+                return 4, f"智能检测到多选模式，置信度{confidence:.1%}"
+        
+        # 5. 兜底策略
+        if primary_type == 'datetime':
+            date_threshold = getattr(config, 'intelligence_date_confidence', 0.85)
+            return 1, f"日期置信度不够({confidence:.1%}<{date_threshold:.1%})，使用文本类型"
+        elif primary_type == 'boolean':
+            bool_threshold = getattr(config, 'intelligence_boolean_confidence', 0.95)
+            return 1, f"布尔置信度不够({confidence:.1%}<{bool_threshold:.1%})，使用文本类型"
+        elif primary_type == 'string':
+            choice_threshold = getattr(config, 'intelligence_choice_confidence', 0.9)
+            return 1, f"选择类型置信度不够({confidence:.1%}<{choice_threshold:.1%})，使用文本类型"
+        else:
+            return 1, "智能分析无法确定类型，使用文本类型"
+    
     def get_field_type_name(self, field_type: int) -> str:
         """获取字段类型的中文名称"""
         type_names = {
@@ -197,6 +447,85 @@ class DataConverter:
             17: "附件", 18: "单向关联", 21: "双向关联", 22: "地理位置", 23: "群组"
         }
         return type_names.get(field_type, f"未知类型({field_type})")
+    
+    def analyze_excel_column_data_enhanced(self, df: pd.DataFrame, column_name: str, 
+                                          strategy: str = 'base', config = None) -> Dict[str, Any]:
+        """
+        增强的Excel列数据分析 - 支持三种字段类型策略
+        
+        Args:
+            df: Excel数据
+            column_name: 列名
+            strategy: 字段类型策略 ('base' | 'auto' | 'intelligence')
+            config: 配置对象 (intelligence策略必需)
+            
+        Returns:
+            包含推荐字段类型和理由的分析结果
+        """
+        from .config import FieldTypeStrategy
+        
+        # 1. 检测Excel验证信息（仅auto策略需要）
+        has_validation = False
+        validation_type = "not_checked"
+        if strategy == FieldTypeStrategy.AUTO.value:
+            has_validation, validation_type = self._detect_excel_validation(df, column_name)
+        
+        # 2. 基础数据分析
+        analysis = self.analyze_excel_column_data(df, column_name)  # 复用现有逻辑
+        
+        # 3. 增强的日期检测
+        if analysis['primary_type'] == 'string':
+            column_data = df[column_name].dropna()
+            date_confidence_sum = 0
+            date_count = 0
+            
+            for value in column_data:
+                is_date, confidence_val, format_type = self._is_date_string_enhanced(str(value))
+                if is_date:
+                    date_confidence_sum += confidence_val
+                    date_count += 1
+            
+            if date_count > 0:
+                avg_date_confidence = date_confidence_sum / len(column_data)
+                if avg_date_confidence >= 0.6:  # 60%以上是高质量日期
+                    analysis['primary_type'] = 'datetime'
+                    analysis['confidence'] = avg_date_confidence
+        
+        # 4. 应用字段类型策略
+        unique_values = set(str(v) for v in df[column_name].dropna())
+        
+        if strategy == FieldTypeStrategy.BASE.value:
+            suggested_type, reason = self._suggest_feishu_field_type_base(
+                analysis['primary_type'], unique_values, analysis['total_count'], analysis['confidence']
+            )
+        elif strategy == FieldTypeStrategy.AUTO.value:
+            suggested_type, reason = self._suggest_feishu_field_type_auto(
+                analysis['primary_type'], unique_values, analysis['total_count'], 
+                analysis['confidence'], has_validation
+            )
+        elif strategy == FieldTypeStrategy.INTELLIGENCE.value:
+            if config is None:
+                raise ValueError("Intelligence策略需要配置对象")
+            suggested_type, reason = self._suggest_feishu_field_type_intelligence(
+                analysis['primary_type'], unique_values, analysis['total_count'], 
+                analysis['confidence'], config
+            )
+        else:
+            # 兜底使用基础策略
+            suggested_type, reason = self._suggest_feishu_field_type_base(
+                analysis['primary_type'], unique_values, analysis['total_count'], analysis['confidence']
+            )
+        
+        # 5. 更新分析结果
+        analysis.update({
+            'suggested_feishu_type': suggested_type,
+            'recommendation_reason': reason,
+            'has_excel_validation': has_validation,
+            'validation_type': validation_type,
+            'strategy_used': strategy
+        })
+        
+        return analysis
     
     def convert_field_value_safe(self, field_name: str, value, field_types: Optional[Dict[str, int]] = None):
         """安全的字段值转换"""

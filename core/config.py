@@ -14,6 +14,13 @@ from dataclasses import dataclass
 from typing import Optional, Dict, Any
 
 
+class FieldTypeStrategy(Enum):
+    """字段类型选择策略枚举"""
+    BASE = "base"                 # 基础策略 - 仅创建文本/数字/日期三种基础类型【默认】
+    AUTO = "auto"                 # 自动策略 - 增加Excel类型检测（单选多选等）
+    INTELLIGENCE = "intelligence" # 智能策略 - 基于置信度算法，仅支持配置文件
+
+
 class SyncMode(Enum):
     """同步模式枚举"""
     FULL = "full"          # 全量同步：已存在的更新，不存在的新增
@@ -42,6 +49,14 @@ class SyncConfig:
     table_id: Optional[str] = None
     create_missing_fields: bool = True
     
+    # 智能字段类型选择配置
+    field_type_strategy: FieldTypeStrategy = FieldTypeStrategy.BASE
+    
+    # Intelligence策略专用配置（仅配置文件支持）
+    intelligence_date_confidence: float = 0.85     # 日期类型置信度
+    intelligence_choice_confidence: float = 0.9    # 选择类型置信度
+    intelligence_boolean_confidence: float = 0.95  # 布尔类型置信度
+    
     # 电子表格配置（target_type=sheet时使用）
     spreadsheet_token: Optional[str] = None
     sheet_id: Optional[str] = None
@@ -65,6 +80,8 @@ class SyncConfig:
             self.sync_mode = SyncMode(self.sync_mode)
         if isinstance(self.target_type, str):
             self.target_type = TargetType(self.target_type)
+        if isinstance(self.field_type_strategy, str):
+            self.field_type_strategy = FieldTypeStrategy(self.field_type_strategy)
         
         # 验证必需参数
         if self.target_type == TargetType.BITABLE:
@@ -160,6 +177,9 @@ class ConfigManager:
         parser.add_argument('--table-id', type=str, help='数据表ID')
         parser.add_argument('--no-create-fields', action='store_true',
                           help='不自动创建缺失字段')
+        parser.add_argument('--field-type-strategy', type=str, 
+                          choices=['base', 'auto', 'intelligence'],
+                          help='字段类型选择策略')
         
         # 电子表格配置
         parser.add_argument('--spreadsheet-token', type=str, help='电子表格Token')
@@ -202,6 +222,10 @@ class ConfigManager:
                 'rate_limit_delay': 0.5,
                 'max_retries': 3,
                 'create_missing_fields': True,
+                'field_type_strategy': 'base',
+                'intelligence_date_confidence': 0.85,
+                'intelligence_choice_confidence': 0.9,
+                'intelligence_boolean_confidence': 0.95,
                 'log_level': 'INFO'
             }
         else:  # SHEET
@@ -265,6 +289,9 @@ class ConfigManager:
         if args.no_create_fields:
             config_data['create_missing_fields'] = False
             cli_overrides.append("create_missing_fields=False")
+        if args.field_type_strategy:
+            config_data['field_type_strategy'] = args.field_type_strategy
+            cli_overrides.append(f"field_type_strategy={args.field_type_strategy}")
         
         # 电子表格参数
         if args.spreadsheet_token:
@@ -343,6 +370,10 @@ def create_sample_config(config_file: str = "config.yaml", target_type: TargetTy
             "rate_limit_delay": 0.5,
             "max_retries": 3,
             "create_missing_fields": True,
+            "field_type_strategy": "base",
+            "intelligence_date_confidence": 0.85,
+            "intelligence_choice_confidence": 0.9,
+            "intelligence_boolean_confidence": 0.95,
             "log_level": "INFO"
         }
     else:  # SHEET

@@ -113,39 +113,67 @@ class XTFSyncEngine:
                 field_types[field_name] = field_type
             
             if self.config.create_missing_fields:
-                # 找出缺失的字段
+                # 找出缺失的字段，保持原始列顺序
                 required_fields = set(df.columns)
-                missing_fields = required_fields - existing_field_names
+                missing_fields_set = required_fields - existing_field_names
+                
+                # 按照 DataFrame 列的原始顺序排列缺失字段
+                missing_fields = [col for col in df.columns if col in missing_fields_set]
                 
                 if missing_fields:
-                    self.logger.info(f"需要创建 {len(missing_fields)} 个缺失字段: {', '.join(missing_fields)}")
+                    self.logger.info(f"检测到 {len(missing_fields)} 个缺失字段")
+                    self.logger.info(f"使用字段类型策略: {self.config.field_type_strategy.value}")
                     
-                    # 分析每个缺失字段的数据特征并创建合适类型的字段
+                    # 分析每个缺失字段
+                    creation_plan = []
                     for field_name in missing_fields:
-                        analysis = self.converter.analyze_excel_column_data(df, field_name)
-                        suggested_type = analysis['suggested_feishu_type']
-                        confidence = analysis['confidence']
-                        
-                        self.logger.info(f"字段 '{field_name}': {analysis['analysis']}, "
-                                       f"建议类型: {self.converter.get_field_type_name(suggested_type)} "
-                                       f"(置信度: {confidence:.1%})")
-                        
-                        success = self.api.create_field(
-                            self.config.app_token, 
-                            self.config.table_id, 
-                            field_name,
-                            suggested_type
+                        # 使用增强的分析方法
+                        analysis = self.converter.analyze_excel_column_data_enhanced(
+                            df, field_name, self.config.field_type_strategy.value, self.config
                         )
+                        
+                        creation_plan.append({
+                            'field_name': field_name,
+                            'suggested_type': analysis['suggested_feishu_type'],
+                            'confidence': analysis['confidence'],
+                            'reason': analysis['recommendation_reason'],
+                            'has_validation': analysis['has_excel_validation']
+                        })
+                    
+                    # 显示创建计划
+                    self.logger.info("=" * 60)
+                    self.logger.info("📋 字段创建计划:")
+                    for plan in creation_plan:
+                        validation_mark = "📋" if plan['has_validation'] else "📝"
+                        self.logger.info(
+                            f"{validation_mark} {plan['field_name']}: "
+                            f"{self.converter.get_field_type_name(plan['suggested_type'])} "
+                            f"(置信度: {plan['confidence']:.1%}) - {plan['reason']}"
+                        )
+                    self.logger.info("=" * 60)
+                    
+                    # 执行字段创建
+                    for plan in creation_plan:
+                        success = self.api.create_field(
+                            self.config.app_token,
+                            self.config.table_id,
+                            plan['field_name'],
+                            plan['suggested_type']
+                        )
+                        
                         if not success:
+                            self.logger.error(f"字段 '{plan['field_name']}' 创建失败")
                             return False, field_types
                         
-                        # 记录新创建字段的类型
-                        field_types[field_name] = suggested_type
+                        # 记录新字段类型
+                        field_types[plan['field_name']] = plan['suggested_type']
                     
                     # 等待字段创建完成
+                    import time
                     time.sleep(2)
+                    
                 else:
-                    self.logger.info("所有必需字段已存在")
+                    self.logger.info("✅ 所有必需字段已存在，无需创建")
             
             return True, field_types
             
