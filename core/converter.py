@@ -61,7 +61,19 @@ class DataConverter:
         for record in records:
             fields = record.get('fields', {})
             if index_column in fields:
-                index_value = str(fields[index_column])
+                raw_value = fields[index_column]
+                
+                # 处理富文本格式：[{'text': '内容', 'type': 'text'}] 
+                if isinstance(raw_value, list) and len(raw_value) > 0:
+                    if isinstance(raw_value[0], dict) and 'text' in raw_value[0]:
+                        index_value = raw_value[0]['text']
+                    else:
+                        index_value = str(raw_value[0])
+                elif isinstance(raw_value, dict) and 'text' in raw_value:
+                    index_value = raw_value['text']
+                else:
+                    index_value = str(raw_value)
+                
                 index_hash = hashlib.md5(index_value.encode('utf-8')).hexdigest()
                 index[index_hash] = record
         
