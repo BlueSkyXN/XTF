@@ -11,7 +11,8 @@ env:
   PYTHON_VERSION: '3.11'
 
 jobs:
-  build-programs:
+  build-xtf:
+    name: Build XTF
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -52,7 +53,7 @@ jobs:
         python-version: ${{ env.PYTHON_VERSION }}
         architecture: ${{ matrix.setup_python_arch }}
     
-    - name: Install dependencies
+    - name: Install dependencies for XTF
       run: |
         python -m pip install --upgrade pip
         pip install pyinstaller
@@ -63,8 +64,95 @@ jobs:
       run: |
         pyinstaller --onefile \
           --strip \
+          --hidden-import=core.config \
+          --hidden-import=core.engine \
+          --hidden-import=api.auth \
+          --hidden-import=api.bitable \
+          --hidden-import=api.sheet \
           XTF.py \
           --distpath dist/${{ matrix.platform }}
+      shell: bash
+    
+    - name: Prepare XTF artifacts
+      run: |
+        platform="${{ matrix.platform }}"
+        version="${{ env.VERSION }}"
+        
+        mkdir -p "artifacts/XTF-${platform}-${version}"
+        
+        if [[ "${{ matrix.platform }}" == "windows-x64" ]]; then
+          cp "dist/${platform}/XTF.exe" "artifacts/XTF-${platform}-${version}/"
+        else
+          cp "dist/${platform}/XTF" "artifacts/XTF-${platform}-${version}/"
+          chmod +x "artifacts/XTF-${platform}-${version}/XTF"
+        fi
+        
+        cp config.example.yaml "artifacts/XTF-${platform}-${version}/config.yaml"
+        
+        cd artifacts
+        if [[ "${{ matrix.platform }}" == "windows-x64" ]]; then
+          powershell -Command "Compress-Archive -Path 'XTF-${platform}-${version}' -DestinationPath '../XTF-${platform}-${version}.zip' -Force"
+        else
+          zip -r "../XTF-${platform}-${version}.zip" "XTF-${platform}-${version}"/
+        fi
+        cd ..
+      shell: bash
+    
+    - name: Upload XTF artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: xtf-${{ matrix.platform }}-${{ env.VERSION }}
+        path: XTF-${{ matrix.platform }}-${{ env.VERSION }}.zip
+        compression-level: 0
+        retention-days: 30
+
+  build-xtf-sheet:
+    name: Build XTF-Sheet (Legacy)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            arch: x64
+            platform: linux-x64
+            setup_python_arch: x64
+          - os: ubuntu-22.04-arm
+            arch: arm64
+            platform: linux-arm64
+            setup_python_arch: arm64
+          - os: windows-2022
+            arch: x64
+            platform: windows-x64
+            setup_python_arch: x64
+          - os: macos-15
+            arch: arm64
+            platform: macos-arm64
+            setup_python_arch: arm64
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set commit version
+      id: version
+      run: |
+        VERSION=$(git log --format=%B -1 | head -1)
+        echo "VERSION=$VERSION" >> $GITHUB_ENV
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+      shell: bash
+    
+    - name: Set up Python ${{ env.PYTHON_VERSION }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        architecture: ${{ matrix.setup_python_arch }}
+    
+    - name: Install dependencies for XTF-Sheet (minimal)
+      run: |
+        python -m pip install --upgrade pip
+        pip install pyinstaller
+        pip install pandas requests pyyaml
       shell: bash
     
     - name: Build XTF-Sheet
@@ -76,6 +164,88 @@ jobs:
           --distpath dist/${{ matrix.platform }}
       shell: bash
     
+    - name: Prepare XTF-Sheet artifacts
+      run: |
+        platform="${{ matrix.platform }}"
+        version="${{ env.VERSION }}"
+        
+        mkdir -p "artifacts/XTF-Sheet_py-${platform}-${version}"
+        
+        if [[ "${{ matrix.platform }}" == "windows-x64" ]]; then
+          cp "dist/${platform}/XTF-Sheet.exe" "artifacts/XTF-Sheet_py-${platform}-${version}/"
+        else
+          cp "dist/${platform}/XTF-Sheet" "artifacts/XTF-Sheet_py-${platform}-${version}/"
+          chmod +x "artifacts/XTF-Sheet_py-${platform}-${version}/XTF-Sheet"
+        fi
+        
+        cp config.example.yaml "artifacts/XTF-Sheet_py-${platform}-${version}/config.yaml"
+        
+        cd artifacts
+        if [[ "${{ matrix.platform }}" == "windows-x64" ]]; then
+          powershell -Command "Compress-Archive -Path 'XTF-Sheet_py-${platform}-${version}' -DestinationPath '../XTF-Sheet_py-${platform}-${version}.zip' -Force"
+        else
+          zip -r "../XTF-Sheet_py-${platform}-${version}.zip" "XTF-Sheet_py-${platform}-${version}"/
+        fi
+        cd ..
+      shell: bash
+    
+    - name: Upload XTF-Sheet artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: xtf-sheet-${{ matrix.platform }}-${{ env.VERSION }}
+        path: XTF-Sheet_py-${{ matrix.platform }}-${{ env.VERSION }}.zip
+        compression-level: 0
+        retention-days: 30
+
+  build-xtf-bitable:
+    name: Build XTF-Bitable (Legacy)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            arch: x64
+            platform: linux-x64
+            setup_python_arch: x64
+          - os: ubuntu-22.04-arm
+            arch: arm64
+            platform: linux-arm64
+            setup_python_arch: arm64
+          - os: windows-2022
+            arch: x64
+            platform: windows-x64
+            setup_python_arch: x64
+          - os: macos-15
+            arch: arm64
+            platform: macos-arm64
+            setup_python_arch: arm64
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set commit version
+      id: version
+      run: |
+        VERSION=$(git log --format=%B -1 | head -1)
+        echo "VERSION=$VERSION" >> $GITHUB_ENV
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+      shell: bash
+    
+    - name: Set up Python ${{ env.PYTHON_VERSION }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        architecture: ${{ matrix.setup_python_arch }}
+    
+    - name: Install dependencies for XTF-Bitable (minimal)
+      run: |
+        python -m pip install --upgrade pip
+        pip install pyinstaller
+        pip install pandas requests pyyaml
+      shell: bash
+    
     - name: Build XTF-Bitable
       run: |
         pyinstaller --onefile \
@@ -85,57 +255,42 @@ jobs:
           --distpath dist/${{ matrix.platform }}
       shell: bash
     
-    - name: Prepare individual program artifacts
+    - name: Prepare XTF-Bitable artifacts
       run: |
         platform="${{ matrix.platform }}"
         version="${{ env.VERSION }}"
         
-        # Create directories for each program
-        mkdir -p "artifacts/XTF_py-${platform}-${version}"
-        mkdir -p "artifacts/XTF-Sheet_py-${platform}-${version}"
         mkdir -p "artifacts/XTF-Bitable_py-${platform}-${version}"
         
-        # Copy executables and config
         if [[ "${{ matrix.platform }}" == "windows-x64" ]]; then
-          cp "dist/${platform}/XTF.exe" "artifacts/XTF_py-${platform}-${version}/"
-          cp "dist/${platform}/XTF-Sheet.exe" "artifacts/XTF-Sheet_py-${platform}-${version}/"
           cp "dist/${platform}/XTF-Bitable.exe" "artifacts/XTF-Bitable_py-${platform}-${version}/"
         else
-          cp "dist/${platform}/XTF" "artifacts/XTF_py-${platform}-${version}/"
-          cp "dist/${platform}/XTF-Sheet" "artifacts/XTF-Sheet_py-${platform}-${version}/"
           cp "dist/${platform}/XTF-Bitable" "artifacts/XTF-Bitable_py-${platform}-${version}/"
-          chmod +x "artifacts/XTF_py-${platform}-${version}/XTF"
-          chmod +x "artifacts/XTF-Sheet_py-${platform}-${version}/XTF-Sheet"
           chmod +x "artifacts/XTF-Bitable_py-${platform}-${version}/XTF-Bitable"
         fi
         
-        # Copy config files to each program directory
-        cp config.example.yaml "artifacts/XTF_py-${platform}-${version}/config.yaml"
-        cp config.example.yaml "artifacts/XTF-Sheet_py-${platform}-${version}/config.yaml"
         cp config.example.yaml "artifacts/XTF-Bitable_py-${platform}-${version}/config.yaml"
         
-        # Create ZIP files for individual programs
         cd artifacts
-        zip -r "../XTF_py-${platform}-${version}.zip" "XTF_py-${platform}-${version}"/
-        zip -r "../XTF-Sheet_py-${platform}-${version}.zip" "XTF-Sheet_py-${platform}-${version}"/
-        zip -r "../XTF-Bitable_py-${platform}-${version}.zip" "XTF-Bitable_py-${platform}-${version}"/
+        if [[ "${{ matrix.platform }}" == "windows-x64" ]]; then
+          powershell -Command "Compress-Archive -Path 'XTF-Bitable_py-${platform}-${version}' -DestinationPath '../XTF-Bitable_py-${platform}-${version}.zip' -Force"
+        else
+          zip -r "../XTF-Bitable_py-${platform}-${version}.zip" "XTF-Bitable_py-${platform}-${version}"/
+        fi
         cd ..
       shell: bash
     
-    - name: Upload individual program artifacts
+    - name: Upload XTF-Bitable artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: programs-${{ matrix.platform }}-${{ env.VERSION }}
-        path: |
-          XTF_py-${{ matrix.platform }}-${{ env.VERSION }}.zip
-          XTF-Sheet_py-${{ matrix.platform }}-${{ env.VERSION }}.zip
-          XTF-Bitable_py-${{ matrix.platform }}-${{ env.VERSION }}.zip
+        name: xtf-bitable-${{ matrix.platform }}-${{ env.VERSION }}
+        path: XTF-Bitable_py-${{ matrix.platform }}-${{ env.VERSION }}.zip
         compression-level: 0
         retention-days: 30
-
+    
   create-platform-bundles:
     runs-on: ubuntu-latest
-    needs: build-programs
+    needs: [build-xtf, build-xtf-sheet, build-xtf-bitable]
     strategy:
       matrix:
         platform: [linux-x64, linux-arm64, windows-x64, macos-arm64]
@@ -152,10 +307,11 @@ jobs:
         echo "version=$VERSION" >> $GITHUB_OUTPUT
       shell: bash
     
-    - name: Download platform artifacts
+    - name: Download all artifacts for platform
       uses: actions/download-artifact@v4
       with:
-        name: programs-${{ matrix.platform }}-${{ env.VERSION }}
+        pattern: "*-${{ matrix.platform }}-${{ env.VERSION }}"
+        merge-multiple: true
     
     - name: Create platform bundle
       run: |
@@ -163,7 +319,7 @@ jobs:
         version="${{ env.VERSION }}"
         
         # Extract individual program ZIPs
-        unzip "XTF_py-${platform}-${version}.zip"
+        unzip "XTF-${platform}-${version}.zip"
         unzip "XTF-Sheet_py-${platform}-${version}.zip"
         unzip "XTF-Bitable_py-${platform}-${version}.zip"
         
@@ -171,7 +327,7 @@ jobs:
         mkdir -p "ALL-XTF-${platform}-${version}"
         
         # Copy all programs to bundle
-        cp -r "XTF_py-${platform}-${version}"/* "ALL-XTF-${platform}-${version}/"
+        cp -r "XTF-${platform}-${version}"/* "ALL-XTF-${platform}-${version}/"
         cp -r "XTF-Sheet_py-${platform}-${version}"/* "ALL-XTF-${platform}-${version}/"
         cp -r "XTF-Bitable_py-${platform}-${version}"/* "ALL-XTF-${platform}-${version}/"
         
