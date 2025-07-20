@@ -89,12 +89,13 @@ jobs:
         
         cp config.example.yaml "artifacts/XTF-${platform}-${version}/config.yaml"
         
-        cd artifacts
+        # Install zip on Windows if needed
         if [[ "${{ matrix.platform }}" == "windows-x64" ]]; then
-          powershell -Command "Compress-Archive -Path 'XTF-${platform}-${version}' -DestinationPath '../XTF-${platform}-${version}.zip' -Force"
-        else
-          zip -r "../XTF-${platform}-${version}.zip" "XTF-${platform}-${version}"/
+          choco install zip -y
         fi
+        
+        cd artifacts
+        zip -r "../XTF-${platform}-${version}.zip" "XTF-${platform}-${version}"/
         cd ..
       shell: bash
     
@@ -180,12 +181,13 @@ jobs:
         
         cp config.example.yaml "artifacts/XTF-Sheet_py-${platform}-${version}/config.yaml"
         
-        cd artifacts
+        # Install zip on Windows if needed
         if [[ "${{ matrix.platform }}" == "windows-x64" ]]; then
-          powershell -Command "Compress-Archive -Path 'XTF-Sheet_py-${platform}-${version}' -DestinationPath '../XTF-Sheet_py-${platform}-${version}.zip' -Force"
-        else
-          zip -r "../XTF-Sheet_py-${platform}-${version}.zip" "XTF-Sheet_py-${platform}-${version}"/
+          choco install zip -y
         fi
+        
+        cd artifacts
+        zip -r "../XTF-Sheet_py-${platform}-${version}.zip" "XTF-Sheet_py-${platform}-${version}"/
         cd ..
       shell: bash
     
@@ -271,12 +273,13 @@ jobs:
         
         cp config.example.yaml "artifacts/XTF-Bitable_py-${platform}-${version}/config.yaml"
         
-        cd artifacts
+        # Install zip on Windows if needed
         if [[ "${{ matrix.platform }}" == "windows-x64" ]]; then
-          powershell -Command "Compress-Archive -Path 'XTF-Bitable_py-${platform}-${version}' -DestinationPath '../XTF-Bitable_py-${platform}-${version}.zip' -Force"
-        else
-          zip -r "../XTF-Bitable_py-${platform}-${version}.zip" "XTF-Bitable_py-${platform}-${version}"/
+          choco install zip -y
         fi
+        
+        cd artifacts
+        zip -r "../XTF-Bitable_py-${platform}-${version}.zip" "XTF-Bitable_py-${platform}-${version}"/
         cd ..
       shell: bash
     
@@ -318,10 +321,27 @@ jobs:
         platform="${{ matrix.platform }}"
         version="${{ env.VERSION }}"
         
-        # Extract individual program ZIPs
-        unzip "XTF-${platform}-${version}.zip"
-        unzip "XTF-Sheet_py-${platform}-${version}.zip"
-        unzip "XTF-Bitable_py-${platform}-${version}.zip"
+        # Install 7z for better cross-platform compatibility
+        sudo apt-get update && sudo apt-get install -y p7zip-full
+        
+        # Extract individual program ZIPs with error handling
+        echo "Extracting XTF-${platform}-${version}.zip..."
+        if ! 7z x "XTF-${platform}-${version}.zip" -y; then
+          echo "7z failed, trying unzip with compatibility mode..."
+          unzip -DD "XTF-${platform}-${version}.zip" || (echo "Failed to extract XTF zip" && exit 1)
+        fi
+        
+        echo "Extracting XTF-Sheet_py-${platform}-${version}.zip..."
+        if ! 7z x "XTF-Sheet_py-${platform}-${version}.zip" -y; then
+          echo "7z failed, trying unzip with compatibility mode..."
+          unzip -DD "XTF-Sheet_py-${platform}-${version}.zip" || (echo "Failed to extract XTF-Sheet zip" && exit 1)
+        fi
+        
+        echo "Extracting XTF-Bitable_py-${platform}-${version}.zip..."
+        if ! 7z x "XTF-Bitable_py-${platform}-${version}.zip" -y; then
+          echo "7z failed, trying unzip with compatibility mode..."
+          unzip -DD "XTF-Bitable_py-${platform}-${version}.zip" || (echo "Failed to extract XTF-Bitable zip" && exit 1)
+        fi
         
         # Create platform bundle directory
         mkdir -p "ALL-XTF-${platform}-${version}"
@@ -369,13 +389,20 @@ jobs:
       run: |
         version="${{ env.VERSION }}"
         
+        # Install 7z for better cross-platform compatibility
+        sudo apt-get update && sudo apt-get install -y p7zip-full
+        
         # Create full release directory
         mkdir -p "FULL-XTF-${version}"
         
-        # Extract and organize all platform bundles
+        # Extract and organize all platform bundles with error handling
         for zip_file in ALL-XTF-*-${version}.zip; do
           if [[ -f "$zip_file" ]]; then
-            unzip "$zip_file"
+            echo "Extracting $zip_file..."
+            if ! 7z x "$zip_file" -y; then
+              echo "7z failed, trying unzip with compatibility mode..."
+              unzip -DD "$zip_file" || (echo "Failed to extract $zip_file" && exit 1)
+            fi
             platform_dir=$(basename "$zip_file" .zip)
             mv "$platform_dir" "FULL-XTF-${version}/"
           fi
