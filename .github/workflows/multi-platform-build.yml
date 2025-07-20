@@ -78,16 +78,16 @@ jobs:
         platform="${{ matrix.platform }}"
         version="${{ env.VERSION }}"
         
-        mkdir -p "artifacts/XTF-${platform}-${version}"
+        mkdir -p "artifacts/XTF_py-${platform}-${version}"
         
         if [[ "${{ matrix.platform }}" == "windows-x64" ]]; then
-          cp "dist/${platform}/XTF.exe" "artifacts/XTF-${platform}-${version}/"
+          cp "dist/${platform}/XTF.exe" "artifacts/XTF_py-${platform}-${version}/"
         else
-          cp "dist/${platform}/XTF" "artifacts/XTF-${platform}-${version}/"
-          chmod +x "artifacts/XTF-${platform}-${version}/XTF"
+          cp "dist/${platform}/XTF" "artifacts/XTF_py-${platform}-${version}/"
+          chmod +x "artifacts/XTF_py-${platform}-${version}/XTF"
         fi
         
-        cp config.example.yaml "artifacts/XTF-${platform}-${version}/config.yaml"
+        cp config.example.yaml "artifacts/XTF_py-${platform}-${version}/config.yaml"
         
         # Install zip on Windows if needed
         if [[ "${{ matrix.platform }}" == "windows-x64" ]]; then
@@ -95,15 +95,15 @@ jobs:
         fi
         
         cd artifacts
-        zip -r "../XTF-${platform}-${version}.zip" "XTF-${platform}-${version}"/
+        zip -r "../XTF_py-${platform}-${version}.zip" "XTF_py-${platform}-${version}"/
         cd ..
       shell: bash
     
     - name: Upload XTF artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: xtf-${{ matrix.platform }}-${{ env.VERSION }}
-        path: XTF-${{ matrix.platform }}-${{ env.VERSION }}.zip
+        name: XTF_py-${{ matrix.platform }}-${{ env.VERSION }}
+        path: XTF_py-${{ matrix.platform }}-${{ env.VERSION }}.zip
         compression-level: 0
         retention-days: 30
 
@@ -194,7 +194,7 @@ jobs:
     - name: Upload XTF-Sheet artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: xtf-sheet-${{ matrix.platform }}-${{ env.VERSION }}
+        name: XTF-Sheet_py-${{ matrix.platform }}-${{ env.VERSION }}
         path: XTF-Sheet_py-${{ matrix.platform }}-${{ env.VERSION }}.zip
         compression-level: 0
         retention-days: 30
@@ -286,7 +286,7 @@ jobs:
     - name: Upload XTF-Bitable artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: xtf-bitable-${{ matrix.platform }}-${{ env.VERSION }}
+        name: XTF-Bitable_py-${{ matrix.platform }}-${{ env.VERSION }}
         path: XTF-Bitable_py-${{ matrix.platform }}-${{ env.VERSION }}.zip
         compression-level: 0
         retention-days: 30
@@ -313,7 +313,7 @@ jobs:
     - name: Download all artifacts for platform
       uses: actions/download-artifact@v4
       with:
-        pattern: "*-${{ matrix.platform }}-${{ env.VERSION }}"
+        pattern: "*_py-${{ matrix.platform }}-${{ env.VERSION }}"
         merge-multiple: true
     
     - name: Create platform bundle
@@ -325,10 +325,10 @@ jobs:
         sudo apt-get update && sudo apt-get install -y p7zip-full
         
         # Extract individual program ZIPs with error handling
-        echo "Extracting XTF-${platform}-${version}.zip..."
-        if ! 7z x "XTF-${platform}-${version}.zip" -y; then
+        echo "Extracting XTF_py-${platform}-${version}.zip..."
+        if ! 7z x "XTF_py-${platform}-${version}.zip" -y; then
           echo "7z failed, trying unzip with compatibility mode..."
-          unzip -DD "XTF-${platform}-${version}.zip" || (echo "Failed to extract XTF zip" && exit 1)
+          unzip -DD "XTF_py-${platform}-${version}.zip" || (echo "Failed to extract XTF zip" && exit 1)
         fi
         
         echo "Extracting XTF-Sheet_py-${platform}-${version}.zip..."
@@ -347,7 +347,7 @@ jobs:
         mkdir -p "ALL-XTF-${platform}-${version}"
         
         # Copy all programs to bundle
-        cp -r "XTF-${platform}-${version}"/* "ALL-XTF-${platform}-${version}/"
+        cp -r "XTF_py-${platform}-${version}"/* "ALL-XTF-${platform}-${version}/"
         cp -r "XTF-Sheet_py-${platform}-${version}"/* "ALL-XTF-${platform}-${version}/"
         cp -r "XTF-Bitable_py-${platform}-${version}"/* "ALL-XTF-${platform}-${version}/"
         
@@ -358,7 +358,7 @@ jobs:
     - name: Upload platform bundle
       uses: actions/upload-artifact@v4
       with:
-        name: platform-bundle-${{ matrix.platform }}-${{ env.VERSION }}
+        name: ALL-XTF-${{ matrix.platform }}-${{ env.VERSION }}
         path: ALL-XTF-${{ matrix.platform }}-${{ env.VERSION }}.zip
         compression-level: 0
         retention-days: 30
@@ -382,7 +382,7 @@ jobs:
     - name: Download all platform bundles
       uses: actions/download-artifact@v4
       with:
-        pattern: platform-bundle-*-${{ env.VERSION }}
+        pattern: ALL-XTF-*-${{ env.VERSION }}
         merge-multiple: true
     
     - name: Create full release bundle
@@ -415,7 +415,7 @@ jobs:
     - name: Upload full release bundle
       uses: actions/upload-artifact@v4
       with:
-        name: full-release-${{ env.VERSION }}
+        name: FULL-XTF-${{ env.VERSION }}
         path: FULL-XTF-${{ env.VERSION }}.zip
         compression-level: 0
         retention-days: 30
@@ -440,7 +440,7 @@ jobs:
     - name: Download all platform bundles
       uses: actions/download-artifact@v4
       with:
-        pattern: platform-bundle-*-${{ env.VERSION }}
+        pattern: ALL-XTF-*-${{ env.VERSION }}
         merge-multiple: true
     
     - name: Prepare release assets
