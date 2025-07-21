@@ -176,10 +176,12 @@ class ConfigManager:
         # 多维表格配置
         parser.add_argument('--app-token', type=str, help='多维表格应用Token')
         parser.add_argument('--table-id', type=str, help='数据表ID')
+        parser.add_argument('--create-missing-fields', type=str, 
+                          choices=['true', 'false'], help='是否自动创建缺失字段')
         parser.add_argument('--no-create-fields', action='store_true',
-                          help='不自动创建缺失字段')
+                          help='不自动创建缺失字段（兼容参数）')
         parser.add_argument('--field-type-strategy', type=str, 
-                          choices=['base', 'auto', 'intelligence'],
+                          choices=['raw', 'base', 'auto', 'intelligence'],
                           help='字段类型选择策略')
         
         # 电子表格配置
@@ -287,7 +289,11 @@ class ConfigManager:
         if args.table_id:
             config_data['table_id'] = args.table_id
             cli_overrides.append(f"table_id={args.table_id}")
-        if args.no_create_fields:
+        # 处理create_missing_fields参数（支持两种方式）
+        if args.create_missing_fields is not None:
+            config_data['create_missing_fields'] = args.create_missing_fields.lower() == 'true'
+            cli_overrides.append(f"create_missing_fields={args.create_missing_fields}")
+        elif args.no_create_fields:
             config_data['create_missing_fields'] = False
             cli_overrides.append("create_missing_fields=False")
         if args.field_type_strategy:

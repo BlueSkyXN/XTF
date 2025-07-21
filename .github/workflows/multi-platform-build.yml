@@ -2,7 +2,7 @@ name: Multi-Platform Build
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, dev ]
   release:
     types: [ published ]
   workflow_dispatch:
@@ -447,10 +447,12 @@ jobs:
       run: |
         version="${{ env.VERSION }}"
         
-        # Rename platform bundles for release
+        # Verify platform bundles exist for release
         for platform in linux-x64 linux-arm64 windows-x64 macos-arm64; do
           if [[ -f "ALL-XTF-${platform}-${version}.zip" ]]; then
-            mv "ALL-XTF-${platform}-${version}.zip" "xtf-${platform}-${version}.zip"
+            echo "Found platform bundle: ALL-XTF-${platform}-${version}.zip"
+          else
+            echo "Warning: Missing platform bundle for ${platform}"
           fi
         done
       shell: bash
@@ -459,9 +461,9 @@ jobs:
       uses: softprops/action-gh-release@v1
       with:
         files: |
-          xtf-linux-x64-${{ env.VERSION }}.zip
-          xtf-linux-arm64-${{ env.VERSION }}.zip
-          xtf-windows-x64-${{ env.VERSION }}.zip
-          xtf-macos-arm64-${{ env.VERSION }}.zip
+          ALL-XTF-linux-x64-${{ env.VERSION }}.zip
+          ALL-XTF-linux-arm64-${{ env.VERSION }}.zip
+          ALL-XTF-windows-x64-${{ env.VERSION }}.zip
+          ALL-XTF-macos-arm64-${{ env.VERSION }}.zip
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
