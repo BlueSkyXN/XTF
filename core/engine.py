@@ -16,7 +16,6 @@ from typing import Optional, Dict, Any, List, Union, Tuple
 from .config import SyncConfig, SyncMode, TargetType
 from .converter import DataConverter
 from api import FeishuAuth, RetryableAPIClient, BitableAPI, SheetAPI, RateLimiter
-from api.sheet_optimized import OptimizedSheetAPI
 
 
 class XTFSyncEngine:
@@ -43,9 +42,6 @@ class XTFSyncEngine:
             self.api: Union[BitableAPI, SheetAPI] = BitableAPI(self.auth, self.api_client)
         else:  # SHEET
             self.api: Union[BitableAPI, SheetAPI] = SheetAPI(self.auth, self.api_client)
-            # 同时初始化优化的电子表格API
-            self.optimized_api = OptimizedSheetAPI(self.auth, self.api_client)
-        
         # 初始化数据转换器
         self.converter = DataConverter(config.target_type)
         
@@ -84,6 +80,9 @@ class XTFSyncEngine:
         try:
             if not isinstance(self.api, BitableAPI):
                 return {}
+            if not self.config.app_token or not self.config.table_id:
+                self.logger.error("多维表格的 app_token 或 table_id 未配置")
+                return {}
             existing_fields = self.api.list_fields(self.config.app_token, self.config.table_id)
             field_types = {}
             for field in existing_fields:
@@ -104,6 +103,12 @@ class XTFSyncEngine:
             return True, {}
             
         try:
+            if not isinstance(self.api, BitableAPI):
+                return False, {}
+            if not self.config.app_token or not self.config.table_id:
+                self.logger.error("多维表格的 app_token 或 table_id 未配置")
+                return False, {}
+
             # 获取现有字段
             existing_fields = self.api.list_fields(self.config.app_token, self.config.table_id)
             existing_field_names = {field['field_name'] for field in existing_fields}
@@ -157,6 +162,7 @@ class XTFSyncEngine:
                     
                     # 执行字段创建
                     for plan in creation_plan:
+                        if not isinstance(self.api, BitableAPI): continue
                         success = self.api.create_field(
                             self.config.app_token,
                             self.config.table_id,
@@ -186,11 +192,14 @@ class XTFSyncEngine:
     
     def get_all_bitable_records(self) -> List[Dict]:
         """获取所有多维表格记录"""
-        if self.config.target_type != TargetType.BITABLE:
+        if not isinstance(self.api, BitableAPI):
+            return []
+        if not self.config.app_token or not self.config.table_id:
+            self.logger.error("多维表格的 app_token 或 table_id 未配置")
             return []
         return self.api.get_all_records(self.config.app_token, self.config.table_id)
     
-    def process_in_batches(self, items: List[Any], batch_size: int, 
+    def process_in_batches(self, items: List[Any], batch_size: int,
                           processor_func, *args, **kwargs) -> bool:
         """分批处理数据（多维表格模式）"""
         if self.config.target_type != TargetType.BITABLE:
@@ -234,6 +243,10 @@ class XTFSyncEngine:
         
         for range_str in ranges_to_try:
             try:
+                if not isinstance(self.api, SheetAPI): return pd.DataFrame()
+                if not self.config.spreadsheet_token:
+                    self.logger.error("电子表格的 spreadsheet_token 未配置")
+                    return pd.DataFrame()
                 values = self.api.get_sheet_data(self.config.spreadsheet_token, range_str)
                 df = self.converter.values_to_df(values)
                 if not df.empty:
@@ -280,11 +293,13 @@ class XTFSyncEngine:
             self.logger.warning("未指定索引列，将执行纯新增操作")
             field_types = self.get_field_types()
             new_records = self.converter.df_to_records(df, field_types)
-            return self.process_in_batches(
-                new_records, self.config.batch_size,
-                self.api.batch_create_records,
-                self.config.app_token, self.config.table_id
-            )
+            if isinstance(self.api, BitableAPI) and self.config.app_token and self.config.table_id:
+                return self.process_in_batches(
+                    new_records, self.config.batch_size,
+                    self.api.batch_create_records,
+                    self.config.app_token, self.config.table_id
+                )
+            return False
         
         # 获取现有记录并建立索引
         existing_records = self.get_all_bitable_records()
@@ -338,7 +353,7 @@ class XTFSyncEngine:
         
         # 执行更新
         update_success = True
-        if records_to_update:
+        if records_to_update and isinstance(self.api, BitableAPI) and self.config.app_token and self.config.table_id:
             update_success = self.process_in_batches(
                 records_to_update, self.config.batch_size,
                 self.api.batch_update_records,
@@ -347,7 +362,7 @@ class XTFSyncEngine:
         
         # 执行新增
         create_success = True
-        if records_to_create:
+        if records_to_create and isinstance(self.api, BitableAPI) and self.config.app_token and self.config.table_id:
             create_success = self.process_in_batches(
                 records_to_create, self.config.batch_size,
                 self.api.batch_create_records,
@@ -400,31 +415,28 @@ class XTFSyncEngine:
             
             # 写入更新后的数据
             values = self.converter.df_to_values(updated_df)
-            success = self.api.write_sheet_data(
-                self.config.spreadsheet_token, 
-                self.config.sheet_id, 
-                values,
-                self.config.batch_size,
-                80  # 列批次大小，保持安全裕度
-            )
+            if isinstance(self.api, SheetAPI) and self.config.spreadsheet_token and self.config.sheet_id:
+                success = self.api.write_sheet_data(
+                    self.config.spreadsheet_token,
+                    self.config.sheet_id,
+                    values,
+                    self.config.batch_size,
+                    80,  # 列批次大小，保持安全裕度
+                    self.config.rate_limit_delay
+                )
         
         # 追加新行
         if new_rows and success:
             new_df = pd.DataFrame(new_rows)
             new_values = self.converter.df_to_values(new_df, include_headers=False)
             
-            if new_values:
-                self.logger.info(f"开始追加 {len(new_values)} 行新数据，使用优化API策略")
-                # 为追加的数据添加表头（优化API需要）
-                headers = self.converter.df_to_values(pd.DataFrame(columns=df.columns), include_headers=True)[0]
-                values_with_headers = [headers] + new_values
-                success = self.optimized_api.sync_data(
+            if new_values and isinstance(self.api, SheetAPI) and self.config.spreadsheet_token and self.config.sheet_id:
+                self.logger.info(f"开始追加 {len(new_values)} 行新数据")
+                success = self.api.append_sheet_data(
                     self.config.spreadsheet_token,
                     self.config.sheet_id,
-                    values_with_headers,
-                    SyncMode.INCREMENTAL,
+                    new_values,
                     self.config.batch_size,
-                    80,  # 列批次大小，保持安全裕度
                     self.config.rate_limit_delay
                 )
         
@@ -445,11 +457,13 @@ class XTFSyncEngine:
             self.logger.warning("未指定索引列，将执行纯新增操作")
             field_types = self.get_field_types()
             new_records = self.converter.df_to_records(df, field_types)
-            return self.process_in_batches(
-                new_records, self.config.batch_size,
-                self.api.batch_create_records,
-                self.config.app_token, self.config.table_id
-            )
+            if isinstance(self.api, BitableAPI) and self.config.app_token and self.config.table_id:
+                return self.process_in_batches(
+                    new_records, self.config.batch_size,
+                    self.api.batch_create_records,
+                    self.config.app_token, self.config.table_id
+                )
+            return False
         
         # 获取现有记录并建立索引
         existing_records = self.get_all_bitable_records()
@@ -476,7 +490,7 @@ class XTFSyncEngine:
         
         self.logger.info(f"增量同步计划: 新增 {len(records_to_create)} 条记录")
         
-        if records_to_create:
+        if records_to_create and isinstance(self.api, BitableAPI) and self.config.app_token and self.config.table_id:
             return self.process_in_batches(
                 records_to_create, self.config.batch_size,
                 self.api.batch_create_records,
@@ -490,18 +504,18 @@ class XTFSyncEngine:
         """电子表格增量同步 - 使用优化API策略"""
         if not self.config.index_column:
             self.logger.warning("未指定索引列，将新增全部数据")
-            # 使用优化的增量同步策略
-            values = self.converter.df_to_values(df)
-            self.logger.info(f"使用优化API策略 - append + INSERT_ROWS")
-            return self.optimized_api.sync_data(
-                self.config.spreadsheet_token,
-                self.config.sheet_id,
-                values,
-                SyncMode.INCREMENTAL,
-                self.config.batch_size,
-                80,  # 列批次大小，保持安全裕度
-                self.config.rate_limit_delay
-            )
+            # 使用新的增量同步策略
+            values = self.converter.df_to_values(df, include_headers=False) # 追加不需要表头
+            self.logger.info(f"使用append接口进行增量同步")
+            if isinstance(self.api, SheetAPI) and self.config.spreadsheet_token and self.config.sheet_id:
+                return self.api.append_sheet_data(
+                    self.config.spreadsheet_token,
+                    self.config.sheet_id,
+                    values,
+                    self.config.batch_size,
+                    self.config.rate_limit_delay
+                )
+            return False
         
         # 获取现有数据
         current_df = self.get_current_sheet_data()
@@ -528,19 +542,16 @@ class XTFSyncEngine:
             new_values = self.converter.df_to_values(new_df, include_headers=False)
             
             # 追加新数据
-            self.logger.info(f"开始增量追加 {len(new_values)} 行数据，使用优化API策略")
-            # 为追加的数据添加表头（优化API需要）
-            headers = self.converter.df_to_values(pd.DataFrame(columns=df.columns), include_headers=True)[0]
-            values_with_headers = [headers] + new_values
-            return self.optimized_api.sync_data(
-                self.config.spreadsheet_token,
-                self.config.sheet_id,
-                values_with_headers,
-                SyncMode.INCREMENTAL,
-                self.config.batch_size,
-                80,  # 列批次大小，保持安全裕度
-                self.config.rate_limit_delay
-            )
+            if isinstance(self.api, SheetAPI) and self.config.spreadsheet_token and self.config.sheet_id:
+                self.logger.info(f"开始增量追加 {len(new_values)} 行数据")
+                return self.api.append_sheet_data(
+                    self.config.spreadsheet_token,
+                    self.config.sheet_id,
+                    new_values,
+                    self.config.batch_size,
+                    self.config.rate_limit_delay
+                )
+            return False
         else:
             self.logger.info("没有新记录需要同步")
             return True
@@ -578,7 +589,7 @@ class XTFSyncEngine:
         
         # 删除已存在的记录
         delete_success = True
-        if record_ids_to_delete:
+        if record_ids_to_delete and isinstance(self.api, BitableAPI) and self.config.app_token and self.config.table_id:
             delete_success = self.process_in_batches(
                 record_ids_to_delete, self.config.batch_size,
                 self.api.batch_delete_records,
@@ -587,11 +598,13 @@ class XTFSyncEngine:
         
         # 新增全部记录
         new_records = self.converter.df_to_records(df, field_types)
-        create_success = self.process_in_batches(
-            new_records, self.config.batch_size,
-            self.api.batch_create_records,
-            self.config.app_token, self.config.table_id
-        )
+        create_success = False
+        if isinstance(self.api, BitableAPI) and self.config.app_token and self.config.table_id:
+            create_success = self.process_in_batches(
+                new_records, self.config.batch_size,
+                self.api.batch_create_records,
+                self.config.app_token, self.config.table_id
+            )
         
         return delete_success and create_success
     
@@ -637,19 +650,23 @@ class XTFSyncEngine:
             values = self.converter.df_to_values(new_df)
             
             # 使用优化API策略覆盖写入
-            self.logger.info(f"使用优化API策略 - PUT values 覆盖写入")
-            return self.optimized_api.sync_data(
-                self.config.spreadsheet_token,
-                self.config.sheet_id,
-                values,
-                SyncMode.OVERWRITE,
-                self.config.batch_size,
-                80,  # 列批次大小，保持安全裕度
-                self.config.rate_limit_delay
-            )
+            if isinstance(self.api, SheetAPI) and self.config.spreadsheet_token and self.config.sheet_id:
+                self.logger.info(f"使用write_sheet_data覆盖写入")
+                return self.api.write_sheet_data(
+                    self.config.spreadsheet_token,
+                    self.config.sheet_id,
+                    values,
+                    self.config.batch_size,
+                    80, # col_batch_size
+                    self.config.rate_limit_delay
+                )
+            return False
         else:
             # 如果没有数据，清空表格
-            return self.api.clear_sheet_data(self.config.spreadsheet_token, f"{self.config.sheet_id}!A:Z")
+            if isinstance(self.api, SheetAPI) and self.config.spreadsheet_token and self.config.sheet_id:
+                # 假设一个足够大的范围来清空
+                return self.api.clear_sheet_data(self.config.spreadsheet_token, self.config.sheet_id, "A1:ZZZ10000")
+            return False
     
     def sync_clone(self, df: pd.DataFrame) -> bool:
         """克隆同步：清空全部，然后新增全部"""
@@ -670,7 +687,7 @@ class XTFSyncEngine:
         
         # 删除所有记录
         delete_success = True
-        if existing_record_ids:
+        if existing_record_ids and isinstance(self.api, BitableAPI) and self.config.app_token and self.config.table_id:
             delete_success = self.process_in_batches(
                 existing_record_ids, self.config.batch_size,
                 self.api.batch_delete_records,
@@ -680,11 +697,13 @@ class XTFSyncEngine:
         # 新增全部记录
         field_types = self.get_field_types()
         new_records = self.converter.df_to_records(df, field_types)
-        create_success = self.process_in_batches(
-            new_records, self.config.batch_size,
-            self.api.batch_create_records,
-            self.config.app_token, self.config.table_id
-        )
+        create_success = False
+        if isinstance(self.api, BitableAPI) and self.config.app_token and self.config.table_id:
+            create_success = self.process_in_batches(
+                new_records, self.config.batch_size,
+                self.api.batch_create_records,
+                self.config.app_token, self.config.table_id
+            )
         
         return delete_success and create_success
     
@@ -694,18 +713,28 @@ class XTFSyncEngine:
         values = self.converter.df_to_values(df)
         
         self.logger.info(f"克隆同步计划: 清空现有数据，新增 {len(df)} 行")
-        self.logger.info(f"使用优化API策略 - batch_update 批量写入")
+        self.logger.info(f"使用write_sheet_data进行克隆写入")
         
-        # 使用优化的克隆同步策略
-        write_success = self.optimized_api.sync_data(
-            self.config.spreadsheet_token,
-            self.config.sheet_id,
-            values,
-            SyncMode.CLONE,
-            self.config.batch_size,
-            80,  # 列批次大小，保持安全裕度
-            self.config.rate_limit_delay
-        )
+        # 首先清空表格的一个大范围
+        if isinstance(self.api, SheetAPI) and self.config.spreadsheet_token and self.config.sheet_id:
+            self.logger.info("清空现有数据...")
+            # 注意：这里的范围可能需要根据实际最大数据量调整，或者先获取表格元数据
+            clear_success = self.api.clear_sheet_data(self.config.spreadsheet_token, self.config.sheet_id, "A1:ZZZ500000")
+            if not clear_success:
+                self.logger.error("清空电子表格失败，终止克隆同步")
+                return False
+
+            # 使用增强的写入方法
+            write_success = self.api.write_sheet_data(
+                self.config.spreadsheet_token,
+                self.config.sheet_id,
+                values,
+                self.config.batch_size,
+                80,  # col_batch_size
+                self.config.rate_limit_delay
+            )
+        else:
+            write_success = False
         
         # 数据写入成功后，再应用智能字段配置
         if write_success:

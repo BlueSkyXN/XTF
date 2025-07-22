@@ -7,7 +7,7 @@
 
 import logging
 import time
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 
 from .auth import FeishuAuth
 from .base import RetryableAPIClient
@@ -27,6 +27,7 @@ class SheetAPI:
         self.auth = auth
         self.api_client = api_client or auth.api_client
         self.logger = logging.getLogger(__name__)
+        self.ERROR_CODE_REQUEST_TOO_LARGE = 90227
     
     def get_sheet_info(self, spreadsheet_token: str) -> Dict[str, Any]:
         """
@@ -89,17 +90,19 @@ class SheetAPI:
         value_range = data.get("valueRange", {})
         return value_range.get("values", [])
     
-    def write_sheet_data(self, spreadsheet_token: str, sheet_id: str, values: List[List[Any]], 
-                        row_batch_size: int = 500, col_batch_size: int = 80) -> bool:
+    def write_sheet_data(self, spreadsheet_token: str, sheet_id: str, values: List[List[Any]],
+                         row_batch_size: int = 500, col_batch_size: int = 80,
+                         rate_limit_delay: float = 0.05) -> bool:
         """
-        二维分块写入电子表格数据（扫描算法）
+        写入电子表格数据，具备“自动二分重试”能力。
         
         Args:
             spreadsheet_token: 电子表格Token
             sheet_id: 工作表ID
-            values: 要写入的数据，第一行为表头
-            row_batch_size: 行批次大小，默认500（用户配置的batch_size）
-            col_batch_size: 列批次大小，默认80（安全限制，API限制100列）
+            values: 要写入的数据（包含表头）
+            row_batch_size: 初始行批次大小
+            col_batch_size: 列批次大小
+            rate_limit_delay: 接口调用间隔
             
         Returns:
             是否写入成功
@@ -107,114 +110,30 @@ class SheetAPI:
         if not values:
             self.logger.warning("写入数据为空")
             return True
-        
-        if not values[0]:  # 检查第一行是否为空
-            self.logger.warning("数据表头为空")
-            return True
-        
-        headers = values[0]
-        data_rows = values[1:] if len(values) > 1 else []
-        total_rows = len(data_rows)
-        total_cols = len(headers)
-        
-        self.logger.info(f"开始二维分块上传: {total_rows} 行 × {total_cols} 列")
-        self.logger.info(f"分块策略: {row_batch_size} 行/批 × {col_batch_size} 列/批")
-        
-        # 检查是否需要分块
-        need_row_chunking = total_rows > row_batch_size
-        need_col_chunking = total_cols > col_batch_size
-        
-        if not need_row_chunking and not need_col_chunking:
-            # 数据量小，直接写入
-            range_str = self._build_range_string(sheet_id, 1, 1, len(values), total_cols)
-            return self._write_single_batch(spreadsheet_token, range_str, values)
-        
-        # 计算分块数量
-        row_chunks = (total_rows + row_batch_size - 1) // row_batch_size if need_row_chunking else 1
-        col_chunks = (total_cols + col_batch_size - 1) // col_batch_size if need_col_chunking else 1
-        
-        self.logger.info(f"总计划块数: {row_chunks} 行块 × {col_chunks} 列块 = {row_chunks * col_chunks} 个数据块")
-        
-        total_blocks = 0
-        success_blocks = 0
-        
-        # 按列扫描（外层循环）
-        for col_chunk_idx in range(col_chunks):
-            col_start = col_chunk_idx * col_batch_size
-            col_end = min(col_start + col_batch_size, total_cols)
             
-            chunk_headers = headers[col_start:col_end]
-            
-            self.logger.info(f"🔄 处理列块 {col_chunk_idx + 1}/{col_chunks}: 列 {col_start + 1}-{col_end}")
-            
-            # 写入当前列块的表头
-            start_col_letter = self._column_number_to_letter(col_start + 1)
-            end_col_letter = self._column_number_to_letter(col_end)
-            header_range = f"{sheet_id}!{start_col_letter}1:{end_col_letter}1"
-            
-            self.logger.info(f"📝 写入表头: {header_range}")
-            if not self._write_single_batch(spreadsheet_token, header_range, [chunk_headers]):
-                self.logger.error(f"❌ 列块 {col_chunk_idx + 1} 表头写入失败")
+        self.logger.info("🔄 执行写入操作 (具备自动二分重试能力)")
+        
+        data_chunks = self._create_data_chunks(values, row_batch_size, col_batch_size)
+        total_chunks = len(data_chunks)
+        
+        self.logger.info(f"📦 初始数据分块完成: 共 {total_chunks} 个数据块")
+
+        for i, chunk in enumerate(data_chunks, 1):
+            self.logger.info(f"--- 开始处理初始数据块 {i}/{total_chunks} ---")
+            if not self._upload_chunk_with_auto_split(spreadsheet_token, sheet_id, chunk, rate_limit_delay):
+                self.logger.error(f"❌ 初始数据块 {i}/{total_chunks} (行 {chunk['start_row']}-{chunk['end_row']}) 最终上传失败")
                 return False
-            else:
-                self.logger.info(f"✅ 列块 {col_chunk_idx + 1} 表头写入成功")
+            self.logger.info(f"--- ✅ 成功处理初始数据块 {i}/{total_chunks} ---")
             
-            # 按行扫描当前列块（内层循环）
-            for row_chunk_idx in range(row_chunks):
-                row_start = row_chunk_idx * row_batch_size
-                row_end = min(row_start + row_batch_size, total_rows)
-                
-                if row_start >= total_rows:
-                    break
-                
-                # 提取当前块的数据
-                chunk_data = []
-                for row_idx in range(row_start, row_end):
-                    if row_idx < len(data_rows):
-                        chunk_row = data_rows[row_idx][col_start:col_end]
-                        # 确保行长度与表头一致
-                        while len(chunk_row) < len(chunk_headers):
-                            chunk_row.append("")
-                        chunk_data.append(chunk_row[:len(chunk_headers)])
-                
-                if not chunk_data:
-                    continue
-                
-                # 计算写入范围
-                data_start_row = row_start + 2  # +1 for 1-based, +1 for header
-                data_end_row = data_start_row + len(chunk_data) - 1
-                data_range = f"{sheet_id}!{start_col_letter}{data_start_row}:{end_col_letter}{data_end_row}"
-                
-                total_blocks += 1
-                self.logger.info(f"📤 写入数据块 {total_blocks}: [{row_chunk_idx + 1},{col_chunk_idx + 1}] "
-                                f"行 {data_start_row}-{data_end_row}, 列 {start_col_letter}-{end_col_letter} "
-                                f"({len(chunk_data)} 行 × {len(chunk_headers)} 列)")
-                
-                if self._write_single_batch(spreadsheet_token, data_range, chunk_data):
-                    success_blocks += 1
-                    self.logger.info(f"✅ 数据块 {total_blocks} 写入成功")
-                else:
-                    self.logger.error(f"❌ 数据块 {total_blocks} 写入失败")
-                    return False
-                
-                # 添加进度汇报
-                progress = (success_blocks / (row_chunks * col_chunks)) * 100
-                self.logger.info(f"📊 进度: {success_blocks}/{row_chunks * col_chunks} ({progress:.1f}%)")
-        
-        self.logger.info(f"二维分块上传完成: 成功 {success_blocks}/{total_blocks} 个数据块")
-        return success_blocks == total_blocks
+        self.logger.info(f"🎉 写入操作全部完成: 成功处理 {total_chunks} 个初始数据块")
+        return True
     
-    def _write_single_batch(self, spreadsheet_token: str, range_str: str, values: List[List[Any]]) -> bool:
+    def _write_single_batch(self, spreadsheet_token: str, range_str: str, values: List[List[Any]]) -> Tuple[bool, Optional[int]]:
         """
-        写入单个批次数据
-        
-        Args:
-            spreadsheet_token: 电子表格Token
-            range_str: 范围字符串
-            values: 要写入的数据
-            
+        写入单个批次数据。
+
         Returns:
-            是否写入成功
+            元组 (是否成功, 错误码)
         """
         url = f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/values"
         headers = self.auth.get_auth_headers()
@@ -233,16 +152,17 @@ class SheetAPI:
         except ValueError as e:
             self.logger.error(f"写入电子表格数据响应解析失败: {e}, HTTP状态码: {response.status_code}")
             self.logger.debug(f"响应内容: {response.text[:500]}")
-            return False
+            return False, None
         
-        if result.get("code") != 0:
+        code = result.get("code")
+        if code != 0:
             error_msg = result.get('msg', '未知错误')
-            self.logger.error(f"写入电子表格数据失败: 错误码 {result.get('code')}, 错误信息: {error_msg}")
+            self.logger.error(f"写入电子表格数据失败: 错误码 {code}, 错误信息: {error_msg}")
             self.logger.debug(f"API响应: {result}")
-            return False
+            return False, code
         
         self.logger.debug(f"成功写入 {len(values)} 行数据")
-        return True
+        return True, 0
     
     def _column_number_to_letter(self, col_num: int) -> str:
         """将列号转换为字母（1->A, 2->B, ..., 26->Z, 27->AA）"""
@@ -278,17 +198,18 @@ class SheetAPI:
         match = re.match(r'([A-Z]+)', end_part)
         return match.group(1) if match else "A"
     
-    def append_sheet_data(self, spreadsheet_token: str, sheet_id: str, values: List[List[Any]], 
-                         row_batch_size: int = 500, col_batch_size: int = 80) -> bool:
+    def append_sheet_data(self, spreadsheet_token: str, sheet_id: str, values: List[List[Any]],
+                         row_batch_size: int = 500, rate_limit_delay: float = 0.05) -> bool:
         """
-        分批追加电子表格数据
+        追加电子表格数据，同样具备“自动二分重试”能力。
+        注意：追加操作不支持按列分块，它总是追加到表格的末尾。
         
         Args:
             spreadsheet_token: 电子表格Token
-            sheet_id: 工作表ID (不再使用range_str，改为动态计算追加位置)
+            sheet_id: 工作表ID
             values: 要追加的数据
-            row_batch_size: 行批次大小
-            col_batch_size: 列批次大小
+            row_batch_size: 初始行批次大小
+            rate_limit_delay: 接口调用间隔
             
         Returns:
             是否追加成功
@@ -297,75 +218,32 @@ class SheetAPI:
             self.logger.warning("追加数据为空")
             return True
         
-        total_rows = len(values)
-        total_cols = len(values[0]) if values else 0
+        self.logger.info("➕ 执行追加操作 (具备自动二分重试能力)")
         
-        self.logger.info(f"开始分批追加数据: {total_rows} 行 × {total_cols} 列")
-        self.logger.info(f"追加策略: {row_batch_size} 行/批 × {col_batch_size} 列/批")
+        # 对于追加操作，我们只按行分块
+        data_chunks = self._create_data_chunks(values, row_batch_size, len(values[0]) if values else 0)
+        total_chunks = len(data_chunks)
         
-        # 如果数据量小，直接追加
-        if total_rows <= row_batch_size and total_cols <= col_batch_size:
-            return self._append_single_batch(spreadsheet_token, f"{sheet_id}!A:A", values)
-        
-        # 分批追加
-        success_count = 0
-        total_batches = 0
-        
-        # 按列分块
-        col_chunks = (total_cols + col_batch_size - 1) // col_batch_size if total_cols > col_batch_size else 1
-        
-        for col_chunk_idx in range(col_chunks):
-            col_start = col_chunk_idx * col_batch_size
-            col_end = min(col_start + col_batch_size, total_cols)
+        self.logger.info(f"📦 初始数据分块完成: 共 {total_chunks} 个数据块")
+
+        for i, chunk in enumerate(data_chunks, 1):
+            self.logger.info(f"--- 开始处理初始追加块 {i}/{total_chunks} ---")
+            # 注意：追加操作的range只需要指定工作表ID
+            append_range = f"{sheet_id}"
+            if not self._append_chunk_with_auto_split(spreadsheet_token, append_range, chunk['data'], rate_limit_delay):
+                self.logger.error(f"❌ 初始追加块 {i}/{total_chunks} 最终上传失败")
+                return False
+            self.logger.info(f"--- ✅ 成功处理初始追加块 {i}/{total_chunks} ---")
             
-            # 提取当前列块的数据
-            chunk_values = []
-            for row in values:
-                chunk_row = row[col_start:col_end]
-                # 确保行长度一致
-                while len(chunk_row) < (col_end - col_start):
-                    chunk_row.append("")
-                chunk_values.append(chunk_row[:col_end - col_start])
-            
-            self.logger.debug(f"处理列块 {col_chunk_idx + 1}/{col_chunks}: 列 {col_start + 1}-{col_end}")
-            
-            # 按行分批追加当前列块
-            for row_start in range(0, len(chunk_values), row_batch_size):
-                row_end = min(row_start + row_batch_size, len(chunk_values))
-                batch_data = chunk_values[row_start:row_end]
-                
-                if not batch_data:
-                    continue
-                
-                # 构建追加范围（让系统自动确定追加位置）
-                start_col_letter = self._column_number_to_letter(col_start + 1)
-                end_col_letter = self._column_number_to_letter(col_end)
-                append_range = f"{sheet_id}!{start_col_letter}:{end_col_letter}"
-                
-                batch_num = total_batches + 1
-                self.logger.info(f"追加批次 {batch_num}: 行 {row_start + 1}-{row_end}, 列 {start_col_letter}-{end_col_letter} ({len(batch_data)} 行)")
-                
-                total_batches += 1
-                if self._append_single_batch(spreadsheet_token, append_range, batch_data):
-                    success_count += 1
-                else:
-                    self.logger.error(f"追加批次 {batch_num} 失败")
-                    return False
-        
-        self.logger.info(f"分批追加完成: 成功 {success_count}/{total_batches} 个批次")
-        return success_count == total_batches
+        self.logger.info(f"🎉 追加操作全部完成: 成功处理 {total_chunks} 个初始数据块")
+        return True
     
-    def _append_single_batch(self, spreadsheet_token: str, range_str: str, values: List[List[Any]]) -> bool:
+    def _append_single_batch(self, spreadsheet_token: str, range_str: str, values: List[List[Any]]) -> Tuple[bool, Optional[int]]:
         """
-        追加单个批次数据
-        
-        Args:
-            spreadsheet_token: 电子表格Token
-            range_str: 范围字符串
-            values: 要追加的数据
-            
+        追加单个批次数据。
+
         Returns:
-            是否追加成功
+            元组 (是否成功, 错误码)
         """
         url = f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/values_append"
         headers = self.auth.get_auth_headers()
@@ -384,30 +262,40 @@ class SheetAPI:
         except ValueError as e:
             self.logger.error(f"追加电子表格数据响应解析失败: {e}, HTTP状态码: {response.status_code}")
             self.logger.debug(f"响应内容: {response.text[:500]}")
-            return False
+            return False, None
         
-        if result.get("code") != 0:
+        code = result.get("code")
+        if code != 0:
             error_msg = result.get('msg', '未知错误')
-            self.logger.error(f"追加电子表格数据失败: 错误码 {result.get('code')}, 错误信息: {error_msg}")
+            self.logger.error(f"追加电子表格数据失败: 错误码 {code}, 错误信息: {error_msg}")
             self.logger.debug(f"API响应: {result}")
-            return False
+            return False, code
         
         self.logger.debug(f"成功追加 {len(values)} 行数据")
-        return True
+        return True, 0
     
-    def clear_sheet_data(self, spreadsheet_token: str, range_str: str) -> bool:
+    def clear_sheet_data(self, spreadsheet_token: str, sheet_id: str, range_str: str) -> bool:
         """
-        清空电子表格数据
+        清空电子表格指定范围的数据
         
         Args:
             spreadsheet_token: 电子表格Token
-            range_str: 范围字符串
+            sheet_id: 工作表ID
+            range_str: 范围字符串，如 "A1:Z1000"
             
         Returns:
             是否清空成功
         """
-        # 通过写入空数据来清空
-        return self.write_sheet_data(spreadsheet_token, range_str, [[]])
+        self.logger.info(f"准备清空范围: {sheet_id}!{range_str}")
+        # 通过调用batch_update并传递空值数组来清空
+        full_range = f"{sheet_id}!{range_str}"
+        value_ranges = [{"range": full_range, "values": [[]]}]
+        success, _ = self._batch_update_ranges(spreadsheet_token, value_ranges, is_clear=True)
+        if success:
+            self.logger.info(f"✅ 范围 {full_range} 清空成功")
+        else:
+            self.logger.error(f"❌ 范围 {full_range} 清空失败")
+        return success
     
     def set_dropdown_validation(self, spreadsheet_token: str, range_str: str, 
                                options: List[str], multiple_values: bool = False, 
@@ -722,6 +610,181 @@ class SheetAPI:
         }
         
         return self.set_cell_style(spreadsheet_token, ranges, style)
+
+    def _create_data_chunks(self, values: List[List[Any]], row_batch_size: int, col_batch_size: int) -> List[Dict]:
+        """
+        创建数据分块
+        
+        Returns:
+            包含分块信息的字典列表，每个字典包含：
+            - data: 数据块
+            - start_row, end_row: 行范围
+            - start_col, end_col: 列范围
+        """
+        chunks = []
+        total_rows = len(values)
+        total_cols = len(values[0]) if values else 0
+        
+        # 按列分块（外层循环）
+        for col_start in range(0, total_cols, col_batch_size):
+            col_end = min(col_start + col_batch_size, total_cols)
+            
+            # 按行分块（内层循环）
+            for row_start in range(0, total_rows, row_batch_size):
+                row_end = min(row_start + row_batch_size, total_rows)
+                
+                # 提取数据块
+                chunk_data = []
+                for row_idx in range(row_start, row_end):
+                    if row_idx < len(values):
+                        chunk_row = values[row_idx][col_start:col_end]
+                        # 确保行长度与列块大小一致
+                        while len(chunk_row) < (col_end - col_start):
+                            chunk_row.append("")
+                        chunk_data.append(chunk_row)
+                
+                if chunk_data:  # 只添加非空块
+                    chunks.append({
+                        'data': chunk_data,
+                        'start_row': row_start + 1,  # 1-based indexing
+                        'end_row': row_start + len(chunk_data),
+                        'start_col': col_start + 1,  # 1-based indexing
+                        'end_col': col_end
+                    })
+        
+        return chunks
+
+    def _upload_chunk_with_auto_split(self, spreadsheet_token: str, sheet_id: str, chunk: Dict, rate_limit_delay: float) -> bool:
+        """
+        上传单个数据块，如果因请求过大失败，则自动二分重试。
+        """
+        # 准备请求数据
+        range_str = self._build_range_string(sheet_id, chunk['start_row'], chunk['start_col'], chunk['end_row'], chunk['end_col'])
+        value_ranges = [{"range": range_str, "values": chunk['data']}]
+        
+        self.logger.info(f"📤 尝试上传: {len(chunk['data'])} 行 (范围 {range_str})")
+
+        # 发起API调用
+        success, error_code = self._batch_update_ranges(spreadsheet_token, value_ranges)
+        
+        if success:
+            self.logger.info(f"✅ 上传成功: {len(chunk['data'])} 行")
+            # 成功上传后进行频率控制
+            if rate_limit_delay > 0:
+                time.sleep(rate_limit_delay)
+            return True
+            
+        # 如果失败，检查是否是请求过大错误
+        if error_code == self.ERROR_CODE_REQUEST_TOO_LARGE:
+            num_rows = len(chunk['data'])
+            self.logger.warning(f"检测到请求过大错误 (错误码 {error_code})，当前块包含 {num_rows} 行，将进行二分。")
+
+            # 如果块已经小到无法再分，则视为最终失败
+            if num_rows <= 1:
+                self.logger.error(f"❌ 块大小已为 {num_rows} 行，无法再分割，上传失败。")
+                return False
+
+            # 将当前块分割成两个子块
+            mid_point = num_rows // 2
+            
+            chunk1_data = chunk['data'][:mid_point]
+            chunk1 = {
+                'data': chunk1_data,
+                'start_row': chunk['start_row'],
+                'end_row': chunk['start_row'] + len(chunk1_data) - 1,
+                'start_col': chunk['start_col'],
+                'end_col': chunk['end_col']
+            }
+
+            chunk2_data = chunk['data'][mid_point:]
+            chunk2 = {
+                'data': chunk2_data,
+                'start_row': chunk['start_row'] + mid_point,
+                'end_row': chunk['start_row'] + mid_point + len(chunk2_data) - 1,
+                'start_col': chunk['start_col'],
+                'end_col': chunk['end_col']
+            }
+            
+            # 递归上传两个子块
+            self.logger.info(f" 分割为: 块1 ({len(chunk1_data)}行), 块2 ({len(chunk2_data)}行)")
+            return (self._upload_chunk_with_auto_split(spreadsheet_token, sheet_id, chunk1, rate_limit_delay) and
+                    self._upload_chunk_with_auto_split(spreadsheet_token, sheet_id, chunk2, rate_limit_delay))
+
+        # 其他类型的API错误，直接判为失败
+        self.logger.error(f"❌ 上传发生不可恢复的错误 (错误码: {error_code})")
+        return False
+    
+    def _append_chunk_with_auto_split(self, spreadsheet_token: str, range_str: str, values: List[List[Any]], rate_limit_delay: float) -> bool:
+        """
+        追加单个数据块，如果因请求过大失败，则自动二分重试。
+        """
+        self.logger.info(f"📤 尝试追加: {len(values)} 行")
+
+        success, error_code = self._append_single_batch(spreadsheet_token, range_str, values)
+        
+        if success:
+            self.logger.info(f"✅ 追加成功: {len(values)} 行")
+            if rate_limit_delay > 0:
+                time.sleep(rate_limit_delay)
+            return True
+            
+        if error_code == self.ERROR_CODE_REQUEST_TOO_LARGE:
+            num_rows = len(values)
+            self.logger.warning(f"检测到请求过大错误 (错误码 {error_code})，当前追加块包含 {num_rows} 行，将进行二分。")
+
+            if num_rows <= 1:
+                self.logger.error(f"❌ 追加块大小已为 {num_rows} 行，无法再分割，上传失败。")
+                return False
+
+            mid_point = num_rows // 2
+            chunk1 = values[:mid_point]
+            chunk2 = values[mid_point:]
+            
+            self.logger.info(f" 分割为: 块1 ({len(chunk1)}行), 块2 ({len(chunk2)}行)")
+            return (self._append_chunk_with_auto_split(spreadsheet_token, range_str, chunk1, rate_limit_delay) and
+                    self._append_chunk_with_auto_split(spreadsheet_token, range_str, chunk2, rate_limit_delay))
+
+        self.logger.error(f"❌ 追加发生不可恢复的错误 (错误码: {error_code})")
+        return False
+
+    def _batch_update_ranges(self, spreadsheet_token: str, value_ranges: List[Dict], is_clear: bool = False) -> Tuple[bool, Optional[int]]:
+        """
+        批量更新多个范围。
+
+        Returns:
+            元组 (是否成功, 错误码)
+        """
+        url = f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/values_batch_update"
+        headers = self.auth.get_auth_headers()
+        
+        data = {"valueRanges": value_ranges}
+        
+        response = self.api_client.call_api("POST", url, headers=headers, json=data)
+        
+        try:
+            result = response.json()
+        except ValueError as e:
+            self.logger.error(f"批量写入响应解析失败: {e}, HTTP状态码: {response.status_code}")
+            return False, None
+        
+        code = result.get("code")
+        if code != 0:
+            # 清空操作时，允许某些“错误”，比如清空一个已经为空的区域
+            if is_clear and code in [90202]: # 90202: The range is invalid
+                 self.logger.warning(f"清空操作时遇到可忽略的错误 (错误码 {code}), 视为成功。")
+                 return True, 0
+
+            error_msg = result.get('msg', '未知错误')
+            self.logger.error(f"批量写入失败: 错误码 {code}, 错误信息: {error_msg}")
+            self.logger.debug(f"API响应: {result}")
+            return False, code
+        
+        # 记录详细的写入结果
+        responses = result.get("data", {}).get("responses", [])
+        total_cells = sum(resp.get("updatedCells", 0) for resp in responses)
+        self.logger.debug(f"批量写入成功: {len(responses)} 个范围, 共 {total_cells} 个单元格")
+        
+        return True, 0
     
     def set_number_format(self, spreadsheet_token: str, ranges: List[str], 
                          number_format: str = "#,##0.00") -> bool:
