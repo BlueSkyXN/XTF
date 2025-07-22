@@ -16,6 +16,7 @@ from typing import Optional, Dict, Any, List, Union, Tuple
 from .config import SyncConfig, SyncMode, TargetType
 from .converter import DataConverter
 from api import FeishuAuth, RetryableAPIClient, BitableAPI, SheetAPI, RateLimiter
+from api.sheet_optimized import OptimizedSheetAPI
 
 
 class XTFSyncEngine:
@@ -42,6 +43,8 @@ class XTFSyncEngine:
             self.api: Union[BitableAPI, SheetAPI] = BitableAPI(self.auth, self.api_client)
         else:  # SHEET
             self.api: Union[BitableAPI, SheetAPI] = SheetAPI(self.auth, self.api_client)
+            # 同时初始化优化的电子表格API
+            self.optimized_api = OptimizedSheetAPI(self.auth, self.api_client)
         
         # 初始化数据转换器
         self.converter = DataConverter(config.target_type)
@@ -411,13 +414,18 @@ class XTFSyncEngine:
             new_values = self.converter.df_to_values(new_df, include_headers=False)
             
             if new_values:
-                self.logger.info(f"开始追加 {len(new_values)} 行新数据，使用批次大小: {self.config.batch_size}")
-                success = self.api.append_sheet_data(
-                    self.config.spreadsheet_token, 
-                    self.config.sheet_id, 
-                    new_values,
+                self.logger.info(f"开始追加 {len(new_values)} 行新数据，使用优化API策略")
+                # 为追加的数据添加表头（优化API需要）
+                headers = self.converter.df_to_values(pd.DataFrame(columns=df.columns), include_headers=True)[0]
+                values_with_headers = [headers] + new_values
+                success = self.optimized_api.sync_data(
+                    self.config.spreadsheet_token,
+                    self.config.sheet_id,
+                    values_with_headers,
+                    SyncMode.INCREMENTAL,
                     self.config.batch_size,
-                    80  # 列批次大小，保持安全裕度
+                    80,  # 列批次大小，保持安全裕度
+                    self.config.rate_limit_delay
                 )
         
         return success
@@ -479,18 +487,20 @@ class XTFSyncEngine:
             return True
     
     def _sync_incremental_sheet(self, df: pd.DataFrame) -> bool:
-        """电子表格增量同步"""
+        """电子表格增量同步 - 使用优化API策略"""
         if not self.config.index_column:
             self.logger.warning("未指定索引列，将新增全部数据")
-            # 追加所有数据
+            # 使用优化的增量同步策略
             values = self.converter.df_to_values(df)
-            self.logger.info(f"未指定索引列，开始追加全部 {len(values)} 行数据，使用批次大小: {self.config.batch_size}")
-            return self.api.append_sheet_data(
-                self.config.spreadsheet_token, 
-                self.config.sheet_id, 
+            self.logger.info(f"使用优化API策略 - append + INSERT_ROWS")
+            return self.optimized_api.sync_data(
+                self.config.spreadsheet_token,
+                self.config.sheet_id,
                 values,
+                SyncMode.INCREMENTAL,
                 self.config.batch_size,
-                80  # 列批次大小，保持安全裕度
+                80,  # 列批次大小，保持安全裕度
+                self.config.rate_limit_delay
             )
         
         # 获取现有数据
@@ -518,13 +528,18 @@ class XTFSyncEngine:
             new_values = self.converter.df_to_values(new_df, include_headers=False)
             
             # 追加新数据
-            self.logger.info(f"开始增量追加 {len(new_values)} 行数据，使用批次大小: {self.config.batch_size}")
-            return self.api.append_sheet_data(
-                self.config.spreadsheet_token, 
-                self.config.sheet_id, 
-                new_values,
+            self.logger.info(f"开始增量追加 {len(new_values)} 行数据，使用优化API策略")
+            # 为追加的数据添加表头（优化API需要）
+            headers = self.converter.df_to_values(pd.DataFrame(columns=df.columns), include_headers=True)[0]
+            values_with_headers = [headers] + new_values
+            return self.optimized_api.sync_data(
+                self.config.spreadsheet_token,
+                self.config.sheet_id,
+                values_with_headers,
+                SyncMode.INCREMENTAL,
                 self.config.batch_size,
-                80  # 列批次大小，保持安全裕度
+                80,  # 列批次大小，保持安全裕度
+                self.config.rate_limit_delay
             )
         else:
             self.logger.info("没有新记录需要同步")
@@ -621,13 +636,16 @@ class XTFSyncEngine:
             new_df = pd.DataFrame(new_df_rows)
             values = self.converter.df_to_values(new_df)
             
-            # 先清空现有数据，然后写入新数据
-            return self.api.write_sheet_data(
-                self.config.spreadsheet_token, 
-                self.config.sheet_id, 
+            # 使用优化API策略覆盖写入
+            self.logger.info(f"使用优化API策略 - PUT values 覆盖写入")
+            return self.optimized_api.sync_data(
+                self.config.spreadsheet_token,
+                self.config.sheet_id,
                 values,
+                SyncMode.OVERWRITE,
                 self.config.batch_size,
-                80  # 列批次大小，保持安全裕度
+                80,  # 列批次大小，保持安全裕度
+                self.config.rate_limit_delay
             )
         else:
             # 如果没有数据，清空表格
@@ -671,20 +689,22 @@ class XTFSyncEngine:
         return delete_success and create_success
     
     def _sync_clone_sheet(self, df: pd.DataFrame) -> bool:
-        """电子表格克隆同步"""
+        """电子表格克隆同步 - 使用优化API策略"""
         # 转换数据格式
         values = self.converter.df_to_values(df)
         
         self.logger.info(f"克隆同步计划: 清空现有数据，新增 {len(df)} 行")
-        self.logger.info(f"使用配置的批次大小: {self.config.batch_size} 行/批")
+        self.logger.info(f"使用优化API策略 - batch_update 批量写入")
         
-        # 使用二维分块写入数据（会覆盖现有数据）
-        write_success = self.api.write_sheet_data(
-            self.config.spreadsheet_token, 
-            self.config.sheet_id, 
+        # 使用优化的克隆同步策略
+        write_success = self.optimized_api.sync_data(
+            self.config.spreadsheet_token,
+            self.config.sheet_id,
             values,
+            SyncMode.CLONE,
             self.config.batch_size,
-            80  # 列批次大小，保持安全裕度
+            80,  # 列批次大小，保持安全裕度
+            self.config.rate_limit_delay
         )
         
         # 数据写入成功后，再应用智能字段配置

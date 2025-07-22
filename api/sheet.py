@@ -6,6 +6,7 @@
 """
 
 import logging
+import time
 from typing import Dict, Any, List, Optional
 
 from .auth import FeishuAuth
@@ -144,16 +145,19 @@ class SheetAPI:
             
             chunk_headers = headers[col_start:col_end]
             
-            self.logger.debug(f"处理列块 {col_chunk_idx + 1}/{col_chunks}: 列 {col_start + 1}-{col_end}")
+            self.logger.info(f"🔄 处理列块 {col_chunk_idx + 1}/{col_chunks}: 列 {col_start + 1}-{col_end}")
             
             # 写入当前列块的表头
             start_col_letter = self._column_number_to_letter(col_start + 1)
             end_col_letter = self._column_number_to_letter(col_end)
             header_range = f"{sheet_id}!{start_col_letter}1:{end_col_letter}1"
             
+            self.logger.info(f"📝 写入表头: {header_range}")
             if not self._write_single_batch(spreadsheet_token, header_range, [chunk_headers]):
-                self.logger.error(f"列块 {col_chunk_idx + 1} 表头写入失败")
+                self.logger.error(f"❌ 列块 {col_chunk_idx + 1} 表头写入失败")
                 return False
+            else:
+                self.logger.info(f"✅ 列块 {col_chunk_idx + 1} 表头写入成功")
             
             # 按行扫描当前列块（内层循环）
             for row_chunk_idx in range(row_chunks):
@@ -181,16 +185,21 @@ class SheetAPI:
                 data_end_row = data_start_row + len(chunk_data) - 1
                 data_range = f"{sheet_id}!{start_col_letter}{data_start_row}:{end_col_letter}{data_end_row}"
                 
-                self.logger.debug(f"写入数据块 [{row_chunk_idx + 1},{col_chunk_idx + 1}]: "
+                total_blocks += 1
+                self.logger.info(f"📤 写入数据块 {total_blocks}: [{row_chunk_idx + 1},{col_chunk_idx + 1}] "
                                 f"行 {data_start_row}-{data_end_row}, 列 {start_col_letter}-{end_col_letter} "
                                 f"({len(chunk_data)} 行 × {len(chunk_headers)} 列)")
                 
-                total_blocks += 1
                 if self._write_single_batch(spreadsheet_token, data_range, chunk_data):
                     success_blocks += 1
+                    self.logger.info(f"✅ 数据块 {total_blocks} 写入成功")
                 else:
-                    self.logger.error(f"数据块 [{row_chunk_idx + 1},{col_chunk_idx + 1}] 写入失败")
+                    self.logger.error(f"❌ 数据块 {total_blocks} 写入失败")
                     return False
+                
+                # 添加进度汇报
+                progress = (success_blocks / (row_chunks * col_chunks)) * 100
+                self.logger.info(f"📊 进度: {success_blocks}/{row_chunks * col_chunks} ({progress:.1f}%)")
         
         self.logger.info(f"二维分块上传完成: 成功 {success_blocks}/{total_blocks} 个数据块")
         return success_blocks == total_blocks
@@ -402,16 +411,18 @@ class SheetAPI:
     
     def set_dropdown_validation(self, spreadsheet_token: str, range_str: str, 
                                options: List[str], multiple_values: bool = False, 
-                               colors: Optional[List[str]] = None) -> bool:
+                               colors: Optional[List[str]] = None, 
+                               max_rows_per_batch: int = 4000) -> bool:
         """
-        为电子表格指定区域设置下拉列表数据校验
+        分块设置电子表格下拉列表数据校验
         
         Args:
             spreadsheet_token: 电子表格Token
-            range_str: 范围字符串，如 "Sheet1!A1:A100"
+            range_str: 范围字符串，如 "Sheet1!A1:A100000" (自动分块)
             options: 下拉列表选项值列表
             multiple_values: 是否支持多选，默认False
             colors: 选项颜色列表，需要与options一一对应
+            max_rows_per_batch: 每批次最大行数，保持在API限制内
             
         Returns:
             是否设置成功
@@ -441,12 +452,53 @@ class SheetAPI:
             self.logger.warning("没有有效的下拉列表选项")
             return False
         
+        # 处理颜色配置
+        if colors and len(colors) != len(valid_options):
+            self.logger.warning(f"颜色数量({len(colors)})与选项数量({len(valid_options)})不匹配，将自动补齐")
+            default_colors = ["#1FB6C1", "#F006C2", "#FB16C3", "#FFB6C1", "#32CD32", "#FF6347"]
+            colors = [colors[i % len(colors)] if i < len(colors) else default_colors[i % len(default_colors)] 
+                     for i in range(len(valid_options))]
+        
+        # 分块处理下拉列表设置
+        self.logger.info(f"📝 开始分块设置下拉列表，批次大小: {max_rows_per_batch} 行")
+        
+        # 将大范围分解为小块
+        range_chunks = self._split_range_into_chunks(range_str, max_rows_per_batch, 1)
+        success_count = 0
+        
+        self.logger.info(f"📋 范围 {range_str} 分解为 {len(range_chunks)} 个块")
+        
+        for i, chunk in enumerate(range_chunks, 1):
+            chunk_range = chunk[0]  # 每个chunk包含一个range列表
+            
+            self.logger.info(f"🔄 设置下拉列表批次 {i}/{len(range_chunks)}: {chunk_range}")
+            
+            if self._set_dropdown_single_batch(spreadsheet_token, chunk_range, valid_options, 
+                                             multiple_values, colors):
+                success_count += 1
+                self.logger.info(f"✅ 下拉列表批次 {i} 设置成功")
+            else:
+                self.logger.error(f"❌ 下拉列表批次 {i} 设置失败")
+                return False
+            
+            # 接口频率控制
+            time.sleep(0.1)
+        
+        self.logger.info(f"🎉 下拉列表设置完成: 成功 {success_count}/{len(range_chunks)} 个批次")
+        return success_count == len(range_chunks)
+    
+    def _set_dropdown_single_batch(self, spreadsheet_token: str, range_str: str, 
+                                  options: List[str], multiple_values: bool, 
+                                  colors: Optional[List[str]]) -> bool:
+        """
+        设置单个批次的下拉列表
+        """
         url = f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/dataValidation"
         headers = self.auth.get_auth_headers()
         
         # 构建请求数据
         data_validation = {
-            "conditionValues": valid_options,
+            "conditionValues": options,
             "options": {
                 "multipleValues": multiple_values,
                 "highlightValidData": bool(colors),
@@ -455,12 +507,6 @@ class SheetAPI:
         
         # 如果提供了颜色配置
         if colors:
-            if len(colors) != len(valid_options):
-                self.logger.warning(f"颜色数量({len(colors)})与选项数量({len(valid_options)})不匹配，将自动补齐")
-                # 循环使用颜色或使用默认颜色
-                default_colors = ["#1FB6C1", "#F006C2", "#FB16C3", "#FFB6C1", "#32CD32", "#FF6347"]
-                colors = [colors[i % len(colors)] if i < len(colors) else default_colors[i % len(default_colors)] 
-                         for i in range(len(valid_options))]
             data_validation["options"]["colors"] = colors
         
         request_data = {
@@ -485,7 +531,6 @@ class SheetAPI:
             self.logger.debug(f"API响应: {result}")
             return False
         
-        self.logger.info(f"成功为范围 {range_str} 设置下拉列表，选项数量: {len(valid_options)}")
         return True
     
     def _validate_range_size(self, spreadsheet_token: str, range_str: str) -> bool:
@@ -523,14 +568,17 @@ class SheetAPI:
             return False
     
     def set_cell_style(self, spreadsheet_token: str, ranges: List[str], 
-                      style: Dict[str, Any]) -> bool:
+                      style: Dict[str, Any], max_rows_per_batch: int = 4000, 
+                      max_cols_per_batch: int = 80) -> bool:
         """
-        批量设置单元格样式
+        分块批量设置单元格样式
         
         Args:
             spreadsheet_token: 电子表格Token
-            ranges: 范围列表，如 ["Sheet1!A1:A10", "Sheet1!B1:B10"]
+            ranges: 范围列表，如 ["Sheet1!A1:A100000"] (自动分块)
             style: 样式配置字典
+            max_rows_per_batch: 每批次最大行数，保持在API限制内
+            max_cols_per_batch: 每批次最大列数，保持在API限制内
             
         Returns:
             是否设置成功
@@ -539,18 +587,92 @@ class SheetAPI:
             self.logger.warning("样式设置范围为空，跳过设置")
             return True
         
-        # 验证范围是否在网格限制内
-        valid_ranges = []
+        self.logger.info(f"🎨 开始分块设置单元格样式，批次大小: {max_rows_per_batch}行 × {max_cols_per_batch}列")
+        
+        success_batches = 0
+        total_batches = 0
+        
         for range_str in ranges:
-            if self._validate_range_size(spreadsheet_token, range_str):
-                valid_ranges.append(range_str)
-            else:
-                self.logger.warning(f"范围 {range_str} 超出网格限制，跳过设置")
+            # 解析范围
+            chunks = self._split_range_into_chunks(range_str, max_rows_per_batch, max_cols_per_batch)
+            total_batches += len(chunks)
+            
+            self.logger.info(f"📋 范围 {range_str} 分解为 {len(chunks)} 个块")
+            
+            # 分批处理每个块
+            for i, chunk_ranges in enumerate(chunks, 1):
+                self.logger.info(f"🔄 处理样式批次 {i}/{len(chunks)}: {len(chunk_ranges)} 个范围")
+                
+                if self._set_style_single_batch(spreadsheet_token, chunk_ranges, style):
+                    success_batches += 1
+                    self.logger.info(f"✅ 样式批次 {i} 设置成功")
+                else:
+                    self.logger.error(f"❌ 样式批次 {i} 设置失败")
+                    return False
+                
+                # 接口频率控制
+                time.sleep(0.1)
         
-        if not valid_ranges:
-            self.logger.warning("所有范围都超出网格限制，跳过样式设置")
-            return True
+        self.logger.info(f"🎉 样式设置完成: 成功 {success_batches}/{total_batches} 个批次")
+        return success_batches == total_batches
+    
+    def _split_range_into_chunks(self, range_str: str, max_rows: int, max_cols: int) -> List[List[str]]:
+        """
+        将大范围分解为符合API限制的小块
         
+        Args:
+            range_str: 原始范围，如 "Sheet1!A1:AK94277"
+            max_rows: 最大行数
+            max_cols: 最大列数
+            
+        Returns:
+            分块后的范围列表的列表
+        """
+        import re
+        
+        # 解析范围字符串
+        match = re.match(r'([^!]+)!([A-Z]+)(\d+):([A-Z]+)(\d+)', range_str)
+        if not match:
+            self.logger.warning(f"无法解析范围字符串: {range_str}")
+            return [[range_str]]  # 返回原始范围
+        
+        sheet_id, start_col, start_row, end_col, end_row = match.groups()
+        start_row, end_row = int(start_row), int(end_row)
+        
+        # 转换列字母为数字
+        start_col_num = self._column_letter_to_number(start_col)
+        end_col_num = self._column_letter_to_number(end_col)
+        
+        chunks = []
+        
+        # 按列分块
+        for col_start in range(start_col_num, end_col_num + 1, max_cols):
+            col_end = min(col_start + max_cols - 1, end_col_num)
+            
+            # 按行分块
+            for row_start in range(start_row, end_row + 1, max_rows):
+                row_end = min(row_start + max_rows - 1, end_row)
+                
+                # 构建块范围
+                chunk_start_col = self._column_number_to_letter(col_start)
+                chunk_end_col = self._column_number_to_letter(col_end)
+                chunk_range = f"{sheet_id}!{chunk_start_col}{row_start}:{chunk_end_col}{row_end}"
+                
+                chunks.append([chunk_range])
+        
+        return chunks
+    
+    def _column_letter_to_number(self, col_letter: str) -> int:
+        """将列字母转换为数字（A->1, B->2, ..., AA->27）"""
+        result = 0
+        for char in col_letter:
+            result = result * 26 + (ord(char) - ord('A') + 1)
+        return result
+    
+    def _set_style_single_batch(self, spreadsheet_token: str, ranges: List[str], style: Dict[str, Any]) -> bool:
+        """
+        设置单个批次的样式
+        """
         url = f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/styles_batch_update"
         headers = self.auth.get_auth_headers()
         
@@ -558,7 +680,7 @@ class SheetAPI:
         request_data = {
             "data": [
                 {
-                    "ranges": valid_ranges,
+                    "ranges": ranges,
                     "style": style
                 }
             ]
@@ -580,7 +702,6 @@ class SheetAPI:
             self.logger.debug(f"API响应: {result}")
             return False
         
-        self.logger.info(f"成功为 {len(valid_ranges)} 个范围设置单元格样式 (原计划 {len(ranges)} 个)")
         return True
     
     def set_date_format(self, spreadsheet_token: str, ranges: List[str], 
