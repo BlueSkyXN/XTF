@@ -397,9 +397,13 @@ class XTFSyncEngine:
             
             # 写入更新后的数据
             values = self.converter.df_to_values(updated_df)
-            end_col = self.converter.column_number_to_letter(len(updated_df.columns))
-            range_str = self.converter.get_range_string(self.config.sheet_id, 1, "A", len(values), end_col)
-            success = self.api.write_sheet_data(self.config.spreadsheet_token, range_str, values)
+            success = self.api.write_sheet_data(
+                self.config.spreadsheet_token, 
+                self.config.sheet_id, 
+                values,
+                self.config.batch_size,
+                80  # 列批次大小，保持安全裕度
+            )
         
         # 追加新行
         if new_rows and success:
@@ -407,11 +411,14 @@ class XTFSyncEngine:
             new_values = self.converter.df_to_values(new_df, include_headers=False)
             
             if new_values:
-                # 计算追加的起始行
-                start_row = len(current_df) + 2  # +1 for header, +1 for next row
-                end_col_letter = self.converter.column_number_to_letter(len(df.columns))
-                range_str = self.converter.get_range_string(self.config.sheet_id, start_row, "A", start_row + len(new_values) - 1, end_col_letter)
-                success = self.api.append_sheet_data(self.config.spreadsheet_token, range_str, new_values)
+                self.logger.info(f"开始追加 {len(new_values)} 行新数据，使用批次大小: {self.config.batch_size}")
+                success = self.api.append_sheet_data(
+                    self.config.spreadsheet_token, 
+                    self.config.sheet_id, 
+                    new_values,
+                    self.config.batch_size,
+                    80  # 列批次大小，保持安全裕度
+                )
         
         return success
     
@@ -477,8 +484,14 @@ class XTFSyncEngine:
             self.logger.warning("未指定索引列，将新增全部数据")
             # 追加所有数据
             values = self.converter.df_to_values(df)
-            range_str = f"{self.config.sheet_id}!A:A"  # 让系统自动确定追加位置
-            return self.api.append_sheet_data(self.config.spreadsheet_token, range_str, values)
+            self.logger.info(f"未指定索引列，开始追加全部 {len(values)} 行数据，使用批次大小: {self.config.batch_size}")
+            return self.api.append_sheet_data(
+                self.config.spreadsheet_token, 
+                self.config.sheet_id, 
+                values,
+                self.config.batch_size,
+                80  # 列批次大小，保持安全裕度
+            )
         
         # 获取现有数据
         current_df = self.get_current_sheet_data()
@@ -505,8 +518,14 @@ class XTFSyncEngine:
             new_values = self.converter.df_to_values(new_df, include_headers=False)
             
             # 追加新数据
-            range_str = f"{self.config.sheet_id}!A:A"  # 让系统自动确定追加位置
-            return self.api.append_sheet_data(self.config.spreadsheet_token, range_str, new_values)
+            self.logger.info(f"开始增量追加 {len(new_values)} 行数据，使用批次大小: {self.config.batch_size}")
+            return self.api.append_sheet_data(
+                self.config.spreadsheet_token, 
+                self.config.sheet_id, 
+                new_values,
+                self.config.batch_size,
+                80  # 列批次大小，保持安全裕度
+            )
         else:
             self.logger.info("没有新记录需要同步")
             return True
@@ -601,11 +620,15 @@ class XTFSyncEngine:
         if new_df_rows:
             new_df = pd.DataFrame(new_df_rows)
             values = self.converter.df_to_values(new_df)
-            end_col = self.converter.column_number_to_letter(len(new_df.columns))
-            range_str = self.converter.get_range_string(self.config.sheet_id, 1, "A", len(values), end_col)
             
             # 先清空现有数据，然后写入新数据
-            return self.api.write_sheet_data(self.config.spreadsheet_token, range_str, values)
+            return self.api.write_sheet_data(
+                self.config.spreadsheet_token, 
+                self.config.sheet_id, 
+                values,
+                self.config.batch_size,
+                80  # 列批次大小，保持安全裕度
+            )
         else:
             # 如果没有数据，清空表格
             return self.api.clear_sheet_data(self.config.spreadsheet_token, f"{self.config.sheet_id}!A:Z")
@@ -651,13 +674,18 @@ class XTFSyncEngine:
         """电子表格克隆同步"""
         # 转换数据格式
         values = self.converter.df_to_values(df)
-        end_col = self.converter.column_number_to_letter(len(df.columns))
-        range_str = self.converter.get_range_string(self.config.sheet_id, 1, "A", len(values), end_col)
         
         self.logger.info(f"克隆同步计划: 清空现有数据，新增 {len(df)} 行")
+        self.logger.info(f"使用配置的批次大小: {self.config.batch_size} 行/批")
         
-        # 先写入数据（会覆盖现有数据）
-        write_success = self.api.write_sheet_data(self.config.spreadsheet_token, range_str, values)
+        # 使用二维分块写入数据（会覆盖现有数据）
+        write_success = self.api.write_sheet_data(
+            self.config.spreadsheet_token, 
+            self.config.sheet_id, 
+            values,
+            self.config.batch_size,
+            80  # 列批次大小，保持安全裕度
+        )
         
         # 数据写入成功后，再应用智能字段配置
         if write_success:

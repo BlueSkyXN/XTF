@@ -422,7 +422,7 @@ jobs:
 
   publish-release:
     runs-on: ubuntu-latest
-    needs: create-platform-bundles
+    needs: [create-platform-bundles, create-release-bundle]
     if: github.event_name == 'release'
     
     steps:
@@ -437,10 +437,10 @@ jobs:
         echo "version=$VERSION" >> $GITHUB_OUTPUT
       shell: bash
     
-    - name: Download all platform bundles
+    - name: Download all artifacts
       uses: actions/download-artifact@v4
       with:
-        pattern: ALL-XTF-*-${{ env.VERSION }}
+        pattern: "*-XTF-*-${{ env.VERSION }}"
         merge-multiple: true
     
     - name: Prepare release assets
@@ -465,5 +465,6 @@ jobs:
           ALL-XTF-linux-arm64-${{ env.VERSION }}.zip
           ALL-XTF-windows-x64-${{ env.VERSION }}.zip
           ALL-XTF-macos-arm64-${{ env.VERSION }}.zip
+          FULL-XTF-${{ env.VERSION }}.zip
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
