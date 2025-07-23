@@ -92,7 +92,8 @@ class SheetAPI:
     
     def write_sheet_data(self, spreadsheet_token: str, sheet_id: str, values: List[List[Any]],
                          row_batch_size: int = 500, col_batch_size: int = 80,
-                         rate_limit_delay: float = 0.05) -> bool:
+                         rate_limit_delay: float = 0.05,
+                         start_row_offset: int = 0, start_col_offset: int = 0) -> bool:
         """
         写入电子表格数据，具备“自动二分重试”能力。
         
@@ -103,6 +104,8 @@ class SheetAPI:
             row_batch_size: 初始行批次大小
             col_batch_size: 列批次大小
             rate_limit_delay: 接口调用间隔
+            start_row_offset: 起始行偏移量 (0-based)
+            start_col_offset: 起始列偏移量 (0-based)
             
         Returns:
             是否写入成功
@@ -110,10 +113,10 @@ class SheetAPI:
         if not values:
             self.logger.warning("写入数据为空")
             return True
-            
+
         self.logger.info("🔄 执行写入操作 (具备自动二分重试能力)")
-        
-        data_chunks = self._create_data_chunks(values, row_batch_size, col_batch_size)
+
+        data_chunks = self._create_data_chunks(values, row_batch_size, col_batch_size, start_row_offset, start_col_offset)
         total_chunks = len(data_chunks)
         
         self.logger.info(f"📦 初始数据分块完成: 共 {total_chunks} 个数据块")
