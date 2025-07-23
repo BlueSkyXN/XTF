@@ -30,6 +30,13 @@ class XTFSyncEngine:
         """
         self.config = config
         
+        # 设置日志（必须先设置，因为其他初始化可能需要日志）
+        self.setup_logging()
+        self.logger = logging.getLogger(__name__)
+        
+        # 初始化全局请求控制器（如果配置了高级重试和频控策略）
+        self._init_global_controller()
+        
         # 初始化API组件
         self.auth = FeishuAuth(config.app_id, config.app_secret)
         self.api_client = RetryableAPIClient(
@@ -44,10 +51,21 @@ class XTFSyncEngine:
             self.api: Union[BitableAPI, SheetAPI] = SheetAPI(self.auth, self.api_client)
         # 初始化数据转换器
         self.converter = DataConverter(config.target_type)
-        
-        # 设置日志
-        self.setup_logging()
-        self.logger = logging.getLogger(__name__)
+    
+    def _init_global_controller(self):
+        """初始化全局请求控制器"""
+        try:
+            from .config import ConfigManager
+            # 使用配置管理器创建全局控制器
+            global_controller = ConfigManager.create_request_controller(self.config)
+            if global_controller:
+                self.logger.info(f"已初始化全局请求控制器 - 重试策略: {self.config.retry_strategy_type}, "
+                               f"频控策略: {self.config.rate_limit_strategy_type}")
+            else:
+                self.logger.info(f"使用传统控制模式 - 重试次数: {self.config.max_retries}, "
+                               f"频控间隔: {self.config.rate_limit_delay}s")
+        except Exception as e:
+            self.logger.warning(f"初始化全局控制器失败，回退到传统模式: {e}")
     
     def setup_logging(self):
         """设置日志"""

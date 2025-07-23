@@ -84,6 +84,21 @@ class SyncConfig:
     rate_limit_delay: float = 0.5  # 接口调用间隔
     max_retries: int = 3  # 最大重试次数
     
+    # 高级控制开关
+    enable_advanced_control: bool = False  # 是否启用高级重试和频控策略
+    
+    # 高级重试配置（仅当enable_advanced_control=True时生效）
+    retry_strategy_type: str = "exponential_backoff"  # 重试策略: exponential_backoff, linear_growth, fixed_wait
+    retry_initial_delay: float = 0.5  # 重试初始延迟时间（秒），支持小于1的数
+    retry_max_wait_time: Optional[float] = None  # 最大单次等待时间（秒）
+    retry_multiplier: float = 2.0  # 指数退避倍数（仅指数退避策略使用）
+    retry_increment: float = 0.5  # 线性增长步长（仅线性增长策略使用）
+    
+    # 高级频控配置（仅当enable_advanced_control=True时生效）
+    rate_limit_strategy_type: str = "fixed_wait"  # 频控策略: fixed_wait, sliding_window, fixed_window
+    rate_limit_window_size: float = 1.0  # 时间窗大小（秒），支持小于1的数
+    rate_limit_max_requests: int = 10  # 时间窗内的最大请求数
+    
     # 日志设置
     log_level: str = "INFO"
     
@@ -395,6 +410,39 @@ class ConfigManager:
             sys.exit(1)
         
         return SyncConfig(**config_data)
+    
+    @staticmethod
+    def create_request_controller(config: SyncConfig):
+        """从配置创建请求控制器"""
+        # 检查是否启用高级控制
+        if not config.enable_advanced_control:
+            return None  # 返回None表示使用传统控制方式
+        
+        from .control import GlobalRequestController
+        
+        # 准备重试配置
+        retry_config = {
+            'initial_delay': config.retry_initial_delay,
+            'max_retries': config.max_retries,  # 保持向后兼容，使用传统的max_retries
+            'max_wait_time': config.retry_max_wait_time,
+            'multiplier': config.retry_multiplier,
+            'increment': config.retry_increment
+        }
+        
+        # 准备频控配置
+        rate_limit_config = {
+            'delay': config.rate_limit_delay,  # 保持向后兼容，使用传统的rate_limit_delay
+            'window_size': config.rate_limit_window_size,
+            'max_requests': config.rate_limit_max_requests
+        }
+        
+        # 创建全局控制器
+        return GlobalRequestController.create_from_config(
+            retry_type=config.retry_strategy_type,
+            retry_config=retry_config,
+            rate_limit_type=config.rate_limit_strategy_type,
+            rate_limit_config=rate_limit_config
+        )
 
 
 def create_sample_config(config_file: str = "config.yaml", target_type: TargetType = TargetType.BITABLE):
