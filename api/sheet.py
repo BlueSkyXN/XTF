@@ -274,6 +274,139 @@ class SheetAPI:
         self.logger.debug(f"成功追加 {len(values)} 行数据")
         return True, 0
     
+    def write_selective_columns(self, spreadsheet_token: str, sheet_id: str, 
+                              column_data: Dict[str, List[Any]], 
+                              column_positions: Dict[str, int],
+                              start_row: int = 1,
+                              rate_limit_delay: float = 0.05) -> bool:
+        """
+        写入选择性列数据，支持不连续列的高效批量操作
+        
+        Args:
+            spreadsheet_token: 电子表格Token
+            sheet_id: 工作表ID
+            column_data: 字典，键为列名，值为该列的数据列表
+            column_positions: 字典，键为列名，值为列位置（1-based）
+            start_row: 开始行号（1-based）
+            rate_limit_delay: 接口调用间隔
+            
+        Returns:
+            是否写入成功
+        """
+        if not column_data:
+            self.logger.warning("选择性写入数据为空")
+            return True
+        
+        self.logger.info(f"🎯 执行选择性列写入: {list(column_data.keys())}")
+        
+        # 优化相邻列为连续范围
+        ranges_data = self._optimize_column_ranges(column_data, column_positions, start_row)
+        
+        # 构建多范围数据
+        value_ranges = []
+        for range_info in ranges_data:
+            range_str = f"{sheet_id}!{range_info['range']}"
+            value_ranges.append({
+                "range": range_str,
+                "values": range_info['values']
+            })
+        
+        # 使用批量更新API
+        if value_ranges:
+            time.sleep(rate_limit_delay)
+            success, _ = self._batch_update_ranges(spreadsheet_token, value_ranges)
+            if success:
+                self.logger.info(f"✅ 选择性列写入成功: {len(value_ranges)} 个范围")
+            else:
+                self.logger.error(f"❌ 选择性列写入失败")
+            return success
+        
+        return True
+    
+    def _optimize_column_ranges(self, column_data: Dict[str, List[Any]], 
+                               column_positions: Dict[str, int], 
+                               start_row: int,
+                               max_gap: int = 2) -> List[Dict]:
+        """
+        优化列范围，将相邻列合并为连续范围以提高API效率
+        
+        Args:
+            column_data: 列数据
+            column_positions: 列位置映射
+            start_row: 开始行号
+            max_gap: 最大允许合并的间隔列数
+            
+        Returns:
+            优化后的范围数据列表
+        """
+        # 按列位置排序
+        sorted_columns = sorted(column_data.keys(), key=lambda x: column_positions.get(x, 0))
+        
+        ranges_data = []
+        i = 0
+        
+        while i < len(sorted_columns):
+            range_start = i
+            range_end = i
+            
+            # 查找可以合并的连续列
+            while range_end + 1 < len(sorted_columns):
+                current_pos = column_positions[sorted_columns[range_end]]
+                next_pos = column_positions[sorted_columns[range_end + 1]]
+                
+                # 如果间隔小于等于max_gap，则合并
+                if next_pos - current_pos <= max_gap:
+                    range_end += 1
+                else:
+                    break
+            
+            # 构建范围数据
+            start_col = column_positions[sorted_columns[range_start]]
+            end_col = column_positions[sorted_columns[range_end]]
+            
+            start_col_letter = self._column_number_to_letter(start_col)
+            end_col_letter = self._column_number_to_letter(end_col)
+            
+            # 计算数据行数
+            max_rows = max(len(column_data[col]) for col in sorted_columns[range_start:range_end+1])
+            end_row = start_row + max_rows - 1
+            
+            range_str = f"{start_col_letter}{start_row}:{end_col_letter}{end_row}"
+            
+            # 构建该范围的数据矩阵
+            range_values = []
+            for row_idx in range(max_rows):
+                row_data = []
+                for col_idx in range(start_col, end_col + 1):
+                    col_letter = self._column_number_to_letter(col_idx)
+                    # 查找对应的列名
+                    col_name = None
+                    for name, pos in column_positions.items():
+                        if pos == col_idx:
+                            col_name = name
+                            break
+                    
+                    if col_name and col_name in column_data:
+                        # 有数据的列
+                        if row_idx < len(column_data[col_name]):
+                            row_data.append(column_data[col_name][row_idx])
+                        else:
+                            row_data.append("")
+                    else:
+                        # 空列（用于填充间隔）
+                        row_data.append("")
+                
+                range_values.append(row_data)
+            
+            ranges_data.append({
+                'range': range_str,
+                'values': range_values
+            })
+            
+            i = range_end + 1
+        
+        return ranges_data
+    
     def clear_sheet_data(self, spreadsheet_token: str, sheet_id: str, range_str: str) -> bool:
         """
         清空电子表格指定范围的数据
@@ -457,9 +590,9 @@ class SheetAPI:
     
     def set_cell_style(self, spreadsheet_token: str, ranges: List[str], 
                       style: Dict[str, Any], max_rows_per_batch: int = 4000, 
-                      max_cols_per_batch: int = 80) -> bool:
+                      max_cols_per_batch: int = 80, adaptive_batch: bool = True) -> bool:
         """
-        分块批量设置单元格样式
+        分块批量设置单元格样式，支持自适应批次优化
         
         Args:
             spreadsheet_token: 电子表格Token
@@ -467,6 +600,7 @@ class SheetAPI:
             style: 样式配置字典
             max_rows_per_batch: 每批次最大行数，保持在API限制内
             max_cols_per_batch: 每批次最大列数，保持在API限制内
+            adaptive_batch: 是否启用自适应批次优化（针对少列场景）
             
         Returns:
             是否设置成功
@@ -474,6 +608,13 @@ class SheetAPI:
         if not ranges:
             self.logger.warning("样式设置范围为空，跳过设置")
             return True
+        
+        # 针对列批量设置优化：5000行×1列为最优批次
+        if adaptive_batch:
+            # 格式设置API的最优策略：垂直批量，每次5000行×1列
+            max_rows_per_batch = 5000
+            max_cols_per_batch = 1  # 强制单列处理
+            self.logger.info(f"🚀 启用格式设置专用优化: 垂直批量 {max_rows_per_batch}行×{max_cols_per_batch}列")
         
         self.logger.info(f"🎨 开始分块设置单元格样式，批次大小: {max_rows_per_batch}行 × {max_cols_per_batch}列")
         
@@ -489,11 +630,26 @@ class SheetAPI:
             
             # 分批处理每个块
             for i, chunk_ranges in enumerate(chunks, 1):
-                self.logger.info(f"🔄 处理样式批次 {i}/{len(chunks)}: {len(chunk_ranges)} 个范围")
+                # 解析范围信息用于详细日志
+                range_details = []
+                for chunk_range in chunk_ranges:
+                    range_details.append(self._parse_range_for_log(chunk_range))
+                
+                # 显示详细的处理信息
+                if len(range_details) == 1:
+                    detail = range_details[0]
+                    style_type = self._get_style_type_description(style)
+                    self.logger.info(f"🔄 设置{detail['col_name']}列的{detail['start_row']}-{detail['end_row']}行为{style_type} (批次 {i}/{len(chunks)})")
+                else:
+                    self.logger.info(f"🔄 处理样式批次 {i}/{len(chunks)}: {len(chunk_ranges)} 个范围")
                 
                 if self._set_style_single_batch(spreadsheet_token, chunk_ranges, style):
                     success_batches += 1
-                    self.logger.info(f"✅ 样式批次 {i} 设置成功")
+                    if len(range_details) == 1:
+                        detail = range_details[0]
+                        self.logger.info(f"✅ {detail['col_name']}列样式设置成功")
+                    else:
+                        self.logger.info(f"✅ 样式批次 {i} 设置成功")
                 else:
                     self.logger.error(f"❌ 样式批次 {i} 设置失败")
                     return False
@@ -503,6 +659,37 @@ class SheetAPI:
         
         self.logger.info(f"🎉 样式设置完成: 成功 {success_batches}/{total_batches} 个批次")
         return success_batches == total_batches
+    
+    def _parse_range_for_log(self, range_str: str) -> Dict[str, Any]:
+        """解析范围字符串用于日志显示"""
+        import re
+        match = re.match(r'([^!]+)!([A-Z]+)(\d+):([A-Z]+)(\d+)', range_str)
+        if match:
+            sheet_id, start_col, start_row, end_col, end_row = match.groups()
+            return {
+                'sheet_id': sheet_id,
+                'col_name': start_col if start_col == end_col else f"{start_col}-{end_col}",
+                'start_row': start_row,
+                'end_row': end_row
+            }
+        return {'col_name': '未知', 'start_row': '?', 'end_row': '?'}
+    
+    def _get_style_type_description(self, style: Dict[str, Any]) -> str:
+        """获取样式类型的中文描述"""
+        if 'formatter' in style:
+            formatter = style['formatter']
+            if 'yyyy' in formatter.lower() or 'mm' in formatter.lower() or 'dd' in formatter.lower():
+                return "日期格式"
+            elif '#' in formatter or '0' in formatter:
+                return "数字格式"
+            else:
+                return f"自定义格式({formatter})"
+        elif 'fore_color' in style or 'background_color' in style:
+            return "颜色样式"
+        elif 'bold' in style or 'italic' in style:
+            return "字体样式"
+        else:
+            return "样式"
     
     def _split_range_into_chunks(self, range_str: str, max_rows: int, max_cols: int) -> List[List[str]]:
         """

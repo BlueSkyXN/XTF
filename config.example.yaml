@@ -54,5 +54,29 @@ intelligence_boolean_confidence: 0.95      # 布尔类型置信度
 #     - 数字格式: 自动设置为#,##0.00格式
 #     - 颜色标记: 自动为下拉列表选项分配颜色
 
+# 选择性同步配置 (仅支持电子表格)
+selective_sync:
+  enabled: false                          # 是否启用选择性同步
+  columns: ["column1", "column2", "column3"]  # 指定要同步的列名列表
+  auto_include_index: true                # 自动包含索引列用于匹配
+  optimize_ranges: true                   # 优化合并相邻列范围
+  max_gap_for_merge: 2                   # 最大允许合并的间隔列数
+  preserve_column_order: true            # 保持原始列顺序
+
+# 选择性同步说明:
+# - 与现有同步模式兼容: full+selective, incremental+selective, overwrite+selective
+# - 不支持clone模式 (逻辑冲突)
+# - 自动包含索引列: 确保匹配逻辑正常工作，但可选择是否更新
+# - 智能范围优化: 自动将相邻列合并为连续范围，减少API调用
+# - 高效批量操作: 利用飞书多范围API，支持不连续列的高效处理
+# 
+# 使用示例:
+# sync_mode: "full"
+# selective_sync:
+#   enabled: true
+#   columns: ["salary", "department", "last_updated"]
+# 
+# 结果: 只同步指定的3列，其他列保持不变
+
 # 日志设置
 log_level: "INFO"                         # 日志级别: DEBUG/INFO/WARNING/ERROR

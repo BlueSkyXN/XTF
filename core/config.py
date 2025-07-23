@@ -10,8 +10,8 @@ import argparse
 import sys
 from pathlib import Path
 from enum import Enum
-from dataclasses import dataclass
-from typing import Optional, Dict, Any
+from dataclasses import dataclass, field
+from typing import Optional, Dict, Any, List
 
 
 class FieldTypeStrategy(Enum):
@@ -34,6 +34,17 @@ class TargetType(Enum):
     """目标类型枚举"""
     BITABLE = "bitable"    # 多维表格
     SHEET = "sheet"        # 电子表格
+
+
+@dataclass
+class SelectiveSyncConfig:
+    """选择性同步配置"""
+    enabled: bool = False
+    columns: Optional[List[str]] = None
+    auto_include_index: bool = True
+    optimize_ranges: bool = True
+    max_gap_for_merge: int = 2
+    preserve_column_order: bool = True
 
 
 @dataclass
@@ -76,6 +87,9 @@ class SyncConfig:
     # 日志设置
     log_level: str = "INFO"
     
+    # 选择性同步配置
+    selective_sync: SelectiveSyncConfig = field(default_factory=SelectiveSyncConfig)
+    
     def __post_init__(self):
         if isinstance(self.sync_mode, str):
             self.sync_mode = SyncMode(self.sync_mode)
@@ -91,6 +105,13 @@ class SyncConfig:
         elif self.target_type == TargetType.SHEET:
             if not self.spreadsheet_token or not self.sheet_id:
                 raise ValueError("电子表格模式需要spreadsheet_token和sheet_id")
+        
+        # 验证 selective 配置
+        if self.selective_sync.enabled:
+            if self.sync_mode == SyncMode.CLONE:
+                raise ValueError("Clone 模式不支持 selective 同步")
+            if not self.selective_sync.columns:
+                raise ValueError("启用 selective 同步时必须指定 columns")
 
 
 class ConfigManager:
@@ -240,7 +261,15 @@ class ConfigManager:
                 'batch_size': 1000,
                 'rate_limit_delay': 0.1,
                 'max_retries': 3,
-                'log_level': 'INFO'
+                'log_level': 'INFO',
+                'selective_sync': {
+                    'enabled': False,
+                    'columns': None,
+                    'auto_include_index': True,
+                    'optimize_ranges': True,
+                    'max_gap_for_merge': 2,
+                    'preserve_column_order': True
+                }
             }
         
         # 尝试从配置文件加载，覆盖默认值
@@ -338,6 +367,13 @@ class ConfigManager:
         if cli_overrides:
             print(f"🔧 命令行参数覆盖: {', '.join(cli_overrides)}")
         
+        # 处理 selective_sync 配置
+        if 'selective_sync' in config_data and isinstance(config_data['selective_sync'], dict):
+            selective_config = config_data['selective_sync']
+            config_data['selective_sync'] = SelectiveSyncConfig(**selective_config)
+        elif 'selective_sync' not in config_data:
+            config_data['selective_sync'] = SelectiveSyncConfig()
+        
         # 验证必需参数
         required_fields = ['file_path', 'app_id', 'app_secret']
         if target_type == TargetType.BITABLE:
@@ -398,7 +434,15 @@ def create_sample_config(config_file: str = "config.yaml", target_type: TargetTy
             "batch_size": 1000,
             "rate_limit_delay": 0.1,
             "max_retries": 3,
-            "log_level": "INFO"
+            "log_level": "INFO",
+            "selective_sync": {
+                "enabled": False,
+                "columns": ["column1", "column2", "column3"],
+                "auto_include_index": True,
+                "optimize_ranges": True,
+                "max_gap_for_merge": 2,
+                "preserve_column_order": True
+            }
         }
     
     if not Path(config_file).exists():

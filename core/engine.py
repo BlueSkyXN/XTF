@@ -276,11 +276,47 @@ class XTFSyncEngine:
         self.logger.warning("无法获取电子表格数据，可能数据量过大，将使用覆盖模式")
         return pd.DataFrame()
     
+    # ========== 选择性同步辅助方法 ==========
+    
+    def _apply_selective_filter(self, df: pd.DataFrame) -> pd.DataFrame:
+        """应用选择性列过滤"""
+        if not self.config.selective_sync.enabled or not self.config.selective_sync.columns:
+            return df
+        
+        # 获取要处理的列
+        target_columns = self.config.selective_sync.columns.copy()
+        
+        # 自动包含索引列（用于匹配逻辑）
+        if (self.config.selective_sync.auto_include_index and 
+            self.config.index_column and 
+            self.config.index_column not in target_columns):
+            target_columns.append(self.config.index_column)
+            self.logger.info(f"自动包含索引列: {self.config.index_column}")
+        
+        # 验证列是否存在
+        missing_columns = [col for col in target_columns if col not in df.columns]
+        if missing_columns:
+            self.logger.warning(f"指定的列不存在于数据中: {missing_columns}")
+            target_columns = [col for col in target_columns if col in df.columns]
+        
+        # 保持列顺序（如果启用）
+        if self.config.selective_sync.preserve_column_order:
+            # 按原始DataFrame中的顺序排列
+            ordered_columns = [col for col in df.columns if col in target_columns]
+            return df[ordered_columns]
+        else:
+            return df[target_columns]
+    
     # ========== 统一同步方法 ==========
     
     def sync_full(self, df: pd.DataFrame) -> bool:
         """全量同步：已存在的更新，不存在的新增"""
         self.logger.info("开始全量同步...")
+        
+        # 检查是否启用选择性同步
+        if self.config.selective_sync.enabled:
+            df = self._apply_selective_filter(df)
+            self.logger.info(f"选择性同步已启用，处理 {len(self.config.selective_sync.columns)} 列")
         
         if self.config.target_type == TargetType.BITABLE:
             return self._sync_full_bitable(df)
@@ -446,6 +482,11 @@ class XTFSyncEngine:
         """增量同步：只新增不存在的记录"""
         self.logger.info("开始增量同步...")
         
+        # 检查是否启用选择性同步
+        if self.config.selective_sync.enabled:
+            df = self._apply_selective_filter(df)
+            self.logger.info(f"选择性同步已启用，处理 {len(self.config.selective_sync.columns)} 列")
+        
         if self.config.target_type == TargetType.BITABLE:
             return self._sync_incremental_bitable(df)
         else:  # SHEET
@@ -563,6 +604,11 @@ class XTFSyncEngine:
         if not self.config.index_column:
             self.logger.error("覆盖同步模式需要指定索引列")
             return False
+        
+        # 检查是否启用选择性同步
+        if self.config.selective_sync.enabled:
+            df = self._apply_selective_filter(df)
+            self.logger.info(f"选择性同步已启用，处理 {len(self.config.selective_sync.columns)} 列")
         
         if self.config.target_type == TargetType.BITABLE:
             return self._sync_overwrite_bitable(df)

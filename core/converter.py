@@ -954,9 +954,19 @@ class DataConverter:
             result = result * 26 + (ord(char) - ord('A') + 1)
         return result
     
-    def df_to_values(self, df: pd.DataFrame, include_headers: bool = True) -> List[List[Any]]:
-        """将DataFrame转换为电子表格值格式"""
+    def df_to_values(self, df: pd.DataFrame, include_headers: bool = True, 
+                     selected_columns: Optional[List[str]] = None) -> List[List[Any]]:
+        """将DataFrame转换为电子表格值格式，支持列过滤"""
         values = []
+        
+        # 应用列过滤
+        if selected_columns:
+            # 验证列是否存在
+            valid_columns = [col for col in selected_columns if col in df.columns]
+            if len(valid_columns) != len(selected_columns):
+                missing = [col for col in selected_columns if col not in df.columns]
+                self.logger.warning(f"指定的列不存在: {missing}")
+            df = df[valid_columns] if valid_columns else df
         
         # 添加表头
         if include_headers:
@@ -971,6 +981,42 @@ class DataConverter:
             values.append(row_values)
         
         return values
+    
+    def df_to_column_data(self, df: pd.DataFrame, selected_columns: Optional[List[str]] = None) -> Dict[str, List[Any]]:
+        """将DataFrame转换为按列组织的数据字典，用于选择性列操作"""
+        # 应用列过滤
+        if selected_columns:
+            valid_columns = [col for col in selected_columns if col in df.columns]
+            if len(valid_columns) != len(selected_columns):
+                missing = [col for col in selected_columns if col not in df.columns]
+                self.logger.warning(f"指定的列不存在: {missing}")
+            df = df[valid_columns] if valid_columns else df
+        
+        column_data = {}
+        for col in df.columns:
+            # 包含表头
+            col_values = [col]  # 表头
+            # 添加数据
+            for value in df[col]:
+                converted_value = self.simple_convert_value(value)
+                col_values.append(converted_value)
+            column_data[col] = col_values
+        
+        return column_data
+    
+    def get_column_positions(self, df: pd.DataFrame, selected_columns: Optional[List[str]] = None) -> Dict[str, int]:
+        """获取列在原始DataFrame中的位置映射（1-based）"""
+        if selected_columns:
+            valid_columns = [col for col in selected_columns if col in df.columns]
+        else:
+            valid_columns = df.columns.tolist()
+        
+        positions = {}
+        for col in valid_columns:
+            # 在完整DataFrame中的位置（1-based）
+            positions[col] = df.columns.get_loc(col) + 1
+        
+        return positions
     
     def values_to_df(self, values: List[List[Any]]) -> pd.DataFrame:
         """将电子表格值格式转换为DataFrame"""
