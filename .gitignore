@@ -209,3 +209,5 @@ __marimo__/
 config.json
 config.yaml
 CLAUDE.md
+/tests
+/.codebuddy

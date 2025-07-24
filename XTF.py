@@ -65,6 +65,11 @@ def main():
         
         # 创建配置和同步引擎
         config = ConfigManager.create_config()
+
+        # 根据配置调整日志级别
+        # 修复: 从配置中读取日志级别并应用，而不是硬编码
+        logger.setLevel(config.log_level.upper())
+        
         engine = XTFSyncEngine(config)
         
         # 显示配置信息

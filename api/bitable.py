@@ -322,38 +322,3 @@ class BitableAPI:
             23: "双向关联"
         }
         return type_mapping.get(field_type, f"未知类型({field_type})")
-    
-    def _get_records_summary(self, records: List[Dict], operation: str = 'create') -> str:
-        """获取记录操作的摘要信息"""
-        if not records:
-            return ""
-        
-        # 提取前几条记录的关键信息
-        preview_records = records[:3]
-        summaries = []
-        
-        for record in preview_records:
-            if operation == 'update' and 'record_id' in record:
-                record_id = record['record_id'][:8] + "..."
-                summaries.append(f"ID:{record_id}")
-            elif 'fields' in record:
-                # 尝试获取记录的主要字段信息
-                fields = record['fields']
-                if fields:
-                    # 获取第一个非空字段作为预览
-                    for field_name, value in fields.items():
-                        if value and str(value).strip():
-                            preview_value = str(value)[:20]
-                            if len(str(value)) > 20:
-                                preview_value += "..."
-                            summaries.append(f"{field_name}:{preview_value}")
-                            break
-        
-        if summaries:
-            result = f"({', '.join(summaries)}"
-            if len(records) > 3:
-                result += "..."
-            result += ")"
-            return result
-        
-        return ""

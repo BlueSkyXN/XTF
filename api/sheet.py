@@ -187,25 +187,6 @@ class SheetAPI:
         end_col_letter = self.column_number_to_letter(end_col)
         return f"{sheet_id}!{start_col_letter}{start_row}:{end_col_letter}{end_row}"
     
-    def _get_end_column_from_range(self, range_str: str) -> str:
-        """
-        从范围字符串中提取结束列字母
-        
-        Args:
-            range_str: 范围字符串，如 "Sheet1!A1:AK94277"
-            
-        Returns:
-            结束列字母，如 "AK"
-        """
-        if ':' not in range_str:
-            return "A"
-        
-        end_part = range_str.split(':')[1]
-        # 提取字母部分
-        import re
-        match = re.match(r'([A-Z]+)', end_part)
-        return match.group(1) if match else "A"
-    
     def append_sheet_data(self, spreadsheet_token: str, sheet_id: str, values: List[List[Any]],
                          row_batch_size: int = 500, rate_limit_delay: float = 0.05) -> bool:
         """
@@ -430,7 +411,8 @@ class SheetAPI:
         self.logger.info(f"准备清空范围: {sheet_id}!{range_str}")
         # 通过调用batch_update并传递空值数组来清空
         full_range = f"{sheet_id}!{range_str}"
-        value_ranges = [{"range": full_range, "values": [[]]}]
+        # 修复: 使用空的 `values` 数组 `[]` 来清空范围，而不是 `[[]]`
+        value_ranges = [{"range": full_range, "values": []}]
         success, _ = self._batch_update_ranges(spreadsheet_token, value_ranges, is_clear=True)
         if success:
             self.logger.info(f"✅ 范围 {full_range} 清空成功")
