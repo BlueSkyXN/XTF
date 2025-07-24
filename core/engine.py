@@ -455,7 +455,12 @@ class XTFSyncEngine:
             self.logger.info("电子表格为空，执行新增操作")
             return self.sync_clone(df)
         
-        # 构建索引
+        # ⭐ 关键修改：检查是否启用选择性同步，使用精确列级控制
+        if self.config.selective_sync.enabled and self.config.selective_sync.columns:
+            self.logger.info(f"🎯 启用精确列级控制同步: {self.config.selective_sync.columns}")
+            return self._sync_selective_columns_sheet(df, current_df)
+        
+        # 原有的完整表格同步逻辑
         current_index = self.converter.build_data_index(current_df, self.config.index_column)
         
         # 分类数据
@@ -512,6 +517,105 @@ class XTFSyncEngine:
                 )
         
         return success
+
+    def _sync_selective_columns_sheet(self, df: pd.DataFrame, current_df: pd.DataFrame) -> bool:
+        """电子表格选择性列同步 - 使用精确列控制"""
+        self.logger.info(f"🎯 启用精确列控制同步: {self.config.selective_sync.columns}")
+        
+        # 构建索引
+        current_index = self.converter.build_data_index(current_df, self.config.index_column)
+        
+        # 准备更新数据映射 {row_idx: {col: value}}
+        update_data_map = {}
+        new_rows = []
+        
+        for _, row in df.iterrows():
+            index_hash = self.converter.get_index_value_hash(row, self.config.index_column)
+            if index_hash and index_hash in current_index:
+                # 更新现有行
+                current_row_idx = current_index[index_hash]
+                if current_row_idx not in update_data_map:
+                    update_data_map[current_row_idx] = {}
+                
+                # 只更新指定列
+                for col in self.config.selective_sync.columns:
+                    if col in df.columns:
+                        update_data_map[current_row_idx][col] = row[col]
+            else:
+                # 新增行
+                new_rows.append(row)
+        
+        self.logger.info(f"精确列控制计划: 更新 {len(update_data_map)} 行的指定列，新增 {len(new_rows)} 行")
+        
+        success = True
+        
+        # 执行选择性列更新
+        if update_data_map:
+            success = self._update_selective_columns(current_df, update_data_map)
+        
+        # 追加新行（如果有）
+        if new_rows and success:
+            new_df = pd.DataFrame(new_rows)
+            new_values = self.converter.df_to_values(new_df, include_headers=False)
+            
+            if isinstance(self.api, SheetAPI) and self.config.spreadsheet_token and self.config.sheet_id:
+                self.logger.info(f"开始追加 {len(new_values)} 行新数据")
+                success = self.api.append_sheet_data(
+                    self.config.spreadsheet_token,
+                    self.config.sheet_id,
+                    new_values,
+                    self.config.batch_size,
+                    self.config.rate_limit_delay
+                )
+        
+        return success
+
+    def _update_selective_columns(self, current_df: pd.DataFrame, update_data_map: Dict[int, Dict[str, Any]]) -> bool:
+        """使用精确列控制更新数据"""
+        if not update_data_map:
+            return True
+        
+        # 准备按列组织的更新数据
+        columns_to_update = set()
+        for row_updates in update_data_map.values():
+            columns_to_update.update(row_updates.keys())
+        
+        self.logger.info(f"🔄 准备更新列: {list(columns_to_update)}")
+        
+        # 使用 converter 的 df_to_column_data 和 get_column_positions
+        # 构建需要更新的列数据
+        column_data = {}
+        for col in columns_to_update:
+            col_data = []
+            for row_idx in range(len(current_df)):
+                if row_idx in update_data_map and col in update_data_map[row_idx]:
+                    # 使用新值
+                    converted_value = self.converter.simple_convert_value(update_data_map[row_idx][col])
+                    col_data.append(converted_value)
+                else:
+                    # 保持原值
+                    original_value = current_df.iloc[row_idx][col] if col in current_df.columns else ""
+                    converted_value = self.converter.simple_convert_value(original_value)
+                    col_data.append(converted_value)
+            column_data[col] = col_data
+        
+        # 获取列位置映射
+        column_positions = self.converter.get_column_positions(current_df, list(columns_to_update))
+        
+        self.logger.info(f"📍 列位置映射: {column_positions}")
+        
+        # 使用精确列写入API
+        if isinstance(self.api, SheetAPI) and self.config.spreadsheet_token and self.config.sheet_id:
+            return self.api.write_selective_columns(
+                self.config.spreadsheet_token,
+                self.config.sheet_id,
+                column_data,
+                column_positions,
+                start_row=2,  # 假设第1行是表头
+                rate_limit_delay=self.config.rate_limit_delay
+            )
+        
+        return False
     
     def sync_incremental(self, df: pd.DataFrame) -> bool:
         """增量同步：只新增不存在的记录"""
@@ -580,7 +684,13 @@ class XTFSyncEngine:
         """电子表格增量同步 - 使用优化API策略"""
         if not self.config.index_column:
             self.logger.warning("未指定索引列，将新增全部数据")
-            # 使用新的增量同步策略
+            
+            # ⭐ 检查选择性同步：如果启用，需要用列级控制追加
+            if self.config.selective_sync.enabled and self.config.selective_sync.columns:
+                self.logger.info(f"🎯 增量同步启用精确列控制: {self.config.selective_sync.columns}")
+                return self._append_selective_columns(df)
+            
+            # 常规增量同步策略
             values = self.converter.df_to_values(df, include_headers=False) # 追加不需要表头
             self.logger.info(f"使用append接口进行增量同步")
             if isinstance(self.api, SheetAPI) and self.config.spreadsheet_token and self.config.sheet_id:
@@ -598,6 +708,9 @@ class XTFSyncEngine:
         
         if current_df.empty:
             self.logger.info("电子表格为空，新增全部数据")
+            # ⭐ 检查选择性同步
+            if self.config.selective_sync.enabled and self.config.selective_sync.columns:
+                return self._append_selective_columns(df)
             # 使用克隆同步（会先写入数据再设置格式）
             return self.sync_clone(df)
         
@@ -615,6 +728,12 @@ class XTFSyncEngine:
         
         if new_rows:
             new_df = pd.DataFrame(new_rows)
+            
+            # ⭐ 检查选择性同步：如果启用，需要用列级控制追加
+            if self.config.selective_sync.enabled and self.config.selective_sync.columns:
+                return self._append_selective_columns(new_df)
+            
+            # 常规追加
             new_values = self.converter.df_to_values(new_df, include_headers=False)
             
             # 追加新数据
@@ -631,6 +750,67 @@ class XTFSyncEngine:
         else:
             self.logger.info("没有新记录需要同步")
             return True
+
+    def _append_selective_columns(self, df: pd.DataFrame) -> bool:
+        """选择性列的追加操作"""
+        if not self.config.selective_sync.enabled or not self.config.selective_sync.columns:
+            self.logger.warning("选择性同步未启用或未指定列，使用常规追加")
+            values = self.converter.df_to_values(df, include_headers=False)
+            if isinstance(self.api, SheetAPI) and self.config.spreadsheet_token and self.config.sheet_id:
+                return self.api.append_sheet_data(
+                    self.config.spreadsheet_token,
+                    self.config.sheet_id,
+                    values,
+                    self.config.batch_size,
+                    self.config.rate_limit_delay
+                )
+            return False
+        
+        # 获取当前表格数据以确定正确的列位置
+        current_df = self.get_current_sheet_data()
+        if current_df.empty:
+            # 如果表格为空，先写入表头，然后追加数据
+            self.logger.info("表格为空，先创建表头然后追加选择性列数据")
+            headers = [col for col in df.columns if col in self.config.selective_sync.columns]
+            header_values = [headers]
+            
+            # 写入表头
+            if isinstance(self.api, SheetAPI) and self.config.spreadsheet_token and self.config.sheet_id:
+                header_success = self.api.write_sheet_data(
+                    self.config.spreadsheet_token,
+                    self.config.sheet_id,
+                    header_values,
+                    self.config.batch_size,
+                    80,
+                    self.config.rate_limit_delay
+                )
+                if not header_success:
+                    return False
+                
+                # 更新current_df为包含表头的空数据框
+                current_df = pd.DataFrame(columns=headers)
+        
+        # 准备选择性列数据
+        column_data = self.converter.df_to_column_data(df, self.config.selective_sync.columns)
+        column_positions = self.converter.get_column_positions(current_df, self.config.selective_sync.columns)
+        
+        # 计算起始行：当前数据行数 + 1（表头） + 1
+        start_row = len(current_df) + 2
+        
+        self.logger.info(f"🎯 选择性列追加: {list(column_data.keys())} 从第{start_row}行开始")
+        
+        # 使用精确列追加API
+        if isinstance(self.api, SheetAPI) and self.config.spreadsheet_token and self.config.sheet_id:
+            return self.api.write_selective_columns(
+                self.config.spreadsheet_token,
+                self.config.sheet_id,
+                column_data,
+                column_positions,
+                start_row=start_row,
+                rate_limit_delay=self.config.rate_limit_delay
+            )
+        
+        return False
     
     def sync_overwrite(self, df: pd.DataFrame) -> bool:
         """覆盖同步：删除已存在的，然后新增全部"""
@@ -698,7 +878,12 @@ class XTFSyncEngine:
             self.logger.info("电子表格为空，执行新增操作")
             return self.sync_clone(df)
         
-        # 找出需要删除的记录并构建新的数据集
+        # ⭐ 检查是否启用选择性同步，使用精确列级控制
+        if self.config.selective_sync.enabled and self.config.selective_sync.columns:
+            self.logger.info(f"🎯 覆盖同步启用精确列控制: {self.config.selective_sync.columns}")
+            return self._sync_overwrite_selective_columns_sheet(df, current_df)
+        
+        # 原有的完整表格覆盖逻辑
         new_df_rows = []
         deleted_count = 0
         
@@ -748,6 +933,62 @@ class XTFSyncEngine:
                 # 假设一个足够大的范围来清空
                 return self.api.clear_sheet_data(self.config.spreadsheet_token, self.config.sheet_id, "A1:ZZZ10000")
             return False
+
+    def _sync_overwrite_selective_columns_sheet(self, df: pd.DataFrame, current_df: pd.DataFrame) -> bool:
+        """电子表格选择性列覆盖同步"""
+        self.logger.info(f"🎯 选择性列覆盖同步: {self.config.selective_sync.columns}")
+        
+        # 构建索引
+        current_index = self.converter.build_data_index(current_df, self.config.index_column)
+        
+        # 准备数据映射 {row_idx: {col: value}}
+        update_data_map = {}  # 更新现有行的指定列
+        new_rows = []         # 全新的行
+        
+        for _, row in df.iterrows():
+            index_hash = self.converter.get_index_value_hash(row, self.config.index_column)
+            if index_hash and index_hash in current_index:
+                # 覆盖现有行的指定列
+                current_row_idx = current_index[index_hash]
+                if current_row_idx not in update_data_map:
+                    update_data_map[current_row_idx] = {}
+                
+                # 只覆盖指定列
+                for col in self.config.selective_sync.columns:
+                    if col in df.columns:
+                        update_data_map[current_row_idx][col] = row[col]
+            else:
+                # 全新行
+                new_rows.append(row)
+        
+        self.logger.info(f"选择性列覆盖计划: 覆盖 {len(update_data_map)} 行的指定列，新增 {len(new_rows)} 行")
+        
+        success = True
+        
+        # 执行选择性列覆盖更新
+        if update_data_map:
+            success = self._update_selective_columns(current_df, update_data_map)
+        
+        # 追加新行（如果有）
+        if new_rows and success:
+            # 对于新行，也应该只包含选择性列
+            if self.config.selective_sync.enabled and self.config.selective_sync.columns:
+                success = self._append_selective_columns(pd.DataFrame(new_rows))
+            else:
+                # 常规追加
+                new_df = pd.DataFrame(new_rows)
+                new_values = self.converter.df_to_values(new_df, include_headers=False)
+                
+                if isinstance(self.api, SheetAPI) and self.config.spreadsheet_token and self.config.sheet_id:
+                    success = self.api.append_sheet_data(
+                        self.config.spreadsheet_token,
+                        self.config.sheet_id,
+                        new_values,
+                        self.config.batch_size,
+                        self.config.rate_limit_delay
+                    )
+        
+        return success
     
     def sync_clone(self, df: pd.DataFrame) -> bool:
         """克隆同步：清空全部，然后新增全部"""

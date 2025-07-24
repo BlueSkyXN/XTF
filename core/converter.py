@@ -685,8 +685,7 @@ class DataConverter:
             # 尝试按分隔符拆分
             for separator in [',', ';', '|', '\n']:
                 if separator in value:
-                    values = [v.strip() for v in value.split(separator) if v.strip()]
-                    return values if values else [str(value)]
+                    return [v.strip() for v in value.split(separator) if v.strip()]
             return [value.strip()] if value.strip() else []
         elif isinstance(value, (list, tuple)):
             return [str(v) for v in value if v]
@@ -994,8 +993,8 @@ class DataConverter:
         
         column_data = {}
         for col in df.columns:
-            # 包含表头
-            col_values = [col]  # 表头
+            # 修复：不应包含表头，只包含数据
+            col_values = []
             # 添加数据
             for value in df[col]:
                 converted_value = self.simple_convert_value(value)
