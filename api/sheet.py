@@ -650,9 +650,13 @@ class SheetAPI:
                     success_batches += 1
                     if len(range_details) == 1:
                         detail = range_details[0]
-                        self.logger.info(f"✅ {detail['col_name']}列样式设置成功")
+                        style_type = self._get_style_type_description(style)
+                        range_info = f"{detail['col_name']}{detail['start_row']}:{detail['col_name']}{detail['end_row']}"
+                        self.logger.info(f"✅ {detail['col_name']}列样式设置成功: 范围 {range_info}, 格式 {style_type}, 共 {detail['end_row'] - detail['start_row'] + 1} 行")
                     else:
-                        self.logger.info(f"✅ 样式批次 {i} 设置成功")
+                        total_ranges = len(chunk_ranges)
+                        style_type = self._get_style_type_description(style)
+                        self.logger.info(f"✅ 样式批次 {i} 设置成功: {total_ranges} 个范围, 格式 {style_type}")
                 else:
                     self.logger.error(f"❌ 样式批次 {i} 设置失败")
                     return False
@@ -676,6 +680,27 @@ class SheetAPI:
                 'end_row': end_row
             }
         return {'col_name': '未知', 'start_row': '?', 'end_row': '?'}
+    
+    def _parse_range_for_detailed_log(self, range_str: str) -> Dict[str, Any]:
+        """解析范围字符串用于详细日志显示"""
+        import re
+        match = re.match(r'([^!]+)!([A-Z]+)(\d+):([A-Z]+)(\d+)', range_str)
+        if match:
+            sheet_id, start_col, start_row, end_col, end_row = match.groups()
+            return {
+                'sheet_id': sheet_id,
+                'start_col': start_col,
+                'end_col': end_col,
+                'start_row': int(start_row),
+                'end_row': int(end_row)
+            }
+        return {
+            'sheet_id': '未知',
+            'start_col': '?',
+            'end_col': '?', 
+            'start_row': 0,
+            'end_row': 0
+        }
     
     def _get_style_type_description(self, style: Dict[str, Any]) -> str:
         """获取样式类型的中文描述"""
@@ -801,7 +826,8 @@ class SheetAPI:
         
         return self.set_cell_style(spreadsheet_token, ranges, style)
 
-    def _create_data_chunks(self, values: List[List[Any]], row_batch_size: int, col_batch_size: int) -> List[Dict]:
+    def _create_data_chunks(self, values: List[List[Any]], row_batch_size: int, col_batch_size: int, 
+                           start_row_offset: int = 0, start_col_offset: int = 0) -> List[Dict]:
         """
         创建数据分块
         
@@ -836,10 +862,10 @@ class SheetAPI:
                 if chunk_data:  # 只添加非空块
                     chunks.append({
                         'data': chunk_data,
-                        'start_row': row_start + 1,  # 1-based indexing
-                        'end_row': row_start + len(chunk_data),
-                        'start_col': col_start + 1,  # 1-based indexing
-                        'end_col': col_end
+                        'start_row': row_start + 1 + start_row_offset,  # 1-based indexing + offset
+                        'end_row': row_start + len(chunk_data) + start_row_offset,
+                        'start_col': col_start + 1 + start_col_offset,  # 1-based indexing + offset
+                        'end_col': col_end + start_col_offset
                     })
         
         return chunks
@@ -858,7 +884,12 @@ class SheetAPI:
         success, error_code = self._batch_update_ranges(spreadsheet_token, value_ranges)
         
         if success:
-            self.logger.info(f"✅ 上传成功: {len(chunk['data'])} 行")
+            # 解析范围信息用于日志显示
+            range_info = self._parse_range_for_detailed_log(range_str)
+            columns_info = f"{range_info['start_col']}列至{range_info['end_col']}列" if range_info['start_col'] != range_info['end_col'] else f"{range_info['start_col']}列"
+            rows_info = f"第{range_info['start_row']}-{range_info['end_row']}行" if range_info['start_row'] != range_info['end_row'] else f"第{range_info['start_row']}行"
+            
+            self.logger.info(f"✅ 上传成功: {len(chunk['data'])} 行数据至 {columns_info} {rows_info} (范围: {range_str})")
             # 成功上传后进行频率控制
             if rate_limit_delay > 0:
                 time.sleep(rate_limit_delay)
@@ -913,7 +944,14 @@ class SheetAPI:
         success, error_code = self._append_single_batch(spreadsheet_token, range_str, values)
         
         if success:
-            self.logger.info(f"✅ 追加成功: {len(values)} 行")
+            # 解析范围信息用于日志显示
+            range_info = self._parse_range_for_detailed_log(range_str)
+            columns_info = f"{range_info['start_col']}列至{range_info['end_col']}列" if range_info['start_col'] != range_info['end_col'] else f"{range_info['start_col']}列"
+            start_row = range_info['start_row']
+            end_row = start_row + len(values) - 1
+            rows_info = f"第{start_row}-{end_row}行" if start_row != end_row else f"第{start_row}行"
+            
+            self.logger.info(f"✅ 追加成功: {len(values)} 行数据至 {columns_info} {rows_info} (范围: {range_str})")
             if rate_limit_delay > 0:
                 time.sleep(rate_limit_delay)
             return True

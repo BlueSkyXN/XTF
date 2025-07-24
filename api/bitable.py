@@ -106,7 +106,10 @@ class BitableAPI:
             self.logger.error(f"创建字段 '{field_name}' 失败: 错误码 {result.get('code')}, 错误信息: {error_msg}")
             return False
         
-        self.logger.info(f"创建字段 '{field_name}' 成功")
+        # 获取字段类型信息用于日志显示
+        field_type_name = self._get_field_type_display_name(field_type)
+        field_config_info = {"type": field_type}
+        self.logger.info(f"✅ 创建字段 '{field_name}' 成功: 类型 {field_type_name}, 配置 {field_config_info}")
         return True
     
     def search_records(self, app_token: str, table_id: str, page_token: Optional[str] = None,
@@ -218,6 +221,7 @@ class BitableAPI:
             self.logger.debug(f"API响应: {result}")
             return False
         
+        # 简化日志，详细信息由process_in_batches显示
         self.logger.debug(f"成功创建 {len(records)} 条记录")
         return True
     
@@ -260,6 +264,7 @@ class BitableAPI:
             self.logger.debug(f"API响应: {result}")
             return False
         
+        # 简化日志，详细信息由process_in_batches显示
         self.logger.debug(f"成功更新 {len(records)} 条记录")
         return True
     
@@ -295,5 +300,60 @@ class BitableAPI:
             self.logger.debug(f"API响应: {result}")
             return False
         
+        # 简化日志，详细信息由process_in_batches显示
         self.logger.debug(f"成功删除 {len(record_ids)} 条记录")
         return True
+    
+    def _get_field_type_display_name(self, field_type: int) -> str:
+        """获取字段类型的显示名称"""
+        type_mapping = {
+            1: "文本",
+            2: "数字", 
+            3: "单选",
+            4: "多选",
+            5: "日期",
+            7: "复选框",
+            11: "人员",
+            15: "超链接",
+            17: "附件",
+            19: "单向关联",
+            21: "查找引用",
+            22: "公式",
+            23: "双向关联"
+        }
+        return type_mapping.get(field_type, f"未知类型({field_type})")
+    
+    def _get_records_summary(self, records: List[Dict], operation: str = 'create') -> str:
+        """获取记录操作的摘要信息"""
+        if not records:
+            return ""
+        
+        # 提取前几条记录的关键信息
+        preview_records = records[:3]
+        summaries = []
+        
+        for record in preview_records:
+            if operation == 'update' and 'record_id' in record:
+                record_id = record['record_id'][:8] + "..."
+                summaries.append(f"ID:{record_id}")
+            elif 'fields' in record:
+                # 尝试获取记录的主要字段信息
+                fields = record['fields']
+                if fields:
+                    # 获取第一个非空字段作为预览
+                    for field_name, value in fields.items():
+                        if value and str(value).strip():
+                            preview_value = str(value)[:20]
+                            if len(str(value)) > 20:
+                                preview_value += "..."
+                            summaries.append(f"{field_name}:{preview_value}")
+                            break
+        
+        if summaries:
+            result = f"({', '.join(summaries)}"
+            if len(records) > 3:
+                result += "..."
+            result += ")"
+            return result
+        
+        return ""

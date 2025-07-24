@@ -226,22 +226,41 @@ class XTFSyncEngine:
         total_batches = (len(items) + batch_size - 1) // batch_size
         success_count = 0
         
+        # 获取操作类型用于日志显示
+        operation_type = self._get_operation_type(processor_func)
+        
         for i in range(0, len(items), batch_size):
             batch = items[i:i + batch_size]
             batch_num = i // batch_size + 1
+            start_row = i + 1  # Excel行号从1开始
+            end_row = min(i + len(batch), len(items))
             
             try:
                 # 修复参数传递顺序：先传递固定参数，再传递批次数据
                 if processor_func(*args, batch, **kwargs):
                     success_count += 1
-                    self.logger.info(f"批次 {batch_num}/{total_batches} 处理成功 ({len(batch)} 条记录)")
+                    # 显示具体的行范围信息
+                    range_info = f"第{start_row}-{end_row}行" if start_row != end_row else f"第{start_row}行"
+                    self.logger.info(f"✅ {operation_type}成功: 批次{batch_num}/{total_batches}, {len(batch)}条记录 ({range_info})")
                 else:
-                    self.logger.error(f"批次 {batch_num}/{total_batches} 处理失败")
+                    self.logger.error(f"❌ {operation_type}失败: 批次{batch_num}/{total_batches}")
             except Exception as e:
-                self.logger.error(f"批次 {batch_num}/{total_batches} 处理异常: {e}")
+                self.logger.error(f"❌ {operation_type}异常: 批次{batch_num}/{total_batches}, 错误: {e}")
         
-        self.logger.info(f"批处理完成: {success_count}/{total_batches} 个批次成功")
+        self.logger.info(f"🎉 {operation_type}完成: {success_count}/{total_batches} 个批次成功")
         return success_count == total_batches
+    
+    def _get_operation_type(self, processor_func) -> str:
+        """根据处理函数获取操作类型"""
+        func_name = getattr(processor_func, '__name__', str(processor_func))
+        if 'create' in func_name:
+            return "批量创建"
+        elif 'update' in func_name:
+            return "批量更新"
+        elif 'delete' in func_name:
+            return "批量删除"
+        else:
+            return "批量处理"
     
     # ========== 电子表格专用方法 ==========
     
