@@ -48,7 +48,12 @@ class XTFSyncEngine:
         if config.target_type == TargetType.BITABLE:
             self.api: Union[BitableAPI, SheetAPI] = BitableAPI(self.auth, self.api_client)
         else:  # SHEET
-            self.api: Union[BitableAPI, SheetAPI] = SheetAPI(self.auth, self.api_client)
+            self.api: Union[BitableAPI, SheetAPI] = SheetAPI(
+                self.auth,
+                self.api_client,
+                start_row=self.config.start_row,
+                start_column=self.config.start_column
+            )
         # 初始化数据转换器
         self.converter = DataConverter(config.target_type)
     
@@ -269,49 +274,42 @@ class XTFSyncEngine:
         if self.config.target_type != TargetType.SHEET:
             return pd.DataFrame()
             
-        # 先尝试获取一个合理的范围
-        # 如果失败，尝试更小的范围，最终返回空DataFrame表示需要使用clone模式
-        ranges_to_try = [
-            f"{self.config.sheet_id}!A1:ZZ1000",  # 最多1000行
-            f"{self.config.sheet_id}!A1:Z500",    # 最多500行，Z列
-            f"{self.config.sheet_id}!A1:J100",    # 最多100行，J列
-            f"{self.config.sheet_id}!A1:E50"      # 最多50行，E列
-        ]
+        # 构建从配置起始点开始的读取范围
+        start_cell = f"{self.config.start_column}{self.config.start_row}"
+        # 定义一个足够大的范围来捕获所有数据，飞书API会自动裁剪到有数据的实际范围
+        read_range = f"{self.config.sheet_id}!{start_cell}:ZZ500000"
         
-        for range_str in ranges_to_try:
-            try:
-                if not isinstance(self.api, SheetAPI): return pd.DataFrame()
-                if not self.config.spreadsheet_token:
-                    self.logger.error("电子表格的 spreadsheet_token 未配置")
-                    return pd.DataFrame()
-                values = self.api.get_sheet_data(self.config.spreadsheet_token, range_str)
-                df = self.converter.values_to_df(values)
-                if not df.empty:
-                    # 检查是否包含有效数据（至少有一行数据包含非空值）
-                    has_valid_data = False
-                    for _, row in df.iterrows():
-                        if any(pd.notnull(val) and str(val).strip() != '' for val in row):
-                            has_valid_data = True
-                            break
-                    
-                    if has_valid_data:
-                        self.logger.info(f"成功获取电子表格数据: {len(df)} 行 x {len(df.columns)} 列")
-                        return df
-                    else:
-                        # 数据全为空，当作表格为空
-                        self.logger.info("电子表格数据全为空")
-                        return pd.DataFrame()
-                else:
-                    # 如果数据为空，说明表格确实是空的
-                    self.logger.info("电子表格为空")
-                    return pd.DataFrame()
-            except Exception as e:
-                self.logger.debug(f"尝试范围 {range_str} 失败: {e}")
-                continue
-        
-        # 所有范围都失败了，可能表格数据过大，返回空DataFrame触发clone模式
-        self.logger.warning("无法获取电子表格数据，可能数据量过大，将使用覆盖模式")
-        return pd.DataFrame()
+        self.logger.info(f"尝试从范围读取数据: {read_range}")
+
+        try:
+            if not isinstance(self.api, SheetAPI): return pd.DataFrame()
+            if not self.config.spreadsheet_token:
+                self.logger.error("电子表格的 spreadsheet_token 未配置")
+                return pd.DataFrame()
+                
+            values = self.api.get_sheet_data(self.config.spreadsheet_token, read_range)
+            df = self.converter.values_to_df(values)
+            
+            if not df.empty:
+                # 检查是否包含有效数据（至少有一行数据包含非空值）
+                has_valid_data = False
+                for _, row in df.iterrows():
+                    if any(pd.notnull(val) and str(val).strip() != '' for val in row):
+                        has_valid_data = True
+                        break
+                
+                if has_valid_data:
+                    self.logger.info(f"成功获取电子表格数据: {len(df)} 行 x {len(df.columns)} 列 (从 {start_cell} 开始)")
+                    return df
+            
+            # 如果df为空或数据全为空，说明表格在指定范围确实是空的
+            self.logger.info(f"在范围 {read_range} 内未找到有效数据，视为空表")
+            return pd.DataFrame()
+
+        except Exception as e:
+            self.logger.warning(f"尝试从范围 {read_range} 读取数据失败: {e}")
+            self.logger.warning("无法获取电子表格数据，将使用覆盖模式")
+            return pd.DataFrame()
     
     # ========== 选择性同步辅助方法 ==========
     
@@ -353,7 +351,7 @@ class XTFSyncEngine:
         # 检查是否启用选择性同步
         if self.config.selective_sync.enabled:
             df = self._apply_selective_filter(df)
-            self.logger.info(f"选择性同步已启用，处理 {len(self.config.selective_sync.columns)} 列")
+            self.logger.info(f"选择性同步已启用，处理 {len(self.config.selective_sync.columns) if self.config.selective_sync.columns else '所有'} 列")
         
         if self.config.target_type == TargetType.BITABLE:
             return self._sync_full_bitable(df)
@@ -522,7 +520,7 @@ class XTFSyncEngine:
         # 检查是否启用选择性同步
         if self.config.selective_sync.enabled:
             df = self._apply_selective_filter(df)
-            self.logger.info(f"选择性同步已启用，处理 {len(self.config.selective_sync.columns)} 列")
+            self.logger.info(f"选择性同步已启用，处理 {len(self.config.selective_sync.columns) if self.config.selective_sync.columns else '所有'} 列")
         
         if self.config.target_type == TargetType.BITABLE:
             return self._sync_incremental_bitable(df)
@@ -645,7 +643,7 @@ class XTFSyncEngine:
         # 检查是否启用选择性同步
         if self.config.selective_sync.enabled:
             df = self._apply_selective_filter(df)
-            self.logger.info(f"选择性同步已启用，处理 {len(self.config.selective_sync.columns)} 列")
+            self.logger.info(f"选择性同步已启用，处理 {len(self.config.selective_sync.columns) if self.config.selective_sync.columns else '所有'} 列")
         
         if self.config.target_type == TargetType.BITABLE:
             return self._sync_overwrite_bitable(df)
@@ -839,6 +837,10 @@ class XTFSyncEngine:
         if self.config.target_type != TargetType.SHEET:
             return True
         
+        if not isinstance(self.api, SheetAPI):
+            self.logger.error("内部逻辑错误: _setup_sheet_intelligence 应该只被 SheetAPI 调用")
+            return False
+        
         # 不同策略的配置范围不同
         strategy_name = self.config.field_type_strategy.value
         self.logger.info(f"开始电子表格智能字段配置 ({strategy_name}策略)...")
@@ -860,13 +862,22 @@ class XTFSyncEngine:
             for dropdown_config in field_config['dropdown_configs']:
                 column_name = dropdown_config['column']
                 
-                # 计算列索引
-                col_index = list(df.columns).index(column_name)
-                col_letter = self.converter.column_number_to_letter(col_index + 1)
+                # 计算列的绝对位置
+                start_col_num = self.api.column_letter_to_number(self.config.start_column)
+                col_index_in_df = list(df.columns).index(column_name)
+                actual_col_num = start_col_num + col_index_in_df
+                col_letter = self.api.column_number_to_letter(actual_col_num)
                 
-                # 设置下拉列表范围 (从第2行开始，避免覆盖标题)
-                actual_end_row = len(df) + 1  # +1 for header row
-                range_str = f"{self.config.sheet_id}!{col_letter}2:{col_letter}{actual_end_row}"
+                # 计算行的绝对范围 (数据行，不含表头)
+                start_data_row = self.config.start_row + 1
+                end_data_row = self.config.start_row + len(df)
+                
+                # 仅在有数据行时才设置范围
+                if end_data_row >= start_data_row:
+                    range_str = f"{self.config.sheet_id}!{col_letter}{start_data_row}:{col_letter}{end_data_row}"
+                else:
+                    self.logger.warning(f"列 '{column_name}' 没有数据行，跳过下拉列表设置")
+                    continue
                 
                 # 确保使用SheetAPI并检查token
                 if not isinstance(self.api, SheetAPI):
@@ -898,11 +909,17 @@ class XTFSyncEngine:
         if field_config['date_columns'] and isinstance(self.api, SheetAPI) and self.config.spreadsheet_token:
             date_ranges = []
             for column_name in field_config['date_columns']:
-                col_index = list(df.columns).index(column_name)
-                col_letter = self.converter.column_number_to_letter(col_index + 1)
-                actual_end_row = len(df) + 1  # +1 for header row
-                range_str = f"{self.config.sheet_id}!{col_letter}2:{col_letter}{actual_end_row}"
-                date_ranges.append(range_str)
+                start_col_num = self.api.column_letter_to_number(self.config.start_column)
+                col_index_in_df = list(df.columns).index(column_name)
+                actual_col_num = start_col_num + col_index_in_df
+                col_letter = self.api.column_number_to_letter(actual_col_num)
+
+                start_data_row = self.config.start_row + 1
+                end_data_row = self.config.start_row + len(df)
+                
+                if end_data_row >= start_data_row:
+                    range_str = f"{self.config.sheet_id}!{col_letter}{start_data_row}:{col_letter}{end_data_row}"
+                    date_ranges.append(range_str)
             
             # 设置日期格式
             date_success = self.api.set_date_format(
@@ -921,11 +938,17 @@ class XTFSyncEngine:
         if field_config['number_columns'] and isinstance(self.api, SheetAPI) and self.config.spreadsheet_token:
             number_ranges = []
             for column_name in field_config['number_columns']:
-                col_index = list(df.columns).index(column_name)
-                col_letter = self.converter.column_number_to_letter(col_index + 1)
-                actual_end_row = len(df) + 1  # +1 for header row
-                range_str = f"{self.config.sheet_id}!{col_letter}2:{col_letter}{actual_end_row}"
-                number_ranges.append(range_str)
+                start_col_num = self.api.column_letter_to_number(self.config.start_column)
+                col_index_in_df = list(df.columns).index(column_name)
+                actual_col_num = start_col_num + col_index_in_df
+                col_letter = self.api.column_number_to_letter(actual_col_num)
+                
+                start_data_row = self.config.start_row + 1
+                end_data_row = self.config.start_row + len(df)
+
+                if end_data_row >= start_data_row:
+                    range_str = f"{self.config.sheet_id}!{col_letter}{start_data_row}:{col_letter}{end_data_row}"
+                    number_ranges.append(range_str)
             
             # 设置数字格式
             number_success = self.api.set_number_format(

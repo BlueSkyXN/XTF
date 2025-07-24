@@ -16,18 +16,26 @@ from .base import RetryableAPIClient
 class SheetAPI:
     """飞书电子表格API客户端"""
     
-    def __init__(self, auth: FeishuAuth, api_client: Optional[RetryableAPIClient] = None):
+    def __init__(self, auth: FeishuAuth, api_client: Optional[RetryableAPIClient] = None,
+                 start_row: int = 1, start_column: str = "A"):
         """
         初始化电子表格API客户端
         
         Args:
             auth: 飞书认证管理器
             api_client: API客户端实例
+            start_row: 起始行号 (1-based)
+            start_column: 起始列号
         """
         self.auth = auth
         self.api_client = api_client or auth.api_client
         self.logger = logging.getLogger(__name__)
         self.ERROR_CODE_REQUEST_TOO_LARGE = 90227
+        
+        # 存储起始位置配置
+        self.start_row = start_row
+        self.start_column = start_column
+        self.start_col_num = self.column_letter_to_number(start_column)
     
     def get_sheet_info(self, spreadsheet_token: str) -> Dict[str, Any]:
         """
@@ -92,8 +100,7 @@ class SheetAPI:
     
     def write_sheet_data(self, spreadsheet_token: str, sheet_id: str, values: List[List[Any]],
                          row_batch_size: int = 500, col_batch_size: int = 80,
-                         rate_limit_delay: float = 0.05,
-                         start_row_offset: int = 0, start_col_offset: int = 0) -> bool:
+                         rate_limit_delay: float = 0.05) -> bool:
         """
         写入电子表格数据，具备“自动二分重试”能力。
         
@@ -104,8 +111,6 @@ class SheetAPI:
             row_batch_size: 初始行批次大小
             col_batch_size: 列批次大小
             rate_limit_delay: 接口调用间隔
-            start_row_offset: 起始行偏移量 (0-based)
-            start_col_offset: 起始列偏移量 (0-based)
             
         Returns:
             是否写入成功
@@ -116,7 +121,7 @@ class SheetAPI:
 
         self.logger.info("🔄 执行写入操作 (具备自动二分重试能力)")
 
-        data_chunks = self._create_data_chunks(values, row_batch_size, col_batch_size, start_row_offset, start_col_offset)
+        data_chunks = self._create_data_chunks(values, row_batch_size, col_batch_size)
         total_chunks = len(data_chunks)
         
         self.logger.info(f"📦 初始数据分块完成: 共 {total_chunks} 个数据块")
@@ -167,7 +172,7 @@ class SheetAPI:
         self.logger.debug(f"成功写入 {len(values)} 行数据")
         return True, 0
     
-    def _column_number_to_letter(self, col_num: int) -> str:
+    def column_number_to_letter(self, col_num: int) -> str:
         """将列号转换为字母（1->A, 2->B, ..., 26->Z, 27->AA）"""
         result = ""
         while col_num > 0:
@@ -178,8 +183,8 @@ class SheetAPI:
     
     def _build_range_string(self, sheet_id: str, start_row: int, start_col: int, end_row: int, end_col: int) -> str:
         """构建范围字符串"""
-        start_col_letter = self._column_number_to_letter(start_col)
-        end_col_letter = self._column_number_to_letter(end_col)
+        start_col_letter = self.column_number_to_letter(start_col)
+        end_col_letter = self.column_number_to_letter(end_col)
         return f"{sheet_id}!{start_col_letter}{start_row}:{end_col_letter}{end_row}"
     
     def _get_end_column_from_range(self, range_str: str) -> str:
@@ -367,8 +372,8 @@ class SheetAPI:
             start_col = column_positions[sorted_columns[range_start]]
             end_col = column_positions[sorted_columns[range_end]]
             
-            start_col_letter = self._column_number_to_letter(start_col)
-            end_col_letter = self._column_number_to_letter(end_col)
+            start_col_letter = self.column_number_to_letter(start_col)
+            end_col_letter = self.column_number_to_letter(end_col)
             
             # 计算数据行数
             max_rows = max(len(column_data[col]) for col in sorted_columns[range_start:range_end+1])
@@ -381,7 +386,7 @@ class SheetAPI:
             for row_idx in range(max_rows):
                 row_data = []
                 for col_idx in range(start_col, end_col + 1):
-                    col_letter = self._column_number_to_letter(col_idx)
+                    col_letter = self.column_number_to_letter(col_idx)
                     # 查找对应的列名
                     col_name = None
                     for name, pos in column_positions.items():
@@ -743,8 +748,8 @@ class SheetAPI:
         start_row, end_row = int(start_row), int(end_row)
         
         # 转换列字母为数字
-        start_col_num = self._column_letter_to_number(start_col)
-        end_col_num = self._column_letter_to_number(end_col)
+        start_col_num = self.column_letter_to_number(start_col)
+        end_col_num = self.column_letter_to_number(end_col)
         
         chunks = []
         
@@ -757,18 +762,19 @@ class SheetAPI:
                 row_end = min(row_start + max_rows - 1, end_row)
                 
                 # 构建块范围
-                chunk_start_col = self._column_number_to_letter(col_start)
-                chunk_end_col = self._column_number_to_letter(col_end)
+                chunk_start_col = self.column_number_to_letter(col_start)
+                chunk_end_col = self.column_number_to_letter(col_end)
                 chunk_range = f"{sheet_id}!{chunk_start_col}{row_start}:{chunk_end_col}{row_end}"
                 
                 chunks.append([chunk_range])
         
         return chunks
     
-    def _column_letter_to_number(self, col_letter: str) -> int:
+    def column_letter_to_number(self, col_letter: str) -> int:
         """将列字母转换为数字（A->1, B->2, ..., AA->27）"""
         result = 0
-        for char in col_letter:
+        # 转换为大写以处理小写字母
+        for char in col_letter.upper():
             result = result * 26 + (ord(char) - ord('A') + 1)
         return result
     
@@ -826,8 +832,7 @@ class SheetAPI:
         
         return self.set_cell_style(spreadsheet_token, ranges, style)
 
-    def _create_data_chunks(self, values: List[List[Any]], row_batch_size: int, col_batch_size: int, 
-                           start_row_offset: int = 0, start_col_offset: int = 0) -> List[Dict]:
+    def _create_data_chunks(self, values: List[List[Any]], row_batch_size: int, col_batch_size: int) -> List[Dict]:
         """
         创建数据分块
         
@@ -860,12 +865,18 @@ class SheetAPI:
                         chunk_data.append(chunk_row)
                 
                 if chunk_data:  # 只添加非空块
+                    # 应用配置的起始行和列偏移量
+                    actual_start_row = row_start + self.start_row
+                    actual_end_row = actual_start_row + len(chunk_data) - 1
+                    actual_start_col = col_start + self.start_col_num
+                    actual_end_col = actual_start_col + (col_end - col_start) - 1
+                    
                     chunks.append({
                         'data': chunk_data,
-                        'start_row': row_start + 1 + start_row_offset,  # 1-based indexing + offset
-                        'end_row': row_start + len(chunk_data) + start_row_offset,
-                        'start_col': col_start + 1 + start_col_offset,  # 1-based indexing + offset
-                        'end_col': col_end + start_col_offset
+                        'start_row': actual_start_row,
+                        'end_row': actual_end_row,
+                        'start_col': actual_start_col,
+                        'end_col': actual_end_col
                     })
         
         return chunks
