@@ -455,6 +455,12 @@ class SheetAPI:
             self.logger.warning("下拉列表选项为空，跳过设置")
             return True
             
+        # 验证范围有效性
+        is_valid, error_msg = self._validate_range(spreadsheet_token, range_str)
+        if not is_valid:
+            self.logger.error(f"下拉列表设置范围验证失败: {error_msg}")
+            return False
+            
         # 验证选项数量
         if len(options) > 500:
             self.logger.warning(f"下拉列表选项过多({len(options)})，将截取前500个")
@@ -557,7 +563,7 @@ class SheetAPI:
         
         return True
     
-    def _validate_range(self, spreadsheet_token: str, range_str: str) -> tuple[bool, str]:
+    def _validate_range(self, spreadsheet_token: str, range_str: str) -> Tuple[bool, str]:
         """
         完整的范围有效性验证
         
@@ -936,107 +942,133 @@ class SheetAPI:
     def _upload_chunk_with_auto_split(self, spreadsheet_token: str, sheet_id: str, chunk: Dict, rate_limit_delay: float) -> bool:
         """
         上传单个数据块，如果因请求过大失败，则自动二分重试。
+        使用迭代实现避免栈溢出风险。
         """
-        # 准备请求数据
-        range_str = self._build_range_string(sheet_id, chunk['start_row'], chunk['start_col'], chunk['end_row'], chunk['end_col'])
-        value_ranges = [{"range": range_str, "values": chunk['data']}]
+        # 使用栈来模拟递归，避免栈溢出
+        chunk_stack = [chunk]
         
-        self.logger.info(f"📤 尝试上传: {len(chunk['data'])} 行 (范围 {range_str})")
+        while chunk_stack:
+            current_chunk = chunk_stack.pop()
+            
+            # 准备请求数据
+            range_str = self._build_range_string(sheet_id, current_chunk['start_row'], current_chunk['start_col'], 
+                                               current_chunk['end_row'], current_chunk['end_col'])
+            value_ranges = [{"range": range_str, "values": current_chunk['data']}]
+            
+            self.logger.info(f"📤 尝试上传: {len(current_chunk['data'])} 行 (范围 {range_str})")
 
-        # 发起API调用
-        success, error_code = self._batch_update_ranges(spreadsheet_token, value_ranges)
+            # 发起API调用
+            success, error_code = self._batch_update_ranges(spreadsheet_token, value_ranges)
+            
+            if success:
+                # 解析范围信息用于日志显示
+                range_info = self._parse_range_for_detailed_log(range_str)
+                columns_info = f"{range_info['start_col']}列至{range_info['end_col']}列" if range_info['start_col'] != range_info['end_col'] else f"{range_info['start_col']}列"
+                rows_info = f"第{range_info['start_row']}-{range_info['end_row']}行" if range_info['start_row'] != range_info['end_row'] else f"第{range_info['start_row']}行"
+                
+                self.logger.info(f"✅ 上传成功: {len(current_chunk['data'])} 行数据至 {columns_info} {rows_info} (范围: {range_str})")
+                # 成功上传后进行频率控制
+                if rate_limit_delay > 0:
+                    time.sleep(rate_limit_delay)
+                continue  # 继续处理栈中的下一个块
+                
+            # 如果失败，检查是否是请求过大错误
+            if error_code == self.ERROR_CODE_REQUEST_TOO_LARGE:
+                num_rows = len(current_chunk['data'])
+                self.logger.warning(f"检测到请求过大错误 (错误码 {error_code})，当前块包含 {num_rows} 行，将进行二分。")
+
+                # 如果块已经小到无法再分，则视为最终失败
+                if num_rows <= 1:
+                    self.logger.error(f"❌ 块大小已为 {num_rows} 行，无法再分割，上传失败。")
+                    return False
+
+                # 将当前块分割成两个子块并压入栈
+                mid_point = num_rows // 2
+                
+                chunk1_data = current_chunk['data'][:mid_point]
+                chunk1 = {
+                    'data': chunk1_data,
+                    'start_row': current_chunk['start_row'],
+                    'end_row': current_chunk['start_row'] + len(chunk1_data) - 1,
+                    'start_col': current_chunk['start_col'],
+                    'end_col': current_chunk['end_col']
+                }
+
+                chunk2_data = current_chunk['data'][mid_point:]
+                chunk2 = {
+                    'data': chunk2_data,
+                    'start_row': current_chunk['start_row'] + mid_point,
+                    'end_row': current_chunk['start_row'] + mid_point + len(chunk2_data) - 1,
+                    'start_col': current_chunk['start_col'],
+                    'end_col': current_chunk['end_col']
+                }
+                
+                # 注意：后进先出，所以先压入chunk2，后压入chunk1
+                chunk_stack.append(chunk2)
+                chunk_stack.append(chunk1)
+                
+                self.logger.info(f" 分割为: 块1 ({len(chunk1_data)}行), 块2 ({len(chunk2_data)}行)")
+                continue  # 继续处理分割后的块
+            
+            # 其他类型的API错误，直接判为失败
+            self.logger.error(f"❌ 上传发生不可恢复的错误 (错误码: {error_code})")
+            return False
         
-        if success:
-            # 解析范围信息用于日志显示
-            range_info = self._parse_range_for_detailed_log(range_str)
-            columns_info = f"{range_info['start_col']}列至{range_info['end_col']}列" if range_info['start_col'] != range_info['end_col'] else f"{range_info['start_col']}列"
-            rows_info = f"第{range_info['start_row']}-{range_info['end_row']}行" if range_info['start_row'] != range_info['end_row'] else f"第{range_info['start_row']}行"
-            
-            self.logger.info(f"✅ 上传成功: {len(chunk['data'])} 行数据至 {columns_info} {rows_info} (范围: {range_str})")
-            # 成功上传后进行频率控制
-            if rate_limit_delay > 0:
-                time.sleep(rate_limit_delay)
-            return True
-            
-        # 如果失败，检查是否是请求过大错误
-        if error_code == self.ERROR_CODE_REQUEST_TOO_LARGE:
-            num_rows = len(chunk['data'])
-            self.logger.warning(f"检测到请求过大错误 (错误码 {error_code})，当前块包含 {num_rows} 行，将进行二分。")
-
-            # 如果块已经小到无法再分，则视为最终失败
-            if num_rows <= 1:
-                self.logger.error(f"❌ 块大小已为 {num_rows} 行，无法再分割，上传失败。")
-                return False
-
-            # 将当前块分割成两个子块
-            mid_point = num_rows // 2
-            
-            chunk1_data = chunk['data'][:mid_point]
-            chunk1 = {
-                'data': chunk1_data,
-                'start_row': chunk['start_row'],
-                'end_row': chunk['start_row'] + len(chunk1_data) - 1,
-                'start_col': chunk['start_col'],
-                'end_col': chunk['end_col']
-            }
-
-            chunk2_data = chunk['data'][mid_point:]
-            chunk2 = {
-                'data': chunk2_data,
-                'start_row': chunk['start_row'] + mid_point,
-                'end_row': chunk['start_row'] + mid_point + len(chunk2_data) - 1,
-                'start_col': chunk['start_col'],
-                'end_col': chunk['end_col']
-            }
-            
-            # 递归上传两个子块
-            self.logger.info(f" 分割为: 块1 ({len(chunk1_data)}行), 块2 ({len(chunk2_data)}行)")
-            return (self._upload_chunk_with_auto_split(spreadsheet_token, sheet_id, chunk1, rate_limit_delay) and
-                    self._upload_chunk_with_auto_split(spreadsheet_token, sheet_id, chunk2, rate_limit_delay))
-
-        # 其他类型的API错误，直接判为失败
-        self.logger.error(f"❌ 上传发生不可恢复的错误 (错误码: {error_code})")
-        return False
+        return True  # 所有块都成功上传
     
     def _append_chunk_with_auto_split(self, spreadsheet_token: str, range_str: str, values: List[List[Any]], rate_limit_delay: float) -> bool:
         """
         追加单个数据块，如果因请求过大失败，则自动二分重试。
+        使用迭代实现避免栈溢出风险。
         """
-        self.logger.info(f"📤 尝试追加: {len(values)} 行")
-
-        success, error_code = self._append_single_batch(spreadsheet_token, range_str, values)
+        # 使用栈来模拟递归，避免栈溢出
+        values_stack = [values]
         
-        if success:
-            # 解析范围信息用于日志显示
-            range_info = self._parse_range_for_detailed_log(range_str)
-            columns_info = f"{range_info['start_col']}列至{range_info['end_col']}列" if range_info['start_col'] != range_info['end_col'] else f"{range_info['start_col']}列"
-            start_row = range_info['start_row']
-            end_row = start_row + len(values) - 1
-            rows_info = f"第{start_row}-{end_row}行" if start_row != end_row else f"第{start_row}行"
+        while values_stack:
+            current_values = values_stack.pop()
             
-            self.logger.info(f"✅ 追加成功: {len(values)} 行数据至 {columns_info} {rows_info} (范围: {range_str})")
-            if rate_limit_delay > 0:
-                time.sleep(rate_limit_delay)
-            return True
+            self.logger.info(f"📤 尝试追加: {len(current_values)} 行")
+
+            success, error_code = self._append_single_batch(spreadsheet_token, range_str, current_values)
             
-        if error_code == self.ERROR_CODE_REQUEST_TOO_LARGE:
-            num_rows = len(values)
-            self.logger.warning(f"检测到请求过大错误 (错误码 {error_code})，当前追加块包含 {num_rows} 行，将进行二分。")
+            if success:
+                # 解析范围信息用于日志显示
+                range_info = self._parse_range_for_detailed_log(range_str)
+                columns_info = f"{range_info['start_col']}列至{range_info['end_col']}列" if range_info['start_col'] != range_info['end_col'] else f"{range_info['start_col']}列"
+                start_row = range_info['start_row']
+                end_row = start_row + len(current_values) - 1
+                rows_info = f"第{start_row}-{end_row}行" if start_row != end_row else f"第{start_row}行"
+                
+                self.logger.info(f"✅ 追加成功: {len(current_values)} 行数据至 {columns_info} {rows_info} (范围: {range_str})")
+                if rate_limit_delay > 0:
+                    time.sleep(rate_limit_delay)
+                continue  # 继续处理栈中的下一个块
+                
+            if error_code == self.ERROR_CODE_REQUEST_TOO_LARGE:
+                num_rows = len(current_values)
+                self.logger.warning(f"检测到请求过大错误 (错误码 {error_code})，当前追加块包含 {num_rows} 行，将进行二分。")
 
-            if num_rows <= 1:
-                self.logger.error(f"❌ 追加块大小已为 {num_rows} 行，无法再分割，上传失败。")
-                return False
+                if num_rows <= 1:
+                    self.logger.error(f"❌ 追加块大小已为 {num_rows} 行，无法再分割，上传失败。")
+                    return False
 
-            mid_point = num_rows // 2
-            chunk1 = values[:mid_point]
-            chunk2 = values[mid_point:]
+                # 将当前块分割成两个子块并压入栈
+                mid_point = num_rows // 2
+                chunk1 = current_values[:mid_point]
+                chunk2 = current_values[mid_point:]
+                
+                # 注意：后进先出，所以先压入chunk2，后压入chunk1
+                values_stack.append(chunk2)
+                values_stack.append(chunk1)
+                
+                self.logger.info(f" 分割为: 块1 ({len(chunk1)}行), 块2 ({len(chunk2)}行)")
+                continue  # 继续处理分割后的块
+
+            # 其他类型的API错误，直接判为失败
+            self.logger.error(f"❌ 追加发生不可恢复的错误 (错误码: {error_code})")
+            return False
             
-            self.logger.info(f" 分割为: 块1 ({len(chunk1)}行), 块2 ({len(chunk2)}行)")
-            return (self._append_chunk_with_auto_split(spreadsheet_token, range_str, chunk1, rate_limit_delay) and
-                    self._append_chunk_with_auto_split(spreadsheet_token, range_str, chunk2, rate_limit_delay))
-
-        self.logger.error(f"❌ 追加发生不可恢复的错误 (错误码: {error_code})")
-        return False
+        return True  # 所有块都成功追加
 
     def _batch_update_ranges(self, spreadsheet_token: str, value_ranges: List[Dict], is_clear: bool = False) -> Tuple[bool, Optional[int]]:
         """

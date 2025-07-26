@@ -178,8 +178,6 @@ class DataConverter:
                 # 布尔值检测 - 排除纯数字字符串
                 if str_val.lower() in ['true', 'false', '是', '否', 'yes', 'no', 'on', 'off']:
                     type_stats['boolean'] += 1
-                elif str_val in ['1', '0'] and not self._is_number_string(str_val):
-                    type_stats['boolean'] += 1
                 # 数字检测
                 elif self._is_number_string(str_val):
                     type_stats['number'] += 1
