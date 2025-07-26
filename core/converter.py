@@ -26,7 +26,7 @@ class DataConverter:
             target_type: 目标类型（多维表格或电子表格）
         """
         self.target_type = target_type
-        self.logger = logging.getLogger(__name__)
+        self.logger = logging.getLogger('XTF.converter')
         
         # 类型转换统计
         self.conversion_stats = {
@@ -175,8 +175,10 @@ class DataConverter:
                 type_stats['number'] += 1
             elif isinstance(value, str):
                 str_val = str(value).strip()
-                # 布尔值检测
-                if str_val.lower() in ['true', 'false', '是', '否', 'yes', 'no', '1', '0', 'on', 'off']:
+                # 布尔值检测 - 排除纯数字字符串
+                if str_val.lower() in ['true', 'false', '是', '否', 'yes', 'no', 'on', 'off']:
+                    type_stats['boolean'] += 1
+                elif str_val in ['1', '0'] and not self._is_number_string(str_val):
                     type_stats['boolean'] += 1
                 # 数字检测
                 elif self._is_number_string(str_val):
@@ -240,8 +242,8 @@ class DataConverter:
                 confidence = 0.9 if 1640995200 <= timestamp <= 1893456000 else 0.7  # 2022-2030更高置信度
                 return True, confidence
                 
-            # 毫秒级时间戳: 1970-2050年  
-            elif 946684800000 <= timestamp <= 2524608000000:
+            # 毫秒级时间戳: 2000-2050年  
+            elif 946656000000 <= timestamp <= 2524579200000:
                 confidence = 0.85
                 return True, confidence
                 

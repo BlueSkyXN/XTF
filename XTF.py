@@ -67,8 +67,9 @@ def main():
         config = ConfigManager.create_config()
 
         # 根据配置调整日志级别
-        # 修复: 从配置中读取日志级别并应用，而不是硬编码
-        logger.setLevel(config.log_level.upper())
+        # 修复: 从配置中读取日志级别并应用，添加安全验证
+        level = getattr(logging, config.log_level.upper(), logging.INFO)
+        logger.setLevel(level)
         
         engine = XTFSyncEngine(config)
         
@@ -85,11 +86,13 @@ def main():
         
         # 目标特定信息
         if target_type == TargetType.BITABLE and config.app_token:
-            print(f"  多维表格Token: {config.app_token[:8]}...")
+            token_display = config.app_token[:8] + "..." if len(config.app_token) >= 8 else config.app_token + "..."
+            print(f"  多维表格Token: {token_display}")
             print(f"  数据表ID: {config.table_id}")
             print(f"  自动创建字段: {'是' if config.create_missing_fields else '否'}")
         elif target_type == TargetType.SHEET and config.spreadsheet_token:
-            print(f"  电子表格Token: {config.spreadsheet_token[:8]}...")
+            token_display = config.spreadsheet_token[:8] + "..." if len(config.spreadsheet_token) >= 8 else config.spreadsheet_token + "..."
+            print(f"  电子表格Token: {token_display}")
             print(f"  工作表ID: {config.sheet_id}")
             print(f"  开始位置: {config.start_column}{config.start_row}")
         

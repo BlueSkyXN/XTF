@@ -49,7 +49,7 @@ class RetryableAPIClient:
         self.max_retries = max_retries
         self.rate_limiter = rate_limiter or RateLimiter()
         self.use_global_controller = use_global_controller
-        self.logger = logging.getLogger(__name__)
+        self.logger = logging.getLogger('XTF.base')
         
         # 尝试获取全局控制器
         self._controller = None

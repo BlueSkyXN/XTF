@@ -8,6 +8,7 @@
 import time
 import logging
 import requests
+import threading
 from abc import ABC, abstractmethod
 from typing import Optional, Callable, Any, Union
 from dataclasses import dataclass
@@ -274,7 +275,7 @@ class RequestController:
                  rate_limit_strategy: Optional[RateLimitStrategy] = None):
         self.retry_strategy = retry_strategy
         self.rate_limit_strategy = rate_limit_strategy
-        self.logger = logging.getLogger(__name__)
+        self.logger = logging.getLogger('XTF.control')
     
     def execute_request(self, func: Callable, *args, **kwargs) -> Any:
         """执行请求并应用重试和频控策略"""
@@ -319,7 +320,7 @@ class EnhancedAPIClient:
     
     def __init__(self, controller: Optional[RequestController] = None):
         self.controller = controller
-        self.logger = logging.getLogger(__name__)
+        self.logger = logging.getLogger('XTF.control')
     
     def call_api(self, method: str, url: str, **kwargs) -> requests.Response:
         """调用API，应用统一的重试和频控策略"""
@@ -352,19 +353,24 @@ class GlobalRequestController:
     
     _instance = None
     _controller = None
+    _lock = threading.Lock()
     
     def __new__(cls):
         if cls._instance is None:
-            cls._instance = super().__new__(cls)
+            with GlobalRequestController._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
         return cls._instance
     
     def configure(self, controller: RequestController):
         """配置全局控制器"""
-        self._controller = controller
+        with GlobalRequestController._lock:
+            self._controller = controller
     
     def get_controller(self) -> Optional[RequestController]:
         """获取全局控制器实例"""
-        return self._controller
+        with GlobalRequestController._lock:
+            return self._controller
     
     def get_api_client(self) -> EnhancedAPIClient:
         """获取配置好的API客户端"""

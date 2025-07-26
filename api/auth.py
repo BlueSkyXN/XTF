@@ -27,7 +27,7 @@ class FeishuAuth:
         self.app_id = app_id
         self.app_secret = app_secret
         self.api_client = api_client or RetryableAPIClient(rate_limiter=RateLimiter(0.5))
-        self.logger = logging.getLogger(__name__)
+        self.logger = logging.getLogger('XTF.auth')
         
         # Token管理
         self.tenant_access_token = None

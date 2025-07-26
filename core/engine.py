@@ -32,7 +32,7 @@ class XTFSyncEngine:
         
         # 设置日志（必须先设置，因为其他初始化可能需要日志）
         self.setup_logging()
-        self.logger = logging.getLogger(__name__)
+        self.logger = logging.getLogger('XTF.engine')
         
         # 初始化全局请求控制器（如果配置了高级重试和频控策略）
         self._init_global_controller()
@@ -80,18 +80,28 @@ class XTFSyncEngine:
         target_name = "bitable" if self.config.target_type == TargetType.BITABLE else "sheet"
         log_file = log_dir / f"xtf_{target_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
         
-        # 清除已有的处理器
-        logging.getLogger().handlers.clear()
+        # 获取XTF专用的logger，避免全局污染
+        xtf_logger = logging.getLogger('XTF')
+        xtf_logger.handlers.clear()
         
         level = getattr(logging, self.config.log_level.upper(), logging.INFO)
-        logging.basicConfig(
-            level=level,
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-            handlers=[
-                logging.FileHandler(log_file, encoding='utf-8'),
-                logging.StreamHandler(sys.stdout)
-            ]
-        )
+        xtf_logger.setLevel(level)
+        
+        # 设置格式
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        
+        # 文件处理器
+        file_handler = logging.FileHandler(log_file, encoding='utf-8')
+        file_handler.setFormatter(formatter)
+        xtf_logger.addHandler(file_handler)
+        
+        # 控制台处理器
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setFormatter(formatter)
+        xtf_logger.addHandler(console_handler)
+        
+        # 防止传播到根logger
+        xtf_logger.propagate = False
     
     # ========== 多维表格专用方法 ==========
     

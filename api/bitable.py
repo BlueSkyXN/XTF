@@ -26,7 +26,7 @@ class BitableAPI:
         """
         self.auth = auth
         self.api_client = api_client or auth.api_client
-        self.logger = logging.getLogger(__name__)
+        self.logger = logging.getLogger('XTF.bitable')
     
     def list_fields(self, app_token: str, table_id: str) -> List[Dict[str, Any]]:
         """

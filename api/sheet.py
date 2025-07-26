@@ -29,7 +29,7 @@ class SheetAPI:
         """
         self.auth = auth
         self.api_client = api_client or auth.api_client
-        self.logger = logging.getLogger(__name__)
+        self.logger = logging.getLogger('XTF.sheet')
         self.ERROR_CODE_REQUEST_TOO_LARGE = 90227
         
         # 存储起始位置配置
@@ -80,6 +80,11 @@ class SheetAPI:
         Raises:
             Exception: 当API调用失败时
         """
+        # 验证范围有效性
+        is_valid, error_msg = self._validate_range(spreadsheet_token, range_str)
+        if not is_valid:
+            raise Exception(f"读取数据范围验证失败: {error_msg}")
+            
         url = f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/values/{range_str}"
         headers = self.auth.get_auth_headers()
         
@@ -408,9 +413,17 @@ class SheetAPI:
         Returns:
             是否清空成功
         """
-        self.logger.info(f"准备清空范围: {sheet_id}!{range_str}")
-        # 通过调用batch_update并传递空值数组来清空
+        # 构建完整范围字符串用于验证
         full_range = f"{sheet_id}!{range_str}"
+        
+        # 验证范围有效性
+        is_valid, error_msg = self._validate_range(spreadsheet_token, full_range)
+        if not is_valid:
+            self.logger.error(f"清空数据范围验证失败: {error_msg}")
+            return False
+            
+        self.logger.info(f"准备清空范围: {full_range}")
+        # 通过调用batch_update并传递空值数组来清空
         # 修复: 使用空的 `values` 数组 `[]` 来清空范围，而不是 `[[]]`
         value_ranges = [{"range": full_range, "values": []}]
         success, _ = self._batch_update_ranges(spreadsheet_token, value_ranges, is_clear=True)
@@ -543,6 +556,63 @@ class SheetAPI:
             return False
         
         return True
+    
+    def _validate_range(self, spreadsheet_token: str, range_str: str) -> tuple[bool, str]:
+        """
+        完整的范围有效性验证
+        
+        Args:
+            spreadsheet_token: 电子表格Token
+            range_str: 范围字符串，如 "Sheet1!A1:A10"
+            
+        Returns:
+            (是否有效, 错误信息)
+        """
+        # 1. 基本格式验证
+        import re
+        if not re.match(r'^[^!]+![A-Z]+\d+:[A-Z]+\d+$', range_str):
+            return False, f"范围格式无效: {range_str}，期望格式如 'Sheet1!A1:C10'"
+        
+        # 2. 解析范围组件
+        try:
+            match = re.match(r'^([^!]+)!([A-Z]+)(\d+):([A-Z]+)(\d+)$', range_str)
+            if not match:
+                return False, f"无法解析范围: {range_str}"
+            
+            sheet_id, start_col, start_row, end_col, end_row = match.groups()
+            start_row, end_row = int(start_row), int(end_row)
+            
+            # 3. 边界检查
+            MAX_ROWS = 1048576  # Excel/电子表格通用限制
+            MAX_COLS = 16384    # Excel/电子表格通用限制
+            
+            if start_row < 1 or end_row < 1:
+                return False, f"行号不能小于1: {start_row}-{end_row}"
+            
+            if start_row > MAX_ROWS or end_row > MAX_ROWS:
+                return False, f"行号超过限制({MAX_ROWS}): {start_row}-{end_row}"
+            
+            start_col_num = self.column_letter_to_number(start_col)
+            end_col_num = self.column_letter_to_number(end_col)
+            
+            if start_col_num > MAX_COLS or end_col_num > MAX_COLS:
+                return False, f"列号超过限制({MAX_COLS}): {start_col}-{end_col}"
+            
+            # 4. 范围逻辑验证
+            if start_row > end_row:
+                return False, f"起始行({start_row})不能大于结束行({end_row})"
+            
+            if start_col_num > end_col_num:
+                return False, f"起始列({start_col})不能大于结束列({end_col})"
+            
+            # 5. 网格限制验证
+            if not self._validate_range_size(spreadsheet_token, range_str):
+                return False, f"范围超出电子表格网格限制: {range_str}"
+            
+            return True, ""
+            
+        except Exception as e:
+            return False, f"范围验证异常: {e}"
     
     def _validate_range_size(self, spreadsheet_token: str, range_str: str) -> bool:
         """
