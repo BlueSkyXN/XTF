@@ -127,6 +127,45 @@ class SyncConfig:
                 raise ValueError("Clone 模式不支持 selective 同步")
             if not self.selective_sync.columns:
                 raise ValueError("启用 selective 同步时必须指定 columns")
+                
+            # 增强的配置组合有效性检查
+            self._validate_selective_sync_config()
+    
+    def _validate_selective_sync_config(self):
+        """验证selective_sync配置的详细有效性"""
+        columns = self.selective_sync.columns
+        
+        # 1. 检查列表元素有效性
+        if not isinstance(columns, list):
+            raise ValueError("selective_sync.columns 必须是列表类型")
+            
+        valid_columns = []
+        for i, col in enumerate(columns):
+            if col is None:
+                raise ValueError(f"selective_sync.columns[{i}] 不能为 None")
+            if not isinstance(col, str):
+                raise ValueError(f"selective_sync.columns[{i}] 必须是字符串类型，当前为 {type(col)}")
+            if not col.strip():
+                raise ValueError(f"selective_sync.columns[{i}] 不能为空字符串")
+            
+            col_clean = col.strip()
+            valid_columns.append(col_clean)
+        
+        # 2. 检查重复列名
+        if len(valid_columns) != len(set(valid_columns)):
+            duplicates = [col for col in valid_columns if valid_columns.count(col) > 1]
+            raise ValueError(f"selective_sync.columns 包含重复的列名: {list(set(duplicates))}")
+        
+        # 3. 验证范围优化参数
+        if not isinstance(self.selective_sync.max_gap_for_merge, int):
+            raise ValueError("selective_sync.max_gap_for_merge 必须是整数")
+        if self.selective_sync.max_gap_for_merge < 0:
+            raise ValueError("selective_sync.max_gap_for_merge 不能为负数")
+        if self.selective_sync.max_gap_for_merge > 50:  # 设置合理上限
+            raise ValueError("selective_sync.max_gap_for_merge 不应超过50（性能考虑）")
+        
+        # 更新清理后的列名列表
+        self.selective_sync.columns = valid_columns
 
 
 class ConfigManager:

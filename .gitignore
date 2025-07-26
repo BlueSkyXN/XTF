@@ -211,3 +211,4 @@ config.yaml
 CLAUDE.md
 /tests
 /.codebuddy
+/fixes
