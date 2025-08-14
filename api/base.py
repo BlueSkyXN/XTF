@@ -55,7 +55,7 @@ class RetryableAPIClient:
         self._controller = None
         if self.use_global_controller:
             try:
-                from ..core.control import GlobalRequestController
+                from core.control import GlobalRequestController
                 global_controller = GlobalRequestController()
                 controller = global_controller.get_controller()
                 if controller:
