@@ -19,6 +19,7 @@ from core.config import (
     get_target_description,
 )
 from core.engine import XTFSyncEngine
+from utils.excel_reader import smart_read_excel, print_engine_info
 
 
 def setup_logger():
@@ -42,7 +43,10 @@ def main():
     print("     支持多维表格和电子表格同步")
     print("     支持四种同步模式：全量、增量、覆盖、克隆")
     print("=" * 70)
-    
+
+    # 显示 Excel 引擎信息
+    print_engine_info()
+
     try:
         # 解析目标类型
         target_type = ConfigManager.parse_target_type()
@@ -103,7 +107,7 @@ def main():
             return
         
         print(f"\n📖 读取文件: {file_path}")
-        df = pd.read_excel(file_path)
+        df = smart_read_excel(file_path)
         print(f"✅ 文件读取成功，共 {len(df)} 行，{len(df.columns)} 列")
         
         # 执行同步
