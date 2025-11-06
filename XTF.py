@@ -24,6 +24,7 @@ from core.config import (
 )
 from core.engine import XTFSyncEngine
 from core.reader import DataFileReader
+from utils.excel_reader import smart_read_excel, print_engine_info
 
 
 def setup_logger():
@@ -48,7 +49,10 @@ def main():
     print("     支持Excel格式(.xlsx/.xls) + CSV格式(.csv 实验性)")
     print("     支持四种同步模式：全量、增量、覆盖、克隆")
     print("=" * 70)
-    
+
+    # 显示 Excel 引擎信息
+    print_engine_info()
+
     try:
         # 解析目标类型
         target_type = ConfigManager.parse_target_type()

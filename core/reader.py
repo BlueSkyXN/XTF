@@ -5,7 +5,7 @@
 支持多种数据文件格式
 
 格式支持状态：
-- Excel (.xlsx/.xls): ✅ 稳定支持，生产就绪
+- Excel (.xlsx/.xls): ✅ 稳定支持，生产就绪（使用Calamine引擎优化性能）
 - CSV (.csv): 🧪 实验性支持，测试阶段
 """
 
@@ -13,6 +13,13 @@ import pandas as pd
 import logging
 from pathlib import Path
 from typing import Optional, Dict, Any
+
+# 导入智能Excel读取引擎（性能优化）
+try:
+    from utils.excel_reader import smart_read_excel
+    SMART_EXCEL_AVAILABLE = True
+except ImportError:
+    SMART_EXCEL_AVAILABLE = False
 
 
 class DataFileReader:
@@ -89,6 +96,9 @@ class DataFileReader:
         """
         读取Excel文件
 
+        优先使用 smart_read_excel（Calamine引擎，性能提升4-20倍）
+        失败时自动回退到 pd.read_excel
+
         Args:
             file_path: Excel文件路径
             **kwargs: pandas.read_excel的额外参数
@@ -96,10 +106,22 @@ class DataFileReader:
         Returns:
             pd.DataFrame: 读取的数据
         """
-        self.logger.debug(f"使用 pd.read_excel 读取文件: {file_path}")
+        if SMART_EXCEL_AVAILABLE:
+            # 使用智能Excel读取引擎（性能优化）
+            self.logger.debug(f"使用 smart_read_excel (Calamine引擎) 读取文件: {file_path}")
+            try:
+                df = smart_read_excel(file_path, **kwargs)
+                self.logger.info(f"Excel文件读取成功 (Calamine引擎): {len(df)} 行 × {len(df.columns)} 列")
+                return df
+            except Exception as e:
+                self.logger.warning(f"Calamine引擎读取失败，回退到OpenPyXL: {e}")
+                # 继续使用传统方式
+
+        # 传统方式（兜底）
+        self.logger.debug(f"使用 pd.read_excel (OpenPyXL引擎) 读取文件: {file_path}")
         try:
             df = pd.read_excel(file_path, **kwargs)
-            self.logger.info(f"Excel文件读取成功: {len(df)} 行 × {len(df.columns)} 列")
+            self.logger.info(f"Excel文件读取成功 (OpenPyXL引擎): {len(df)} 行 × {len(df.columns)} 列")
             return df
         except Exception as e:
             self.logger.error(f"Excel文件读取失败: {e}")

@@ -20,6 +20,10 @@ from enum import Enum
 import sys
 import hashlib
 
+# 导入智能Excel读取模块
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from utils.excel_reader import smart_read_excel, print_engine_info
+
 
 class SyncMode(Enum):
     """同步模式枚举"""
@@ -804,7 +808,10 @@ def main():
     print("     XTF_Sheet 电子表格同步工具")
     print("     支持四种同步模式：全量、增量、覆盖、克隆")
     print("=" * 70)
-    
+
+    # 显示 Excel 引擎信息
+    print_engine_info()
+
     try:
         # 先解析命令行参数以获取配置文件路径
         import argparse
@@ -847,7 +854,7 @@ def main():
         # 读取Excel文件
         print(f"\n📖 正在读取文件: {file_path}")
         try:
-            df = pd.read_excel(file_path)
+            df = smart_read_excel(file_path)
             print(f"✅ 文件读取成功，共 {len(df)} 行，{len(df.columns)} 列")
             print(f"📊 列名: {', '.join(df.columns.tolist())}")
         except Exception as e:

@@ -1,4 +1,5 @@
 pandas>=1.5.0
 requests>=2.25.0
 openpyxl>=3.0.0
+python-calamine>=0.2.0
 PyYAML>=6.0.0
