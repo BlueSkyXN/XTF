@@ -2,12 +2,15 @@
 
 XTF (Excel To Feishu) 是一个企业级的本地 Excel 表格到飞书平台的智能同步工具。支持多维表格和电子表格两种目标平台，具备四种同步模式，智能字段管理、类型转换、频率控制、重试机制等企业级功能特性。
 
+> 🧪 **实验性功能**：当前版本新增了对 CSV 格式的初步支持（测试阶段），欢迎反馈使用体验。Excel 格式 (.xlsx/.xls) 为稳定支持的主要格式。
+
 ## 🎯 双平台自动适配
 
 XTF 通过主入口 [`XTF.py`](XTF.py) 支持**多维表格**（bitable）和**电子表格**（sheet）两种目标平台。只需通过 `--target-type` 参数切换，无需更换脚本。
 
 ## ✨ 核心特性
 
+- 📁 **Excel格式支持**（.xlsx/.xls 完全支持，生产就绪）+ 🧪 **CSV格式**（.csv 实验性支持，测试阶段）
 - 🔄 四种智能同步模式（全量、增量、覆盖、克隆）
 - 🎯 智能字段管理与类型推断（原值/基础/自动/智能四种策略）
 - 🔍 **选择性列同步**（精确列级控制，支持多维表格和电子表格）
@@ -89,6 +92,78 @@ XTF 通过主入口 [`XTF.py`](XTF.py) 支持**多维表格**（bitable）和**�
 | intelligence_date_confidence | float | 0.85 | ❌ | 仅YAML | Intelligence策略日期类型置信度 |
 | intelligence_choice_confidence | float | 0.9 | ❌ | 仅YAML | Intelligence策略选择类型置信度 |
 | intelligence_boolean_confidence | float | 0.95 | ❌ | 仅YAML | Intelligence策略布尔类型置信度 |
+
+---
+
+## 📁 支持的文件格式
+
+### Excel 格式（生产就绪，完全支持）
+
+| 格式 | 扩展名 | 状态 | 说明 | 推荐场景 |
+|------|--------|------|------|---------|
+| **Excel 2007+** | .xlsx | ✅ 稳定 | 现代Excel格式，支持大文件 | 🌟 日常办公，完整功能 |
+| **Excel 97-2003** | .xls | ✅ 稳定 | 传统Excel格式 | 兼容旧系统 |
+
+**性能优化** ⚡：
+- 🚀 使用 Calamine 引擎（Rust实现）优先读取Excel
+- ⚡ 读取速度提升 4-20倍（相比传统OpenPyXL）
+- 🔄 自动回退机制：Calamine失败时自动使用OpenPyXL
+- 📦 依赖：`python-calamine>=0.2.0`
+
+**特性保证**：
+- ✅ 所有同步模式完全支持（full/incremental/overwrite/clone）
+- ✅ 所有字段类型策略完全支持（raw/base/auto/intelligence）
+- ✅ 选择性同步完全支持
+- ✅ Excel数据验证识别（下拉列表等）
+- ✅ 企业级稳定性保障
+
+---
+
+### CSV 格式（🧪 实验性支持，测试阶段）
+
+| 格式 | 扩展名 | 状态 | 说明 | 使用建议 |
+|------|--------|------|------|---------|
+| **CSV** | .csv | 🧪 测试中 | 逗号分隔值文件 | 测试环境使用，生产环境建议Excel |
+
+**⚠️ 测试阶段说明**：
+- 🧪 当前为实验性功能，仅建议在测试环境使用
+- 🔍 功能完整性和稳定性正在验证中
+- 📝 欢迎反馈使用体验和问题报告
+- 🏭 **生产环境请使用 Excel 格式（.xlsx/.xls）**
+
+**已实现特性**：
+- ✅ 自动格式识别 - 根据文件扩展名自动选择读取方式
+- ✅ 自动编码检测 - 优先使用UTF-8，失败时自动尝试GBK（中文Excel导出常用）
+- ✅ 四种同步模式支持 - full/incremental/overwrite/clone
+- ✅ BASE和INTELLIGENCE策略完全可用
+- ⚠️ AUTO策略部分受限 - CSV不保留Excel数据验证信息
+
+**CSV 使用示例**（仅供测试）：
+
+```bash
+# 测试环境使用CSV文件
+python XTF.py --target-type bitable --file-path data.csv --config config.yaml
+
+# 推荐使用BASE或INTELLIGENCE策略（AUTO策略受限）
+python XTF.py --target-type sheet --file-path data.csv --field-type-strategy base
+```
+
+**配置文件示例**：
+```yaml
+# config.yaml（测试环境）
+file_path: "data.csv"              # 🧪 CSV文件（测试阶段）
+field_type_strategy: "base"         # 推荐策略：base 或 intelligence
+# 其他配置与Excel相同
+```
+
+**⚠️ CSV与Excel的差异**：
+| 特性 | Excel (.xlsx/.xls) | CSV (.csv) |
+|------|-------------------|-----------|
+| **稳定性** | ✅ 生产就绪 | 🧪 测试阶段 |
+| **数据类型保留** | ✅ 完整保留 | ⚠️ 需要推断 |
+| **数据验证信息** | ✅ 保留（下拉列表等） | ❌ 丢失 |
+| **AUTO策略支持** | ✅ 完全支持 | ⚠️ 功能受限 |
+| **推荐使用场景** | 🌟 所有场景 | 🧪 测试验证 |
 
 ---
 

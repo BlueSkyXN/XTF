@@ -3,6 +3,10 @@
 """
 XTF (Excel To Feishu) - 统一入口
 支持多维表格和电子表格同步
+
+文件格式支持：
+- Excel (.xlsx/.xls): ✅ 稳定支持，生产就绪
+- CSV (.csv): 🧪 实验性支持，测试阶段
 """
 
 import pandas as pd
@@ -19,6 +23,7 @@ from core.config import (
     get_target_description,
 )
 from core.engine import XTFSyncEngine
+from core.reader import DataFileReader
 from utils.excel_reader import smart_read_excel, print_engine_info
 
 
@@ -41,6 +46,7 @@ def main():
     print("=" * 70)
     print("     XTF工具 (模块化统一版本)")
     print("     支持多维表格和电子表格同步")
+    print("     支持Excel格式(.xlsx/.xls) + CSV格式(.csv 实验性)")
     print("     支持四种同步模式：全量、增量、覆盖、克隆")
     print("=" * 70)
 
@@ -80,7 +86,7 @@ def main():
         # 显示配置信息
         print(f"\n📋 已加载配置:")
         print(f"  配置文件: {config_file}")
-        print(f"  Excel文件: {config.file_path}")
+        print(f"  数据文件: {config.file_path}")
         print(f"  同步模式: {config.sync_mode.value}")
         print(f"  索引列: {config.index_column or '未指定'}")
         print(f"  批处理大小: {config.batch_size}")
@@ -100,15 +106,38 @@ def main():
             print(f"  工作表ID: {config.sheet_id}")
             print(f"  开始位置: {config.start_column}{config.start_row}")
         
-        # 验证Excel文件
+        # 验证数据文件
         file_path = Path(config.file_path)
         if not file_path.exists():
             print(f"\n❌ 错误: 文件不存在 - {file_path}")
             return
-        
+
+        # 检查文件格式是否支持
+        if not DataFileReader.is_supported(file_path):
+            print(f"\n❌ 错误: 不支持的文件格式 - {file_path.suffix}")
+            print(f"支持的格式: {DataFileReader.get_supported_formats()}")
+            return
+
+        # 使用统一的文件读取器
         print(f"\n📖 读取文件: {file_path}")
-        df = smart_read_excel(file_path)
-        print(f"✅ 文件读取成功，共 {len(df)} 行，{len(df.columns)} 列")
+        print(f"   文件格式: {file_path.suffix.upper()}")
+
+        # 如果是CSV文件，显示测试阶段警告
+        if file_path.suffix.lower() == '.csv':
+            print("   ⚠️  警告: CSV格式当前处于实验性测试阶段")
+            print("   🏭 生产环境建议使用Excel格式(.xlsx/.xls)")
+
+        try:
+            reader = DataFileReader()
+            df = reader.read_file(file_path)
+            print(f"✅ 文件读取成功，共 {len(df)} 行，{len(df.columns)} 列")
+        except ValueError as e:
+            print(f"\n❌ 文件读取失败: {e}")
+            return
+        except Exception as e:
+            print(f"\n❌ 文件读取异常: {e}")
+            logger.error("文件读取异常", exc_info=True)
+            return
         
         # 执行同步
         print(f"\n🚀 开始执行 {config.sync_mode.value} 同步...")
