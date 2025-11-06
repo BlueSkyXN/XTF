@@ -1,6 +1,6 @@
 """
 核心模块
-提供统一的配置管理、数据转换、同步引擎和主入口功能
+提供统一的配置管理、数据转换、同步引擎、文件读取和主入口功能
 """
 
 from .config import (
@@ -13,6 +13,7 @@ from .config import (
 )
 from .converter import DataConverter
 from .engine import XTFSyncEngine
+from .reader import DataFileReader
 
 __all__ = [
     "SyncConfig",
@@ -23,4 +24,5 @@ __all__ = [
     "get_target_description",
     "DataConverter",
     "XTFSyncEngine",
+    "DataFileReader",
 ]
