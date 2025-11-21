@@ -24,7 +24,7 @@ from core.config import (
 )
 from core.engine import XTFSyncEngine
 from core.reader import DataFileReader
-from utils.excel_reader import smart_read_excel, print_engine_info
+from utils.excel_reader import print_engine_info
 
 
 def setup_logger():

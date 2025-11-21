@@ -97,7 +97,7 @@ class DataFileReader:
         读取Excel文件
 
         优先使用 smart_read_excel（Calamine引擎，性能提升4-20倍）
-        失败时自动回退到 pd.read_excel
+        smart_read_excel不可用时使用传统的 pd.read_excel
 
         Args:
             file_path: Excel文件路径
@@ -105,27 +105,32 @@ class DataFileReader:
 
         Returns:
             pd.DataFrame: 读取的数据
+
+        Note:
+            smart_read_excel内部已实现 Calamine → OpenPyXL 的自动降级
+            如果smart_read_excel失败，说明两个引擎都已尝试失败
         """
         if SMART_EXCEL_AVAILABLE:
-            # 使用智能Excel读取引擎（性能优化）
-            self.logger.debug(f"使用 smart_read_excel (Calamine引擎) 读取文件: {file_path}")
+            # 使用智能Excel读取引擎（内部包含 Calamine → OpenPyXL 自动降级）
+            self.logger.debug(f"使用 smart_read_excel 读取文件: {file_path}")
             try:
                 df = smart_read_excel(file_path, **kwargs)
-                self.logger.info(f"Excel文件读取成功 (Calamine引擎): {len(df)} 行 × {len(df.columns)} 列")
+                self.logger.info(f"Excel文件读取成功: {len(df)} 行 × {len(df.columns)} 列")
                 return df
             except Exception as e:
-                self.logger.warning(f"Calamine引擎读取失败，回退到OpenPyXL: {e}")
-                # 继续使用传统方式
-
-        # 传统方式（兜底）
-        self.logger.debug(f"使用 pd.read_excel (OpenPyXL引擎) 读取文件: {file_path}")
-        try:
-            df = pd.read_excel(file_path, **kwargs)
-            self.logger.info(f"Excel文件读取成功 (OpenPyXL引擎): {len(df)} 行 × {len(df.columns)} 列")
-            return df
-        except Exception as e:
-            self.logger.error(f"Excel文件读取失败: {e}")
-            raise
+                # smart_read_excel 内部已尝试 Calamine 和 OpenPyXL，都失败了
+                self.logger.error(f"Excel文件读取失败（所有引擎已尝试）: {e}")
+                raise
+        else:
+            # smart_read_excel 不可用，使用传统方式作为兜底
+            self.logger.debug(f"使用 pd.read_excel (OpenPyXL引擎) 读取文件: {file_path}")
+            try:
+                df = pd.read_excel(file_path, **kwargs)
+                self.logger.info(f"Excel文件读取成功 (OpenPyXL引擎): {len(df)} 行 × {len(df.columns)} 列")
+                return df
+            except Exception as e:
+                self.logger.error(f"Excel文件读取失败: {e}")
+                raise
 
     def _read_csv(self, file_path: Path, **kwargs) -> pd.DataFrame:
         """
