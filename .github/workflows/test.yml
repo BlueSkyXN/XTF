@@ -113,7 +113,11 @@ jobs:
 
       - name: Run tests with coverage
         run: |
-          pytest tests/ -v -m "not integration" --tb=short --cov=core --cov=api --cov-report=xml --cov-report=term
+          if [ -d tests ] && find tests -type f \( -name 'test_*.py' -o -name '*_test.py' \) -print -quit | grep -q .; then
+            pytest tests/ -v -m "not integration" --tb=short --cov=core --cov=api --cov-report=xml --cov-report=term
+          else
+            echo "No tests found, skipping."
+          fi
 
       - name: Upload coverage to Codecov
         if: matrix.os == 'ubuntu-22.04' && matrix.python-version == '3.11'

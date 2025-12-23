@@ -195,7 +195,8 @@ class XTFSyncEngine:
                     
                     # 执行字段创建
                     for plan in creation_plan:
-                        if not isinstance(self.api, BitableAPI): continue
+                        if not isinstance(self.api, BitableAPI):
+                            continue
                         success = self.api.create_field(
                             self.config.app_token,
                             self.config.table_id,
@@ -292,7 +293,8 @@ class XTFSyncEngine:
         self.logger.info(f"尝试从范围读取数据: {read_range}")
 
         try:
-            if not isinstance(self.api, SheetAPI): return pd.DataFrame()
+            if not isinstance(self.api, SheetAPI):
+                return pd.DataFrame()
             if not self.config.spreadsheet_token:
                 self.logger.error("电子表格的 spreadsheet_token 未配置")
                 return pd.DataFrame()
