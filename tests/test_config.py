@@ -11,9 +11,14 @@ import pytest
 import yaml
 
 from core.config import (
-    SyncConfig, SelectiveSyncConfig, ConfigManager,
-    TargetType, SyncMode, FieldTypeStrategy,
-    create_sample_config, get_target_description
+    SyncConfig,
+    SelectiveSyncConfig,
+    ConfigManager,
+    TargetType,
+    SyncMode,
+    FieldTypeStrategy,
+    create_sample_config,
+    get_target_description,
 )
 
 
@@ -57,14 +62,14 @@ class TestSelectiveSyncConfig:
         """测试自定义值"""
         config = SelectiveSyncConfig(
             enabled=True,
-            columns=['A', 'B', 'C'],
+            columns=["A", "B", "C"],
             auto_include_index=False,
             optimize_ranges=False,
             max_gap_for_merge=5,
-            preserve_column_order=False
+            preserve_column_order=False,
         )
         assert config.enabled is True
-        assert config.columns == ['A', 'B', 'C']
+        assert config.columns == ["A", "B", "C"]
         assert config.auto_include_index is False
         assert config.optimize_ranges is False
         assert config.max_gap_for_merge == 5
@@ -101,7 +106,7 @@ class TestSyncConfig:
                 app_id="test_id",
                 app_secret="test_secret",
                 target_type=TargetType.BITABLE,
-                table_id="test_table_id"
+                table_id="test_table_id",
                 # 缺少 app_token
             )
 
@@ -113,31 +118,35 @@ class TestSyncConfig:
                 app_id="test_id",
                 app_secret="test_secret",
                 target_type=TargetType.BITABLE,
-                app_token="test_app_token"
+                app_token="test_app_token",
                 # 缺少 table_id
             )
 
     def test_sheet_config_missing_spreadsheet_token(self):
         """测试电子表格配置缺少 spreadsheet_token 时的错误"""
-        with pytest.raises(ValueError, match="电子表格模式需要spreadsheet_token和sheet_id"):
+        with pytest.raises(
+            ValueError, match="电子表格模式需要spreadsheet_token和sheet_id"
+        ):
             SyncConfig(
                 file_path="test.xlsx",
                 app_id="test_id",
                 app_secret="test_secret",
                 target_type=TargetType.SHEET,
-                sheet_id="test_sheet_id"
+                sheet_id="test_sheet_id",
                 # 缺少 spreadsheet_token
             )
 
     def test_sheet_config_missing_sheet_id(self):
         """测试电子表格配置缺少 sheet_id 时的错误"""
-        with pytest.raises(ValueError, match="电子表格模式需要spreadsheet_token和sheet_id"):
+        with pytest.raises(
+            ValueError, match="电子表格模式需要spreadsheet_token和sheet_id"
+        ):
             SyncConfig(
                 file_path="test.xlsx",
                 app_id="test_id",
                 app_secret="test_secret",
                 target_type=TargetType.SHEET,
-                spreadsheet_token="test_spreadsheet_token"
+                spreadsheet_token="test_spreadsheet_token",
                 # 缺少 sheet_id
             )
 
@@ -151,7 +160,7 @@ class TestSyncConfig:
             sync_mode="full",  # 字符串
             field_type_strategy="base",  # 字符串
             app_token="test_app_token",
-            table_id="test_table_id"
+            table_id="test_table_id",
         )
         assert config.target_type == TargetType.BITABLE
         assert config.sync_mode == SyncMode.FULL
@@ -168,7 +177,7 @@ class TestSyncConfig:
                 spreadsheet_token="test_spreadsheet_token",
                 sheet_id="test_sheet_id",
                 sync_mode=SyncMode.CLONE,
-                selective_sync=SelectiveSyncConfig(enabled=True, columns=['A', 'B'])
+                selective_sync=SelectiveSyncConfig(enabled=True, columns=["A", "B"]),
             )
 
     def test_selective_sync_enabled_without_columns(self):
@@ -181,7 +190,7 @@ class TestSyncConfig:
                 target_type=TargetType.SHEET,
                 spreadsheet_token="test_spreadsheet_token",
                 sheet_id="test_sheet_id",
-                selective_sync=SelectiveSyncConfig(enabled=True, columns=None)
+                selective_sync=SelectiveSyncConfig(enabled=True, columns=None),
             )
 
     def test_selective_sync_duplicate_columns(self):
@@ -194,7 +203,9 @@ class TestSyncConfig:
                 target_type=TargetType.SHEET,
                 spreadsheet_token="test_spreadsheet_token",
                 sheet_id="test_sheet_id",
-                selective_sync=SelectiveSyncConfig(enabled=True, columns=['A', 'B', 'A'])
+                selective_sync=SelectiveSyncConfig(
+                    enabled=True, columns=["A", "B", "A"]
+                ),
             )
 
     def test_selective_sync_empty_column_name(self):
@@ -207,7 +218,9 @@ class TestSyncConfig:
                 target_type=TargetType.SHEET,
                 spreadsheet_token="test_spreadsheet_token",
                 sheet_id="test_sheet_id",
-                selective_sync=SelectiveSyncConfig(enabled=True, columns=['A', '', 'B'])
+                selective_sync=SelectiveSyncConfig(
+                    enabled=True, columns=["A", "", "B"]
+                ),
             )
 
     def test_selective_sync_none_column(self):
@@ -220,7 +233,9 @@ class TestSyncConfig:
                 target_type=TargetType.SHEET,
                 spreadsheet_token="test_spreadsheet_token",
                 sheet_id="test_sheet_id",
-                selective_sync=SelectiveSyncConfig(enabled=True, columns=['A', None, 'B'])
+                selective_sync=SelectiveSyncConfig(
+                    enabled=True, columns=["A", None, "B"]
+                ),
             )
 
     def test_selective_sync_max_gap_negative(self):
@@ -233,7 +248,9 @@ class TestSyncConfig:
                 target_type=TargetType.SHEET,
                 spreadsheet_token="test_spreadsheet_token",
                 sheet_id="test_sheet_id",
-                selective_sync=SelectiveSyncConfig(enabled=True, columns=['A', 'B'], max_gap_for_merge=-1)
+                selective_sync=SelectiveSyncConfig(
+                    enabled=True, columns=["A", "B"], max_gap_for_merge=-1
+                ),
             )
 
     def test_selective_sync_max_gap_too_large(self):
@@ -246,7 +263,9 @@ class TestSyncConfig:
                 target_type=TargetType.SHEET,
                 spreadsheet_token="test_spreadsheet_token",
                 sheet_id="test_sheet_id",
-                selective_sync=SelectiveSyncConfig(enabled=True, columns=['A', 'B'], max_gap_for_merge=100)
+                selective_sync=SelectiveSyncConfig(
+                    enabled=True, columns=["A", "B"], max_gap_for_merge=100
+                ),
             )
 
 
@@ -257,9 +276,9 @@ class TestConfigManager:
         """测试从文件加载配置"""
         config_data = ConfigManager.load_from_file(str(temp_config_file))
         assert config_data is not None
-        assert config_data['file_path'] == 'test_data.xlsx'
-        assert config_data['app_id'] == 'cli_test_app_id'
-        assert config_data['target_type'] == 'bitable'
+        assert config_data["file_path"] == "test_data.xlsx"
+        assert config_data["app_id"] == "cli_test_app_id"
+        assert config_data["target_type"] == "bitable"
 
     def test_load_from_nonexistent_file(self, tmp_path, capsys):
         """测试从不存在的文件加载配置"""
@@ -271,7 +290,7 @@ class TestConfigManager:
     def test_load_from_invalid_yaml_file(self, tmp_path, capsys):
         """测试从无效 YAML 文件加载配置"""
         invalid_file = tmp_path / "invalid.yaml"
-        with open(invalid_file, 'w') as f:
+        with open(invalid_file, "w") as f:
             f.write("invalid: yaml: content: [")
 
         result = ConfigManager.load_from_file(str(invalid_file))
@@ -286,11 +305,11 @@ class TestConfigManager:
 
         assert file_path.exists()
 
-        with open(file_path, 'r', encoding='utf-8') as f:
+        with open(file_path, "r", encoding="utf-8") as f:
             loaded = yaml.safe_load(f)
 
-        assert loaded['file_path'] == sample_config_dict['file_path']
-        assert loaded['app_id'] == sample_config_dict['app_id']
+        assert loaded["file_path"] == sample_config_dict["file_path"]
+        assert loaded["app_id"] == sample_config_dict["app_id"]
 
 
 class TestCreateSampleConfig:
@@ -304,12 +323,12 @@ class TestCreateSampleConfig:
         assert result is True
         assert Path(config_file).exists()
 
-        with open(config_file, 'r', encoding='utf-8') as f:
+        with open(config_file, "r", encoding="utf-8") as f:
             config = yaml.safe_load(f)
 
-        assert config['target_type'] == 'bitable'
-        assert 'app_token' in config
-        assert 'table_id' in config
+        assert config["target_type"] == "bitable"
+        assert "app_token" in config
+        assert "table_id" in config
 
     def test_create_sheet_sample_config(self, tmp_path):
         """测试创建电子表格示例配置"""
@@ -319,13 +338,13 @@ class TestCreateSampleConfig:
         assert result is True
         assert Path(config_file).exists()
 
-        with open(config_file, 'r', encoding='utf-8') as f:
+        with open(config_file, "r", encoding="utf-8") as f:
             config = yaml.safe_load(f)
 
-        assert config['target_type'] == 'sheet'
-        assert 'spreadsheet_token' in config
-        assert 'sheet_id' in config
-        assert 'selective_sync' in config
+        assert config["target_type"] == "sheet"
+        assert "spreadsheet_token" in config
+        assert "sheet_id" in config
+        assert "selective_sync" in config
 
     def test_create_sample_config_file_exists(self, tmp_path, capsys):
         """测试当配置文件已存在时不覆盖"""

@@ -112,12 +112,12 @@ jobs:
           pip install -r requirements-dev.txt
 
       - name: Run tests with coverage
-        run: |
-          if [ -d tests ] && find tests -type f \( -name 'test_*.py' -o -name '*_test.py' \) -print -quit | grep -q .; then
-            pytest tests/ -v -m "not integration" --tb=short --cov=core --cov=api --cov-report=xml --cov-report=term
-          else
-            echo "No tests found, skipping."
-          fi
+        if: ${{ hashFiles('tests/**/test_*.py', 'tests/**/*_test.py') != '' }}
+        run: pytest tests/ -v -m "not integration" --tb=short --cov=core --cov=api --cov-report=xml --cov-report=term
+
+      - name: No tests found
+        if: ${{ hashFiles('tests/**/test_*.py', 'tests/**/*_test.py') == '' }}
+        run: echo "No tests found, skipping."
 
       - name: Upload coverage to Codecov
         if: matrix.os == 'ubuntu-22.04' && matrix.python-version == '3.11'

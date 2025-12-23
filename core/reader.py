@@ -17,6 +17,7 @@ from typing import Optional, Dict, Any
 # 导入智能Excel读取引擎（性能优化）
 try:
     from utils.excel_reader import smart_read_excel
+
     SMART_EXCEL_AVAILABLE = True
 except ImportError:
     SMART_EXCEL_AVAILABLE = False
@@ -45,14 +46,14 @@ class DataFileReader:
 
     # 支持的文件格式
     SUPPORTED_FORMATS = {
-        '.xlsx': 'Excel 2007+ (稳定)',
-        '.xls': 'Excel 97-2003 (稳定)',
-        '.csv': 'CSV (实验性)',
+        ".xlsx": "Excel 2007+ (稳定)",
+        ".xls": "Excel 97-2003 (稳定)",
+        ".csv": "CSV (实验性)",
     }
 
     def __init__(self):
         """初始化文件读取器"""
-        self.logger = logging.getLogger('XTF.reader')
+        self.logger = logging.getLogger("XTF.reader")
 
     def read_file(self, file_path: Path, **kwargs) -> pd.DataFrame:
         """
@@ -81,15 +82,14 @@ class DataFileReader:
 
         self.logger.info(f"检测到文件格式: {file_ext}")
 
-        if file_ext == '.csv':
+        if file_ext == ".csv":
             return self._read_csv(file_path, **kwargs)
-        elif file_ext in ['.xlsx', '.xls']:
+        elif file_ext in [".xlsx", ".xls"]:
             return self._read_excel(file_path, **kwargs)
         else:
-            supported = ', '.join(self.SUPPORTED_FORMATS.keys())
+            supported = ", ".join(self.SUPPORTED_FORMATS.keys())
             raise ValueError(
-                f"不支持的文件格式: {file_ext}\n"
-                f"支持的格式: {supported}"
+                f"不支持的文件格式: {file_ext}\n" f"支持的格式: {supported}"
             )
 
     def _read_excel(self, file_path: Path, **kwargs) -> pd.DataFrame:
@@ -115,7 +115,9 @@ class DataFileReader:
             self.logger.debug(f"使用 smart_read_excel 读取文件: {file_path}")
             try:
                 df = smart_read_excel(file_path, **kwargs)
-                self.logger.info(f"Excel文件读取成功: {len(df)} 行 × {len(df.columns)} 列")
+                self.logger.info(
+                    f"Excel文件读取成功: {len(df)} 行 × {len(df.columns)} 列"
+                )
                 return df
             except Exception as e:
                 # smart_read_excel 内部已尝试 Calamine 和 OpenPyXL，都失败了
@@ -123,10 +125,14 @@ class DataFileReader:
                 raise
         else:
             # smart_read_excel 不可用，使用传统方式作为兜底
-            self.logger.debug(f"使用 pd.read_excel (OpenPyXL引擎) 读取文件: {file_path}")
+            self.logger.debug(
+                f"使用 pd.read_excel (OpenPyXL引擎) 读取文件: {file_path}"
+            )
             try:
                 df = pd.read_excel(file_path, **kwargs)
-                self.logger.info(f"Excel文件读取成功 (OpenPyXL引擎): {len(df)} 行 × {len(df.columns)} 列")
+                self.logger.info(
+                    f"Excel文件读取成功 (OpenPyXL引擎): {len(df)} 行 × {len(df.columns)} 列"
+                )
                 return df
             except Exception as e:
                 self.logger.error(f"Excel文件读取失败: {e}")
@@ -154,35 +160,41 @@ class DataFileReader:
         """
         # 设置合理的默认值
         default_kwargs = {
-            'encoding': 'utf-8',      # 优先尝试UTF-8
-            'sep': ',',                # 逗号分隔
-            'header': 0,               # 第一行为表头
+            "encoding": "utf-8",  # 优先尝试UTF-8
+            "sep": ",",  # 逗号分隔
+            "header": 0,  # 第一行为表头
         }
 
         # 用户参数覆盖默认值
         default_kwargs.update(kwargs)
 
         self.logger.debug(f"使用 pd.read_csv 读取文件: {file_path}")
-        self.logger.debug(f"CSV参数: encoding={default_kwargs.get('encoding')}, "
-                         f"sep={default_kwargs.get('sep')}, "
-                         f"header={default_kwargs.get('header')}")
+        self.logger.debug(
+            f"CSV参数: encoding={default_kwargs.get('encoding')}, "
+            f"sep={default_kwargs.get('sep')}, "
+            f"header={default_kwargs.get('header')}"
+        )
 
         try:
             # 首次尝试（通常是UTF-8）
             df = pd.read_csv(file_path, **default_kwargs)
-            self.logger.info(f"CSV文件读取成功 (编码: {default_kwargs.get('encoding')}): "
-                           f"{len(df)} 行 × {len(df.columns)} 列")
+            self.logger.info(
+                f"CSV文件读取成功 (编码: {default_kwargs.get('encoding')}): "
+                f"{len(df)} 行 × {len(df.columns)} 列"
+            )
             return df
 
         except UnicodeDecodeError as e:
             # UTF-8失败，尝试GBK（中文Excel导出的CSV常用）
             self.logger.warning(f"UTF-8编码读取失败，尝试GBK编码: {e}")
-            default_kwargs['encoding'] = 'gbk'
+            default_kwargs["encoding"] = "gbk"
 
             try:
                 df = pd.read_csv(file_path, **default_kwargs)
-                self.logger.info(f"CSV文件读取成功 (编码: GBK): "
-                               f"{len(df)} 行 × {len(df.columns)} 列")
+                self.logger.info(
+                    f"CSV文件读取成功 (编码: GBK): "
+                    f"{len(df)} 行 × {len(df.columns)} 列"
+                )
                 return df
             except Exception as e2:
                 self.logger.error(f"GBK编码读取也失败: {e2}")

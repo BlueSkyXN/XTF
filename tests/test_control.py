@@ -10,13 +10,21 @@ import pytest
 from unittest.mock import MagicMock, patch
 
 from core.control import (
-    RetryConfig, RetryStrategy,
-    ExponentialBackoffRetry, LinearGrowthRetry, FixedWaitRetry,
-    RateLimitConfig, RateLimitStrategy,
-    FixedWaitRateConfig, FixedWaitRateLimit,
-    SlidingWindowRateConfig, SlidingWindowRateLimit,
-    FixedWindowRateConfig, FixedWindowRateLimit,
-    RequestController, GlobalRequestController
+    RetryConfig,
+    RetryStrategy,
+    ExponentialBackoffRetry,
+    LinearGrowthRetry,
+    FixedWaitRetry,
+    RateLimitConfig,
+    RateLimitStrategy,
+    FixedWaitRateConfig,
+    FixedWaitRateLimit,
+    SlidingWindowRateConfig,
+    SlidingWindowRateLimit,
+    FixedWindowRateConfig,
+    FixedWindowRateLimit,
+    RequestController,
+    GlobalRequestController,
 )
 
 
@@ -32,11 +40,7 @@ class TestRetryConfig:
 
     def test_custom_values(self):
         """测试自定义值"""
-        config = RetryConfig(
-            initial_delay=1.0,
-            max_retries=5,
-            max_wait_time=30.0
-        )
+        config = RetryConfig(initial_delay=1.0, max_retries=5, max_wait_time=30.0)
         assert config.initial_delay == 1.0
         assert config.max_retries == 5
         assert config.max_wait_time == 30.0
@@ -95,10 +99,10 @@ class TestLinearGrowthRetry:
         config = RetryConfig(initial_delay=1.0, max_retries=5)
         strategy = LinearGrowthRetry(config, increment=0.5)
 
-        assert strategy.get_delay(0) == 1.0   # 1.0 + 0.5 * 0
-        assert strategy.get_delay(1) == 1.5   # 1.0 + 0.5 * 1
-        assert strategy.get_delay(2) == 2.0   # 1.0 + 0.5 * 2
-        assert strategy.get_delay(3) == 2.5   # 1.0 + 0.5 * 3
+        assert strategy.get_delay(0) == 1.0  # 1.0 + 0.5 * 0
+        assert strategy.get_delay(1) == 1.5  # 1.0 + 0.5 * 1
+        assert strategy.get_delay(2) == 2.0  # 1.0 + 0.5 * 2
+        assert strategy.get_delay(3) == 2.5  # 1.0 + 0.5 * 3
 
     def test_get_delay_with_max_wait_time(self):
         """测试带最大等待时间的延迟计算"""
@@ -195,11 +199,9 @@ class TestSlidingWindowRateLimit:
 
         # 添加3个请求时间戳
         current_time = time.time()
-        rate_limiter.request_timestamps.extend([
-            current_time - 0.1,
-            current_time - 0.2,
-            current_time - 0.3
-        ])
+        rate_limiter.request_timestamps.extend(
+            [current_time - 0.1, current_time - 0.2, current_time - 0.3]
+        )
 
         assert rate_limiter.can_proceed() is False
 
@@ -209,10 +211,7 @@ class TestSlidingWindowRateLimit:
         rate_limiter = SlidingWindowRateLimit(config)
 
         # 添加过期的请求
-        rate_limiter.request_timestamps.extend([
-            time.time() - 0.2,
-            time.time() - 0.2
-        ])
+        rate_limiter.request_timestamps.extend([time.time() - 0.2, time.time() - 0.2])
 
         assert rate_limiter.can_proceed() is True
 
@@ -336,7 +335,7 @@ class TestGlobalRequestController:
             retry_type="exponential_backoff",
             retry_config={"initial_delay": 1.0, "max_retries": 3, "multiplier": 2.0},
             rate_limit_type="fixed_wait",
-            rate_limit_config={"delay": 0.1}
+            rate_limit_config={"delay": 0.1},
         )
 
         assert controller is not None
@@ -350,7 +349,7 @@ class TestGlobalRequestController:
             retry_type="linear_growth",
             retry_config={"initial_delay": 0.5, "max_retries": 3, "increment": 0.5},
             rate_limit_type="fixed_wait",
-            rate_limit_config={"delay": 0.1}
+            rate_limit_config={"delay": 0.1},
         )
 
         inner_controller = controller.get_controller()
@@ -362,7 +361,7 @@ class TestGlobalRequestController:
             retry_type="fixed_wait",
             retry_config={"initial_delay": 1.0, "max_retries": 3},
             rate_limit_type="fixed_wait",
-            rate_limit_config={"delay": 0.1}
+            rate_limit_config={"delay": 0.1},
         )
 
         inner_controller = controller.get_controller()
@@ -374,7 +373,7 @@ class TestGlobalRequestController:
             retry_type="exponential_backoff",
             retry_config={"initial_delay": 0.5, "max_retries": 3},
             rate_limit_type="sliding_window",
-            rate_limit_config={"window_size": 1.0, "max_requests": 10}
+            rate_limit_config={"window_size": 1.0, "max_requests": 10},
         )
 
         inner_controller = controller.get_controller()
@@ -386,7 +385,7 @@ class TestGlobalRequestController:
             retry_type="exponential_backoff",
             retry_config={"initial_delay": 0.5, "max_retries": 3},
             rate_limit_type="fixed_window",
-            rate_limit_config={"window_size": 1.0, "max_requests": 10}
+            rate_limit_config={"window_size": 1.0, "max_requests": 10},
         )
 
         inner_controller = controller.get_controller()

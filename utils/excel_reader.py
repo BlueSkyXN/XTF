@@ -7,6 +7,7 @@ Excel 智能读取模块
 作者: XTF Team
 版本: 1.7.3+
 """
+
 import pandas as pd
 from pathlib import Path
 from typing import Union, Optional
@@ -16,9 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 def smart_read_excel(
-    file_path: Union[str, Path],
-    sheet_name: Union[str, int] = 0,
-    **kwargs
+    file_path: Union[str, Path], sheet_name: Union[str, int] = 0, **kwargs
 ) -> pd.DataFrame:
     """
     智能读取 Excel 文件，自动选择最优引擎
@@ -55,10 +54,7 @@ def smart_read_excel(
     # 尝试 1: Calamine 引擎 (高性能)
     try:
         df = pd.read_excel(
-            file_path,
-            sheet_name=sheet_name,
-            engine='calamine',
-            **kwargs
+            file_path, sheet_name=sheet_name, engine="calamine", **kwargs
         )
         logger.debug(f"✅ Calamine 引擎读取成功: {file_path.name}")
         return df
@@ -74,10 +70,7 @@ def smart_read_excel(
     # 尝试 2: OpenPyXL 引擎 (备用)
     try:
         df = pd.read_excel(
-            file_path,
-            sheet_name=sheet_name,
-            engine='openpyxl',
-            **kwargs
+            file_path, sheet_name=sheet_name, engine="openpyxl", **kwargs
         )
         logger.debug(f"✅ OpenPyXL 引擎读取成功: {file_path.name}")
         return df
@@ -106,35 +99,32 @@ def get_available_engines() -> dict:
         >>> engines = get_available_engines()
         >>> print(f"主引擎: {engines['primary']}")
     """
-    engines = {
-        'calamine': False,
-        'openpyxl': False,
-        'primary': None,
-        'fallback': None
-    }
+    engines = {"calamine": False, "openpyxl": False, "primary": None, "fallback": None}
 
     # 检测 Calamine
     try:
         import python_calamine
-        engines['calamine'] = True
-        engines['primary'] = 'calamine'
+
+        engines["calamine"] = True
+        engines["primary"] = "calamine"
     except ImportError:
         pass
 
     # 检测 OpenPyXL
     try:
         import openpyxl
-        engines['openpyxl'] = True
-        if engines['primary'] is None:
-            engines['primary'] = 'openpyxl'
+
+        engines["openpyxl"] = True
+        if engines["primary"] is None:
+            engines["primary"] = "openpyxl"
         else:
-            engines['fallback'] = 'openpyxl'
+            engines["fallback"] = "openpyxl"
     except ImportError:
         pass
 
     # 如果 Calamine 可用，OpenPyXL 作为备用
-    if engines['calamine'] and engines['openpyxl']:
-        engines['fallback'] = 'openpyxl'
+    if engines["calamine"] and engines["openpyxl"]:
+        engines["fallback"] = "openpyxl"
 
     return engines
 
@@ -156,11 +146,11 @@ def print_engine_info(verbose: bool = True) -> Optional[str]:
     engines = get_available_engines()
 
     # 构建信息字符串
-    if engines['calamine'] and engines['openpyxl']:
+    if engines["calamine"] and engines["openpyxl"]:
         info = "🚀 Excel引擎: Calamine (高性能模式) + OpenPyXL (备用)"
-    elif engines['calamine']:
+    elif engines["calamine"]:
         info = "🚀 Excel引擎: Calamine (高性能模式)"
-    elif engines['openpyxl']:
+    elif engines["openpyxl"]:
         info = "📖 Excel引擎: OpenPyXL (标准模式)"
     else:
         info = "⚠️ 警告: 未安装 Excel 引擎，请运行: pip install python-calamine openpyxl"

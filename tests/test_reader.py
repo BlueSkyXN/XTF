@@ -26,22 +26,22 @@ class TestSupportedFormats:
 
     def test_supported_formats_contains_xlsx(self):
         """测试支持 xlsx 格式"""
-        assert '.xlsx' in DataFileReader.SUPPORTED_FORMATS
+        assert ".xlsx" in DataFileReader.SUPPORTED_FORMATS
 
     def test_supported_formats_contains_xls(self):
         """测试支持 xls 格式"""
-        assert '.xls' in DataFileReader.SUPPORTED_FORMATS
+        assert ".xls" in DataFileReader.SUPPORTED_FORMATS
 
     def test_supported_formats_contains_csv(self):
         """测试支持 csv 格式"""
-        assert '.csv' in DataFileReader.SUPPORTED_FORMATS
+        assert ".csv" in DataFileReader.SUPPORTED_FORMATS
 
     def test_get_supported_formats(self):
         """测试获取支持格式字符串"""
         formats = DataFileReader.get_supported_formats()
-        assert '.xlsx' in formats
-        assert '.xls' in formats
-        assert '.csv' in formats
+        assert ".xlsx" in formats
+        assert ".xls" in formats
+        assert ".csv" in formats
 
 
 class TestIsSupported:
@@ -81,8 +81,8 @@ class TestReadExcel:
 
         assert isinstance(df, pd.DataFrame)
         assert len(df) == 5
-        assert 'ID' in df.columns
-        assert 'Name' in df.columns
+        assert "ID" in df.columns
+        assert "Name" in df.columns
 
     def test_read_excel_file_not_found(self, tmp_path):
         """测试读取不存在的文件"""
@@ -111,13 +111,13 @@ class TestReadCsv:
 
         assert isinstance(df, pd.DataFrame)
         assert len(df) == 5
-        assert 'ID' in df.columns
-        assert 'Name' in df.columns
+        assert "ID" in df.columns
+        assert "Name" in df.columns
 
     def test_read_csv_utf8(self, tmp_path, sample_dataframe):
         """测试读取 UTF-8 编码的 CSV"""
         csv_file = tmp_path / "utf8.csv"
-        sample_dataframe.to_csv(csv_file, index=False, encoding='utf-8')
+        sample_dataframe.to_csv(csv_file, index=False, encoding="utf-8")
 
         reader = DataFileReader()
         df = reader.read_file(csv_file)
@@ -127,18 +127,16 @@ class TestReadCsv:
     def test_read_csv_gbk(self, tmp_path):
         """测试读取 GBK 编码的 CSV"""
         csv_file = tmp_path / "gbk.csv"
-        df = pd.DataFrame({
-            'ID': [1, 2],
-            '姓名': ['张三', '李四'],
-            '城市': ['北京', '上海']
-        })
-        df.to_csv(csv_file, index=False, encoding='gbk')
+        df = pd.DataFrame(
+            {"ID": [1, 2], "姓名": ["张三", "李四"], "城市": ["北京", "上海"]}
+        )
+        df.to_csv(csv_file, index=False, encoding="gbk")
 
         reader = DataFileReader()
         result = reader.read_file(csv_file)
 
         assert len(result) == 2
-        assert '姓名' in result.columns
+        assert "姓名" in result.columns
 
     def test_read_csv_with_kwargs(self, temp_csv_file):
         """测试带额外参数的 CSV 读取"""
@@ -216,27 +214,31 @@ class TestEdgeCases:
     def test_read_excel_with_special_characters(self, tmp_path):
         """测试读取包含特殊字符的 Excel"""
         special_file = tmp_path / "special.xlsx"
-        df = pd.DataFrame({
-            '列名': ['值1', '值2'],
-            'Column': ['Value with "quotes"', "Value with 'single quotes'"],
-            '特殊': ['@#$%^&*()', '你好世界']
-        })
+        df = pd.DataFrame(
+            {
+                "列名": ["值1", "值2"],
+                "Column": ['Value with "quotes"', "Value with 'single quotes'"],
+                "特殊": ["@#$%^&*()", "你好世界"],
+            }
+        )
         df.to_excel(special_file, index=False)
 
         reader = DataFileReader()
         result = reader.read_file(special_file)
 
         assert len(result) == 2
-        assert '列名' in result.columns
+        assert "列名" in result.columns
 
     def test_read_large_excel(self, tmp_path):
         """测试读取较大的 Excel 文件"""
         large_file = tmp_path / "large.xlsx"
-        df = pd.DataFrame({
-            'ID': range(1000),
-            'Name': [f'Name_{i}' for i in range(1000)],
-            'Value': [i * 1.5 for i in range(1000)]
-        })
+        df = pd.DataFrame(
+            {
+                "ID": range(1000),
+                "Name": [f"Name_{i}" for i in range(1000)],
+                "Value": [i * 1.5 for i in range(1000)],
+            }
+        )
         df.to_excel(large_file, index=False)
 
         reader = DataFileReader()
@@ -252,7 +254,7 @@ class TestEdgeCases:
 
         reader = DataFileReader()
         # 需要指定分隔符
-        df = reader.read_file(tsv_file, sep='\t')
+        df = reader.read_file(tsv_file, sep="\t")
 
         assert len(df) == 2
-        assert 'ID' in df.columns
+        assert "ID" in df.columns
