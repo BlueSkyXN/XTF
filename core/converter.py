@@ -233,7 +233,6 @@ class DataConverter:
         
         try:
             timestamp = int(s)
-            current_year = datetime.now().year
             
             # 秒级时间戳: 1970-2050年
             if 946684800 <= timestamp <= 2524608000:  # 2000-2050

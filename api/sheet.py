@@ -372,7 +372,6 @@ class SheetAPI:
             for row_idx in range(max_rows):
                 row_data = []
                 for col_idx in range(start_col, end_col + 1):
-                    col_letter = self.column_number_to_letter(col_idx)
                     # 查找对应的列名
                     col_name = None
                     for name, pos in column_positions.items():

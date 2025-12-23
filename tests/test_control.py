@@ -5,15 +5,9 @@
 测试 core/control.py 中的重试和频控功能
 """
 
-import sys
 import time
 import pytest
-from pathlib import Path
 from unittest.mock import MagicMock, patch
-
-# 添加项目根目录到路径
-project_root = Path(__file__).parent.parent
-sys.path.insert(0, str(project_root))
 
 from core.control import (
     RetryConfig, RetryStrategy,

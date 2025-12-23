@@ -5,14 +5,10 @@
 测试 core/config.py 中的配置管理功能
 """
 
-import sys
-import pytest
-import yaml
 from pathlib import Path
 
-# 添加项目根目录到路径
-project_root = Path(__file__).parent.parent
-sys.path.insert(0, str(project_root))
+import pytest
+import yaml
 
 from core.config import (
     SyncConfig, SelectiveSyncConfig, ConfigManager,

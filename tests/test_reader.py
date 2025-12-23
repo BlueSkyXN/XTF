@@ -5,14 +5,9 @@
 测试 core/reader.py 中的文件读取功能
 """
 
-import sys
 import pytest
 import pandas as pd
 from pathlib import Path
-
-# 添加项目根目录到路径
-project_root = Path(__file__).parent.parent
-sys.path.insert(0, str(project_root))
 
 from core.reader import DataFileReader
 

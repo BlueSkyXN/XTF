@@ -5,15 +5,11 @@ XTF 测试配置文件
 提供测试用的 fixtures 和公共配置
 """
 
-import sys
-import pytest
-import pandas as pd
 from pathlib import Path
-from typing import Dict, Any
+from typing import Any, Dict
 
-# 添加项目根目录到路径
-project_root = Path(__file__).parent.parent
-sys.path.insert(0, str(project_root))
+import pandas as pd
+import pytest
 
 from core.config import (
     SyncConfig, SelectiveSyncConfig, TargetType, SyncMode, FieldTypeStrategy

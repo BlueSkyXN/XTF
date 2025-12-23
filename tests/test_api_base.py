@@ -5,16 +5,10 @@ API 基础模块测试
 测试 api/base.py 中的 HTTP 客户端功能
 """
 
-import sys
 import time
 import pytest
-from pathlib import Path
 from unittest.mock import MagicMock, patch, Mock
 import requests
-
-# 添加项目根目录到路径
-project_root = Path(__file__).parent.parent
-sys.path.insert(0, str(project_root))
 
 from api.base import RateLimiter, RetryableAPIClient
 

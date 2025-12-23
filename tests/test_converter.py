@@ -5,15 +5,9 @@
 测试 core/converter.py 中的数据转换功能
 """
 
-import sys
 import pytest
 import pandas as pd
 import hashlib
-from pathlib import Path
-
-# 添加项目根目录到路径
-project_root = Path(__file__).parent.parent
-sys.path.insert(0, str(project_root))
 
 from core.config import TargetType, FieldTypeStrategy
 from core.converter import DataConverter
