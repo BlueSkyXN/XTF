@@ -6,13 +6,20 @@
 """
 
 import re
-import pandas as pd
 import hashlib
 import logging
-from typing import Dict, Any, List, Optional
 import datetime as dt
+from typing import Any, Dict, List, Optional, TypedDict
+
+import pandas as pd
 
 from .config import TargetType
+
+
+class ConversionStats(TypedDict):
+    success: int
+    failed: int
+    warnings: List[str]
 
 
 class DataConverter:
@@ -29,7 +36,11 @@ class DataConverter:
         self.logger = logging.getLogger("XTF.converter")
 
         # 类型转换统计
-        self.conversion_stats = {"success": 0, "failed": 0, "warnings": []}
+        self.conversion_stats: ConversionStats = {
+            "success": 0,
+            "failed": 0,
+            "warnings": [],
+        }
 
     def reset_stats(self):
         """重置转换统计"""
@@ -47,10 +58,10 @@ class DataConverter:
     # ========== 多维表格转换方法 ==========
 
     def build_record_index(
-        self, records: List[Dict], index_column: Optional[str]
-    ) -> Dict[str, Dict]:
+        self, records: List[Dict[str, Any]], index_column: Optional[str]
+    ) -> Dict[str, Dict[str, Any]]:
         """构建多维表格记录索引"""
-        index = {}
+        index: Dict[str, Dict[str, Any]] = {}
         if not index_column:
             return index
 
@@ -1068,7 +1079,7 @@ class DataConverter:
         self, df: pd.DataFrame, index_column: Optional[str]
     ) -> Dict[str, int]:
         """构建电子表格数据索引（哈希 -> 行号）"""
-        index = {}
+        index: Dict[str, int] = {}
         if not index_column:
             return index
 
@@ -1331,7 +1342,7 @@ class DataConverter:
                 'number_columns': ['D', 'E']
             }
         """
-        field_config = {
+        field_config: Dict[str, List[Any]] = {
             "dropdown_configs": [],
             "date_columns": [],
             "number_columns": [],
@@ -1359,7 +1370,7 @@ class DataConverter:
                     )
             elif analysis["suggested_feishu_type"] == 4:  # 多选
                 # 生成多选下拉列表配置
-                all_options = set()
+                all_options: set[str] = set()
                 for value in df[column_name].dropna():
                     value_str = str(value)
                     # 按分隔符拆分

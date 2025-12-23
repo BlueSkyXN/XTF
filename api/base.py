@@ -7,8 +7,9 @@
 
 import time
 import logging
-import requests
 from typing import Optional
+
+import requests  # type: ignore[import-untyped]
 
 
 class RateLimiter:

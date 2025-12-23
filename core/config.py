@@ -5,13 +5,14 @@
 提供多维表格和电子表格的统一配置管理
 """
 
-import yaml
 import argparse
 import sys
 from pathlib import Path
 from enum import Enum
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, List
+
+import yaml  # type: ignore[import-untyped]
 
 
 class FieldTypeStrategy(Enum):

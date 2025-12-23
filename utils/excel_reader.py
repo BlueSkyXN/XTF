@@ -8,12 +8,20 @@ Excel 智能读取模块
 版本: 1.7.3+
 """
 
-import pandas as pd
 from pathlib import Path
-from typing import Union, Optional
+from typing import Optional, TypedDict, Union
 import logging
 
+import pandas as pd
+
 logger = logging.getLogger(__name__)
+
+
+class EngineInfo(TypedDict):
+    calamine: bool
+    openpyxl: bool
+    primary: Optional[str]
+    fallback: Optional[str]
 
 
 def smart_read_excel(
@@ -99,7 +107,12 @@ def get_available_engines() -> dict:
         >>> engines = get_available_engines()
         >>> print(f"主引擎: {engines['primary']}")
     """
-    engines = {"calamine": False, "openpyxl": False, "primary": None, "fallback": None}
+    engines: EngineInfo = {
+        "calamine": False,
+        "openpyxl": False,
+        "primary": None,
+        "fallback": None,
+    }
 
     # 检测 Calamine
     try:
@@ -159,3 +172,5 @@ def print_engine_info(verbose: bool = True) -> Optional[str]:
         print(info)
     else:
         return info
+
+    return None

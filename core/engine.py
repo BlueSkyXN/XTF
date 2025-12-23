@@ -45,12 +45,11 @@ class XTFSyncEngine:
         )
 
         # 根据目标类型选择API客户端
+        self.api: Union[BitableAPI, SheetAPI]
         if config.target_type == TargetType.BITABLE:
-            self.api: Union[BitableAPI, SheetAPI] = BitableAPI(
-                self.auth, self.api_client
-            )
+            self.api = BitableAPI(self.auth, self.api_client)
         else:  # SHEET
-            self.api: Union[BitableAPI, SheetAPI] = SheetAPI(
+            self.api = SheetAPI(
                 self.auth,
                 self.api_client,
                 start_row=self.config.start_row,
@@ -635,7 +634,11 @@ class XTFSyncEngine:
         self, df: pd.DataFrame, current_df: pd.DataFrame
     ) -> bool:
         """电子表格选择性列同步 - 使用精确列控制"""
-        self.logger.info(f"🎯 启用精确列控制同步: {self.config.selective_sync.columns}")
+        columns = self.config.selective_sync.columns
+        if not columns:
+            self.logger.warning("选择性列同步未配置 columns，已跳过")
+            return False
+        self.logger.info(f"🎯 启用精确列控制同步: {columns}")
 
         # 构建索引
         current_index = self.converter.build_data_index(
@@ -643,8 +646,8 @@ class XTFSyncEngine:
         )
 
         # 准备更新数据映射 {row_idx: {col: value}}
-        update_data_map = {}
-        new_rows = []
+        update_data_map: Dict[int, Dict[str, Any]] = {}
+        new_rows: List[pd.Series] = []
 
         for _, row in df.iterrows():
             index_hash = self.converter.get_index_value_hash(
@@ -657,7 +660,7 @@ class XTFSyncEngine:
                     update_data_map[current_row_idx] = {}
 
                 # 只更新指定列
-                for col in self.config.selective_sync.columns:
+                for col in columns:
                     if col in df.columns:
                         update_data_map[current_row_idx][col] = row[col]
             else:
@@ -703,7 +706,7 @@ class XTFSyncEngine:
             return True
 
         # 准备按列组织的更新数据
-        columns_to_update = set()
+        columns_to_update: set[str] = set()
         for row_updates in update_data_map.values():
             columns_to_update.update(row_updates.keys())
 
@@ -1185,7 +1188,11 @@ class XTFSyncEngine:
         self, df: pd.DataFrame, current_df: pd.DataFrame
     ) -> bool:
         """电子表格选择性列覆盖同步"""
-        self.logger.info(f"🎯 选择性列覆盖同步: {self.config.selective_sync.columns}")
+        columns = self.config.selective_sync.columns
+        if not columns:
+            self.logger.warning("选择性列覆盖同步未配置 columns，已跳过")
+            return False
+        self.logger.info(f"🎯 选择性列覆盖同步: {columns}")
 
         # 构建索引
         current_index = self.converter.build_data_index(
@@ -1193,8 +1200,8 @@ class XTFSyncEngine:
         )
 
         # 准备数据映射 {row_idx: {col: value}}
-        update_data_map = {}  # 更新现有行的指定列
-        new_rows = []  # 全新的行
+        update_data_map: Dict[int, Dict[str, Any]] = {}  # 更新现有行的指定列
+        new_rows: List[pd.Series] = []  # 全新的行
 
         for _, row in df.iterrows():
             index_hash = self.converter.get_index_value_hash(
@@ -1207,7 +1214,7 @@ class XTFSyncEngine:
                     update_data_map[current_row_idx] = {}
 
                 # 只覆盖指定列
-                for col in self.config.selective_sync.columns:
+                for col in columns:
                     if col in df.columns:
                         update_data_map[current_row_idx][col] = row[col]
             else:

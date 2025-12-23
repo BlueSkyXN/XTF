@@ -156,7 +156,7 @@ class BitableAPI:
             params["page_token"] = page_token
 
         # 请求体可以包含过滤条件、排序等（当前为空）
-        data = {}
+        data: Dict[str, Any] = {}
 
         response = self.api_client.call_api(
             "POST", url, headers=headers, params=params, json=data

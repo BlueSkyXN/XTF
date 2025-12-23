@@ -605,17 +605,17 @@ class SheetAPI:
         headers = self.auth.get_auth_headers()
 
         # 构建请求数据
-        data_validation = {
-            "conditionValues": options,
-            "options": {
-                "multipleValues": multiple_values,
-                "highlightValidData": bool(colors),
-            },
+        options_payload: Dict[str, Any] = {
+            "multipleValues": multiple_values,
+            "highlightValidData": bool(colors),
         }
-
-        # 如果提供了颜色配置
         if colors:
-            data_validation["options"]["colors"] = colors
+            options_payload["colors"] = colors
+
+        data_validation: Dict[str, Any] = {
+            "conditionValues": options,
+            "options": options_payload,
+        }
 
         request_data = {
             "range": range_str,

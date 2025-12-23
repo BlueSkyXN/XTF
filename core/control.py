@@ -7,13 +7,14 @@
 
 import time
 import logging
-import requests
 import threading
 from abc import ABC, abstractmethod
-from typing import Optional, Callable, Any, Union
-from dataclasses import dataclass
 from collections import deque
+from dataclasses import dataclass
 from enum import Enum
+from typing import Any, Callable, Optional, Union
+
+import requests  # type: ignore[import-untyped]
 
 
 # ============================================================================
@@ -144,7 +145,7 @@ class FixedWaitRateLimit(RateLimitStrategy):
     def __init__(self, config: FixedWaitRateConfig):
         super().__init__(config)
         self.config: FixedWaitRateConfig = config
-        self.last_request_time = 0
+        self.last_request_time: float = 0.0
 
     def can_proceed(self) -> bool:
         current_time = time.time()
@@ -180,7 +181,7 @@ class SlidingWindowRateLimit(RateLimitStrategy):
     def __init__(self, config: SlidingWindowRateConfig):
         super().__init__(config)
         self.config: SlidingWindowRateConfig = config
-        self.request_timestamps = deque()
+        self.request_timestamps: deque[float] = deque()
 
     def _cleanup_old_requests(self):
         current_time = time.time()
@@ -400,14 +401,14 @@ class GlobalRequestController:
     def create_from_config(
         cls,
         retry_type: str = "exponential_backoff",
-        retry_config: dict = None,
+        retry_config: Optional[dict[str, Any]] = None,
         rate_limit_type: str = "fixed_wait",
-        rate_limit_config: dict = None,
+        rate_limit_config: Optional[dict[str, Any]] = None,
     ):
         """从配置创建全局控制器"""
 
         # 创建重试策略
-        retry_strategy = None
+        retry_strategy: Optional[RetryStrategy] = None
         if retry_config is None:
             retry_config = {"initial_delay": 0.5, "max_retries": 3}
 
@@ -429,33 +430,33 @@ class GlobalRequestController:
             retry_strategy = FixedWaitRetry(base_retry_config)
 
         # 创建频控策略
-        rate_limit_strategy = None
+        rate_limit_strategy: Optional[RateLimitStrategy] = None
         if rate_limit_config is None:
             rate_limit_config = {"delay": 0.1}
 
         if rate_limit_type == "fixed_wait":
-            config = FixedWaitRateConfig(
+            rate_config = FixedWaitRateConfig(
                 **{k: v for k, v in rate_limit_config.items() if k in ["delay"]}
             )
-            rate_limit_strategy = FixedWaitRateLimit(config)
+            rate_limit_strategy = FixedWaitRateLimit(rate_config)
         elif rate_limit_type == "sliding_window":
-            config = SlidingWindowRateConfig(
+            rate_config = SlidingWindowRateConfig(
                 **{
                     k: v
                     for k, v in rate_limit_config.items()
                     if k in ["window_size", "max_requests"]
                 }
             )
-            rate_limit_strategy = SlidingWindowRateLimit(config)
+            rate_limit_strategy = SlidingWindowRateLimit(rate_config)
         elif rate_limit_type == "fixed_window":
-            config = FixedWindowRateConfig(
+            rate_config = FixedWindowRateConfig(
                 **{
                     k: v
                     for k, v in rate_limit_config.items()
                     if k in ["window_size", "max_requests"]
                 }
             )
-            rate_limit_strategy = FixedWindowRateLimit(config)
+            rate_limit_strategy = FixedWindowRateLimit(rate_config)
 
         # 创建控制器
         controller = RequestController(retry_strategy, rate_limit_strategy)

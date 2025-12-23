@@ -37,8 +37,8 @@ class FeishuAuth:
         self.logger = logging.getLogger("XTF.auth")
 
         # Token管理
-        self.tenant_access_token = None
-        self.token_expires_at = None
+        self.tenant_access_token: Optional[str] = None
+        self.token_expires_at: Optional[datetime] = None
 
     def get_tenant_access_token(self) -> str:
         """
@@ -51,12 +51,13 @@ class FeishuAuth:
             Exception: 当获取令牌失败时
         """
         # 检查token是否过期
+        token = self.tenant_access_token
         if (
-            self.tenant_access_token
+            token
             and self.token_expires_at
             and datetime.now() < self.token_expires_at - timedelta(minutes=5)
         ):
-            return self.tenant_access_token
+            return token
 
         url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
         headers = {"Content-Type": "application/json; charset=utf-8"}
@@ -77,13 +78,14 @@ class FeishuAuth:
                 f"获取访问令牌失败: 错误码 {result.get('code')}, 错误信息: {error_msg}"
             )
 
-        self.tenant_access_token = result["tenant_access_token"]
+        token = result["tenant_access_token"]
+        self.tenant_access_token = token
         # 设置过期时间（提前5分钟刷新）
         expires_in = result.get("expire", 7200)
         self.token_expires_at = datetime.now() + timedelta(seconds=expires_in)
 
         self.logger.info("成功获取租户访问令牌")
-        return self.tenant_access_token
+        return token
 
     def get_auth_headers(self) -> Dict[str, str]:
         """
