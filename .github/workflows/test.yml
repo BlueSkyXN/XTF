@@ -1,0 +1,149 @@
+name: Tests
+
+on:
+  push:
+    branches: [main, master, dev]
+    paths:
+      - 'core/**'
+      - 'api/**'
+      - 'utils/**'
+      - 'tests/**'
+      - '*.py'
+      - 'requirements.txt'
+      - 'requirements-dev.txt'
+      - '.github/workflows/test.yml'
+  pull_request:
+    branches: [main, master, dev]
+    paths:
+      - 'core/**'
+      - 'api/**'
+      - 'utils/**'
+      - 'tests/**'
+      - '*.py'
+      - 'requirements.txt'
+      - 'requirements-dev.txt'
+      - '.github/workflows/test.yml'
+  workflow_dispatch:
+
+env:
+  PYTHONIOENCODING: utf-8
+
+jobs:
+  lint:
+    name: Code Quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install linting tools
+        run: |
+          pip install ruff black mypy
+
+      - name: Run Ruff
+        run: ruff check . --ignore E501,F401
+
+      - name: Run Black (check only)
+        run: black --check .
+
+      - name: Run MyPy
+        run: mypy core/ api/ --ignore-missing-imports
+
+      - name: Check Python syntax
+        run: python -m py_compile XTF.py core/*.py api/*.py
+
+  test:
+    name: Unit Tests
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Ubuntu 22.04
+          - os: ubuntu-22.04
+            python-version: '3.10'
+          - os: ubuntu-22.04
+            python-version: '3.11'
+          - os: ubuntu-22.04
+            python-version: '3.12'
+          - os: ubuntu-22.04
+            python-version: '3.13'
+
+          # Ubuntu 24.04
+          - os: ubuntu-24.04
+            python-version: '3.11'
+          - os: ubuntu-24.04
+            python-version: '3.12'
+          - os: ubuntu-24.04
+            python-version: '3.13'
+
+          # Windows
+          - os: windows-latest
+            python-version: '3.10'
+          - os: windows-latest
+            python-version: '3.11'
+          - os: windows-latest
+            python-version: '3.12'
+
+          # macOS Intel
+          - os: macos-13
+            python-version: '3.10'
+          - os: macos-13
+            python-version: '3.11'
+          - os: macos-13
+            python-version: '3.12'
+
+          # macOS ARM
+          - os: macos-latest
+            python-version: '3.11'
+          - os: macos-latest
+            python-version: '3.12'
+          - os: macos-latest
+            python-version: '3.13'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Run tests with coverage
+        run: |
+          pytest tests/ -v -m "not integration" --tb=short --cov=core --cov=api --cov-report=xml --cov-report=term
+
+      - name: Upload coverage to Codecov
+        if: matrix.os == 'ubuntu-22.04' && matrix.python-version == '3.11'
+        uses: codecov/codecov-action@v4
+        with:
+          file: ./coverage.xml
+          flags: unittests
+          name: codecov-umbrella
+          fail_ci_if_error: false
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+  test-summary:
+    name: Test Summary
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Check test results
+        run: |
+          if [ "${{ needs.lint.result }}" == "failure" ] || [ "${{ needs.test.result }}" == "failure" ]; then
+            echo "Tests failed!"
+            exit 1
+          fi
+          echo "All tests passed!"
