@@ -702,7 +702,7 @@ class XTFSyncEngine:
             
             # 常规增量同步策略
             values = self.converter.df_to_values(df, include_headers=False) # 追加不需要表头
-            self.logger.info(f"使用append接口进行增量同步")
+            self.logger.info("使用append接口进行增量同步")
             if isinstance(self.api, SheetAPI) and self.config.spreadsheet_token and self.config.sheet_id:
                 return self.api.append_sheet_data(
                     self.config.spreadsheet_token,
@@ -927,7 +927,7 @@ class XTFSyncEngine:
             
             # 使用优化API策略覆盖写入
             if isinstance(self.api, SheetAPI) and self.config.spreadsheet_token and self.config.sheet_id:
-                self.logger.info(f"使用write_sheet_data覆盖写入")
+                self.logger.info("使用write_sheet_data覆盖写入")
                 return self.api.write_sheet_data(
                     self.config.spreadsheet_token,
                     self.config.sheet_id,
@@ -1045,7 +1045,7 @@ class XTFSyncEngine:
         values = self.converter.df_to_values(df)
         
         self.logger.info(f"克隆同步计划: 清空现有数据，新增 {len(df)} 行")
-        self.logger.info(f"使用write_sheet_data进行克隆写入")
+        self.logger.info("使用write_sheet_data进行克隆写入")
         
         # 首先清空表格的一个大范围
         if isinstance(self.api, SheetAPI) and self.config.spreadsheet_token and self.config.sheet_id:

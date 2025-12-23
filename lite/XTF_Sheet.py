@@ -718,7 +718,7 @@ class ConfigManager:
             cli_overrides.append(f"app_id={args.app_id[:8]}...")
         if args.app_secret:
             config_data['app_secret'] = args.app_secret
-            cli_overrides.append(f"app_secret=***")
+            cli_overrides.append("app_secret=***")
         if args.spreadsheet_token:
             config_data['spreadsheet_token'] = args.spreadsheet_token
             cli_overrides.append(f"spreadsheet_token={args.spreadsheet_token[:8]}...")
@@ -831,7 +831,7 @@ def main():
         config = ConfigManager.create_config()
         
         # 显示加载的配置信息
-        print(f"\n📋 已加载配置:")
+        print("\n📋 已加载配置:")
         print(f"  配置文件: {config_file_path}")
         print(f"  Excel文件: {config.file_path}")
         print(f"  电子表格Token: {config.spreadsheet_token[:8]}...")
@@ -877,7 +877,7 @@ def main():
             print(f"\n✅ 同步完成！耗时: {duration:.2f} 秒")
             print(f"📊 同步到电子表格: https://feishu.cn/sheets/{config.spreadsheet_token}")
         else:
-            print(f"\n❌ 同步过程中出现错误，请查看日志文件")
+            print("\n❌ 同步过程中出现错误，请查看日志文件")
             
     except KeyboardInterrupt:
         print("\n\n⚠️  用户中断操作")

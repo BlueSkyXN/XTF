@@ -398,7 +398,7 @@ class DataConverter:
             if unique_count <= 15 and unique_count / total_count <= 0.4:
                 return 3, f"Excel下拉列表，唯一值{unique_count}个，推荐单选"
             elif any(',' in str(v) or ';' in str(v) or '|' in str(v) for v in unique_values):
-                return 4, f"Excel下拉列表包含分隔符，推荐多选"
+                return 4, "Excel下拉列表包含分隔符，推荐多选"
         
         # 4. 所有其他情况使用文本类型
         if primary_type == 'datetime':

@@ -84,7 +84,7 @@ def main():
         engine = XTFSyncEngine(config)
         
         # 显示配置信息
-        print(f"\n📋 已加载配置:")
+        print("\n📋 已加载配置:")
         print(f"  配置文件: {config_file}")
         print(f"  数据文件: {config.file_path}")
         print(f"  同步模式: {config.sync_mode.value}")

@@ -360,7 +360,7 @@ class ConfigManager:
             cli_overrides.append(f"app_id={args.app_id[:8]}...")
         if args.app_secret:
             config_data['app_secret'] = args.app_secret
-            cli_overrides.append(f"app_secret=***")
+            cli_overrides.append("app_secret=***")
         if args.target_type:
             config_data['target_type'] = args.target_type
             cli_overrides.append(f"target_type={args.target_type}")

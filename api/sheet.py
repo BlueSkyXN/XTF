@@ -312,7 +312,7 @@ class SheetAPI:
             if success:
                 self.logger.info(f"✅ 选择性列写入成功: {len(value_ranges)} 个范围")
             else:
-                self.logger.error(f"❌ 选择性列写入失败")
+                self.logger.error("❌ 选择性列写入失败")
             return success
         
         return True

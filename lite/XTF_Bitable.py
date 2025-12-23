@@ -1534,7 +1534,7 @@ class ConfigManager:
             cli_overrides.append(f"app_id={args.app_id[:8]}...")
         if args.app_secret:
             config_data['app_secret'] = args.app_secret
-            cli_overrides.append(f"app_secret=***")
+            cli_overrides.append("app_secret=***")
         if args.app_token:
             config_data['app_token'] = args.app_token
             cli_overrides.append(f"app_token={args.app_token[:8]}...")
@@ -1643,7 +1643,7 @@ def main():
         config = ConfigManager.create_config()
         
         # 显示加载的配置信息
-        print(f"\n📋 已加载配置:")
+        print("\n📋 已加载配置:")
         print(f"  配置文件: {config_file_path}")
         print(f"  Excel文件: {config.file_path}")
         print(f"  同步模式: {config.sync_mode.value}")
@@ -1686,7 +1686,7 @@ def main():
         if success:
             print(f"\n✅ 同步完成！耗时: {duration:.2f} 秒")
         else:
-            print(f"\n❌ 同步过程中出现错误，请查看日志文件")
+            print("\n❌ 同步过程中出现错误，请查看日志文件")
             
     except KeyboardInterrupt:
         print("\n\n⚠️  用户中断操作")
