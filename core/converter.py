@@ -49,10 +49,33 @@ class DataConverter:
     def get_index_value_hash(
         self, row: pd.Series, index_column: Optional[str]
     ) -> Optional[str]:
-        """计算索引值的哈希"""
+        """计算索引值的哈希，空值返回 None 避免误匹配"""
         if index_column and index_column in row:
-            value = str(row[index_column])
-            return hashlib.md5(value.encode("utf-8")).hexdigest()
+            value = row[index_column]
+            # 非标量值（如 list/ndarray）先做空值判断，再哈希
+            if not pd.api.types.is_scalar(value):
+                try:
+                    if len(value) == 0:
+                        return None
+                except TypeError:
+                    pass
+
+                try:
+                    if all(
+                        pd.isna(item)
+                        or (isinstance(item, str) and not item.strip())
+                        for item in value
+                    ):
+                        return None
+                except Exception:
+                    pass
+
+                return hashlib.md5(str(value).encode("utf-8")).hexdigest()
+
+            if pd.isna(value):
+                return None
+
+            return hashlib.md5(str(value).encode("utf-8")).hexdigest()
         return None
 
     # ========== 多维表格转换方法 ==========
@@ -1163,9 +1186,16 @@ class DataConverter:
         return column_data
 
     def get_column_positions(
-        self, df: pd.DataFrame, selected_columns: Optional[List[str]] = None
+        self, df: pd.DataFrame, selected_columns: Optional[List[str]] = None,
+        start_column_offset: int = 0
     ) -> Dict[str, int]:
-        """获取列在原始DataFrame中的位置映射（1-based）"""
+        """获取列在原始DataFrame中的位置映射（1-based），考虑起始列偏移
+        
+        Args:
+            df: DataFrame
+            selected_columns: 选择的列名列表
+            start_column_offset: 起始列偏移（0 表示从 A 列开始，1 表示从 B 列开始）
+        """
         if selected_columns:
             valid_columns = [col for col in selected_columns if col in df.columns]
         else:
@@ -1173,8 +1203,8 @@ class DataConverter:
 
         positions = {}
         for col in valid_columns:
-            # 在完整DataFrame中的位置（1-based）
-            positions[col] = df.columns.get_loc(col) + 1
+            # 在完整DataFrame中的位置（1-based）+ 起始列偏移
+            positions[col] = df.columns.get_loc(col) + 1 + start_column_offset
 
         return positions
 

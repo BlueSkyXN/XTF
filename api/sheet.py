@@ -313,6 +313,7 @@ class SheetAPI:
         column_positions: Dict[str, int],
         start_row: int = 1,
         rate_limit_delay: float = 0.05,
+        max_gap: int = 2,
     ) -> bool:
         """
         写入选择性列数据，支持不连续列的高效批量操作
@@ -324,6 +325,7 @@ class SheetAPI:
             column_positions: 字典，键为列名，值为列位置（1-based）
             start_row: 开始行号（1-based）
             rate_limit_delay: 接口调用间隔
+            max_gap: 最大允许合并的间隔列数
 
         Returns:
             是否写入成功
@@ -336,7 +338,7 @@ class SheetAPI:
 
         # 优化相邻列为连续范围
         ranges_data = self._optimize_column_ranges(
-            column_data, column_positions, start_row
+            column_data, column_positions, start_row, max_gap
         )
 
         # 构建多范围数据

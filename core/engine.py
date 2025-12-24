@@ -590,7 +590,8 @@ class XTFSyncEngine:
             for current_row_idx, new_row in update_rows:
                 for col in df.columns:
                     if col in updated_df.columns:
-                        updated_df.iloc[current_row_idx][col] = new_row[col]
+                        # 使用 .iloc 双索引避免链式赋值问题 (SettingWithCopyWarning)
+                        updated_df.iloc[current_row_idx, updated_df.columns.get_loc(col)] = new_row[col]
 
             # 写入更新后的数据
             values = self.converter.df_to_values(updated_df)
@@ -737,9 +738,14 @@ class XTFSyncEngine:
                     col_data.append(converted_value)
             column_data[col] = col_data
 
-        # 获取列位置映射
+        # 获取起始列偏移量
+        start_col_offset = 0
+        if isinstance(self.api, SheetAPI):
+            start_col_offset = self.api.start_col_num - 1
+
+        # 获取列位置映射（考虑起始列偏移）
         column_positions = self.converter.get_column_positions(
-            current_df, list(columns_to_update)
+            current_df, list(columns_to_update), start_col_offset
         )
 
         self.logger.info(f"📍 列位置映射: {column_positions}")
@@ -750,13 +756,22 @@ class XTFSyncEngine:
             and self.config.spreadsheet_token
             and self.config.sheet_id
         ):
+            # start_row 需要考虑配置的起始行 + 表头行
+            actual_start_row = self.config.start_row + 1
+            # 如果 optimize_ranges 为 False，设置 max_gap=0 禁用合并
+            effective_max_gap = (
+                self.config.selective_sync.max_gap_for_merge
+                if self.config.selective_sync.optimize_ranges
+                else 0
+            )
             return self.api.write_selective_columns(
                 self.config.spreadsheet_token,
                 self.config.sheet_id,
                 column_data,
                 column_positions,
-                start_row=2,  # 假设第1行是表头
+                start_row=actual_start_row,
                 rate_limit_delay=self.config.rate_limit_delay,
+                max_gap=effective_max_gap,
             )
 
         return False
@@ -997,12 +1012,18 @@ class XTFSyncEngine:
         column_data = self.converter.df_to_column_data(
             df, self.config.selective_sync.columns
         )
+        
+        # 获取起始列偏移量
+        start_col_offset = 0
+        if isinstance(self.api, SheetAPI):
+            start_col_offset = self.api.start_col_num - 1
+            
         column_positions = self.converter.get_column_positions(
-            current_df, self.config.selective_sync.columns
+            current_df, self.config.selective_sync.columns, start_col_offset
         )
 
-        # 计算起始行：当前数据行数 + 1（表头） + 1
-        start_row = len(current_df) + 2
+        # 计算起始行：配置的起始行 + 当前数据行数 + 1（表头）
+        start_row = self.config.start_row + len(current_df) + 1
 
         self.logger.info(
             f"🎯 选择性列追加: {list(column_data.keys())} 从第{start_row}行开始"
@@ -1014,6 +1035,11 @@ class XTFSyncEngine:
             and self.config.spreadsheet_token
             and self.config.sheet_id
         ):
+            effective_max_gap = (
+                self.config.selective_sync.max_gap_for_merge
+                if self.config.selective_sync.optimize_ranges
+                else 0
+            )
             return self.api.write_selective_columns(
                 self.config.spreadsheet_token,
                 self.config.sheet_id,
@@ -1021,6 +1047,7 @@ class XTFSyncEngine:
                 column_positions,
                 start_row=start_row,
                 rate_limit_delay=self.config.rate_limit_delay,
+                max_gap=effective_max_gap,
             )
 
         return False
