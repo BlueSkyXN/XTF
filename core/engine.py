@@ -367,15 +367,14 @@ class XTFSyncEngine:
 
     # ========== 选择性同步辅助方法 ==========
 
-    def _apply_selective_filter(self, df: pd.DataFrame) -> pd.DataFrame:
-        """应用选择性列过滤"""
+    def _get_effective_selective_columns(self, df: pd.DataFrame) -> List[str]:
+        """获取选择性同步实际生效的列（含索引列）"""
         if (
             not self.config.selective_sync.enabled
             or not self.config.selective_sync.columns
         ):
-            return df
+            return df.columns.tolist()
 
-        # 获取要处理的列
         target_columns = self.config.selective_sync.columns.copy()
 
         # 自动包含索引列（用于匹配逻辑）
@@ -387,19 +386,37 @@ class XTFSyncEngine:
             target_columns.append(self.config.index_column)
             self.logger.info(f"自动包含索引列: {self.config.index_column}")
 
+        # 去重，保留顺序
+        deduped_columns = []
+        seen = set()
+        for col in target_columns:
+            if col not in seen:
+                seen.add(col)
+                deduped_columns.append(col)
+
         # 验证列是否存在
-        missing_columns = [col for col in target_columns if col not in df.columns]
+        missing_columns = [col for col in deduped_columns if col not in df.columns]
         if missing_columns:
             self.logger.warning(f"指定的列不存在于数据中: {missing_columns}")
-            target_columns = [col for col in target_columns if col in df.columns]
+            deduped_columns = [col for col in deduped_columns if col in df.columns]
 
         # 保持列顺序（如果启用）
         if self.config.selective_sync.preserve_column_order:
-            # 按原始DataFrame中的顺序排列
-            ordered_columns = [col for col in df.columns if col in target_columns]
-            return df[ordered_columns]
-        else:
-            return df[target_columns]
+            return [col for col in df.columns if col in deduped_columns]
+
+        return deduped_columns
+
+    def _apply_selective_filter(self, df: pd.DataFrame) -> pd.DataFrame:
+        """应用选择性列过滤"""
+        if (
+            not self.config.selective_sync.enabled
+            or not self.config.selective_sync.columns
+        ):
+            return df
+
+        # 获取要处理的列
+        target_columns = self._get_effective_selective_columns(df)
+        return df[target_columns]
 
     # ========== 统一同步方法 ==========
 
@@ -635,9 +652,9 @@ class XTFSyncEngine:
         self, df: pd.DataFrame, current_df: pd.DataFrame
     ) -> bool:
         """电子表格选择性列同步 - 使用精确列控制"""
-        columns = self.config.selective_sync.columns
+        columns = self._get_effective_selective_columns(df)
         if not columns:
-            self.logger.warning("选择性列同步未配置 columns，已跳过")
+            self.logger.warning("选择性列同步未配置 columns 或无可用列，已跳过")
             return False
         self.logger.info(f"🎯 启用精确列控制同步: {columns}")
 
@@ -980,13 +997,16 @@ class XTFSyncEngine:
 
         # 获取当前表格数据以确定正确的列位置
         current_df = self.get_current_sheet_data()
+
+        effective_columns = self._get_effective_selective_columns(df)
+        if not effective_columns:
+            self.logger.warning("选择性列追加无可用列，已跳过")
+            return False
+
         if current_df.empty:
             # 如果表格为空，先写入表头，然后追加数据
             self.logger.info("表格为空，先创建表头然后追加选择性列数据")
-            headers = [
-                col for col in df.columns if col in self.config.selective_sync.columns
-            ]
-            header_values = [headers]
+            header_values = [effective_columns]
 
             # 写入表头
             if (
@@ -1006,11 +1026,11 @@ class XTFSyncEngine:
                     return False
 
                 # 更新current_df为包含表头的空数据框
-                current_df = pd.DataFrame(columns=headers)
+                current_df = pd.DataFrame(columns=effective_columns)
 
         # 准备选择性列数据
         column_data = self.converter.df_to_column_data(
-            df, self.config.selective_sync.columns
+            df, effective_columns
         )
         
         # 获取起始列偏移量
@@ -1019,7 +1039,7 @@ class XTFSyncEngine:
             start_col_offset = self.api.start_col_num - 1
             
         column_positions = self.converter.get_column_positions(
-            current_df, self.config.selective_sync.columns, start_col_offset
+            current_df, effective_columns, start_col_offset
         )
 
         # 计算起始行：配置的起始行 + 当前数据行数 + 1（表头）
@@ -1215,9 +1235,9 @@ class XTFSyncEngine:
         self, df: pd.DataFrame, current_df: pd.DataFrame
     ) -> bool:
         """电子表格选择性列覆盖同步"""
-        columns = self.config.selective_sync.columns
+        columns = self._get_effective_selective_columns(df)
         if not columns:
-            self.logger.warning("选择性列覆盖同步未配置 columns，已跳过")
+            self.logger.warning("选择性列覆盖同步未配置 columns 或无可用列，已跳过")
             return False
         self.logger.info(f"🎯 选择性列覆盖同步: {columns}")
 
@@ -1570,6 +1590,10 @@ class XTFSyncEngine:
 
         # 重置转换统计
         self.converter.reset_stats()
+
+        # 选择性同步前置过滤（影响字段创建/置信度分析范围）
+        if self.config.selective_sync.enabled:
+            df = self._apply_selective_filter(df)
 
         # 多维表格模式需要确保字段存在
         if self.config.target_type == TargetType.BITABLE:

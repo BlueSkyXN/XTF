@@ -602,6 +602,14 @@ class XTFSyncEngine:
                 "primary_type": "string",
                 "suggested_feishu_type": 1,  # 文本
                 "confidence": 0.5,
+                "unique_count": 0,
+                "total_count": 0,
+                "type_distribution": {
+                    "string": 0,
+                    "number": 0,
+                    "datetime": 0,
+                    "boolean": 0,
+                },
                 "analysis": "列为空，默认文本类型",
             }
 

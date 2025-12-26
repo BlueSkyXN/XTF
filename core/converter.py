@@ -191,6 +191,14 @@ class DataConverter:
                 "primary_type": "string",
                 "suggested_feishu_type": 1,  # 文本
                 "confidence": 0.5,
+                "unique_count": 0,
+                "total_count": 0,
+                "type_distribution": {
+                    "string": 0,
+                    "number": 0,
+                    "datetime": 0,
+                    "boolean": 0,
+                },
                 "analysis": "列为空，默认文本类型",
             }
 
@@ -596,6 +604,17 @@ class DataConverter:
 
         # 2. 基础数据分析
         analysis = self.analyze_excel_column_data(df, column_name)  # 复用现有逻辑
+        if analysis.get("total_count", 0) == 0:
+            analysis.update(
+                {
+                    "suggested_feishu_type": 1,
+                    "recommendation_reason": "列为空，默认文本类型",
+                    "has_excel_validation": has_validation,
+                    "validation_type": validation_type,
+                    "strategy_used": strategy,
+                }
+            )
+            return analysis
 
         # 3. 增强的日期检测
         if analysis["primary_type"] == "string":
