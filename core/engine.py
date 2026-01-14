@@ -267,15 +267,24 @@ class XTFSyncEngine:
         if self.config.target_type != TargetType.BITABLE:
             return False
 
-        total_batches = (len(items) + batch_size - 1) // batch_size
+        # 按接口上限自动限制批大小，避免超限请求
+        max_batch_size = self._get_operation_max_batch_size(processor_func)
+        effective_batch_size = batch_size
+        if max_batch_size and batch_size > max_batch_size:
+            self.logger.warning(
+                f"{self._get_operation_type(processor_func)}批处理大小 {batch_size} 超过接口上限 {max_batch_size}，已自动降至 {max_batch_size}"
+            )
+            effective_batch_size = max_batch_size
+
+        total_batches = (len(items) + effective_batch_size - 1) // effective_batch_size
         success_count = 0
 
         # 获取操作类型用于日志显示
         operation_type = self._get_operation_type(processor_func)
 
-        for i in range(0, len(items), batch_size):
-            batch = items[i : i + batch_size]
-            batch_num = i // batch_size + 1
+        for i in range(0, len(items), effective_batch_size):
+            batch = items[i : i + effective_batch_size]
+            batch_num = i // effective_batch_size + 1
             start_row = i + 1  # Excel行号从1开始
             end_row = min(i + len(batch), len(items))
 
@@ -317,6 +326,17 @@ class XTFSyncEngine:
             return "批量删除"
         else:
             return "批量处理"
+
+    def _get_operation_max_batch_size(self, processor_func) -> Optional[int]:
+        """根据处理函数获取批量接口上限"""
+        func_name = getattr(processor_func, "__name__", str(processor_func))
+        if "create" in func_name:
+            return BitableAPI.MAX_BATCH_CREATE_SIZE
+        if "update" in func_name:
+            return BitableAPI.MAX_BATCH_UPDATE_SIZE
+        if "delete" in func_name:
+            return BitableAPI.MAX_BATCH_DELETE_SIZE
+        return None
 
     # ========== 电子表格专用方法 ==========
 

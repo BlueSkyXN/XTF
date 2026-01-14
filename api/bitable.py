@@ -16,6 +16,12 @@ from .base import RetryableAPIClient
 class BitableAPI:
     """飞书多维表格API客户端"""
 
+    # 批量接口上限（避免超出API限制）
+    MAX_SEARCH_PAGE_SIZE = 100
+    MAX_BATCH_CREATE_SIZE = 1000
+    MAX_BATCH_UPDATE_SIZE = 1000
+    MAX_BATCH_DELETE_SIZE = 500
+
     def __init__(
         self, auth: FeishuAuth, api_client: Optional[RetryableAPIClient] = None
     ):
@@ -130,7 +136,7 @@ class BitableAPI:
         app_token: str,
         table_id: str,
         page_token: Optional[str] = None,
-        page_size: int = 500,
+        page_size: int = 100,
     ) -> Tuple[List[Dict], Optional[str]]:
         """
         搜索记录
@@ -150,8 +156,20 @@ class BitableAPI:
         url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/search"
         headers = self.auth.get_auth_headers()
 
-        # 分页参数作为查询参数
-        params: Dict[str, Union[int, str]] = {"page_size": page_size}
+        # 分页参数作为查询参数（限制在接口上限内）
+        effective_page_size = page_size
+        if page_size > self.MAX_SEARCH_PAGE_SIZE:
+            effective_page_size = self.MAX_SEARCH_PAGE_SIZE
+            self.logger.warning(
+                f"page_size={page_size} 超过接口上限 {self.MAX_SEARCH_PAGE_SIZE}，已自动降至 {effective_page_size}"
+            )
+        elif page_size <= 0:
+            effective_page_size = self.MAX_SEARCH_PAGE_SIZE
+            self.logger.warning(
+                f"page_size={page_size} 非法，已自动使用 {effective_page_size}"
+            )
+
+        params: Dict[str, Union[int, str]] = {"page_size": effective_page_size}
         if page_token:
             params["page_token"] = page_token
 
@@ -196,10 +214,35 @@ class BitableAPI:
         """
         all_records = []
         page_token = None
+        page_num = 0
+        seen_page_tokens = set()
+
+        self.logger.info("开始拉取全部记录...")
 
         while True:
-            records, page_token = self.search_records(app_token, table_id, page_token)
+            records, next_page_token = self.search_records(
+                app_token, table_id, page_token
+            )
             all_records.extend(records)
+            page_num += 1
+
+            if (
+                page_num == 1
+                or page_num % 5 == 0
+                or not next_page_token
+            ):
+                self.logger.info(
+                    f"已拉取 {len(all_records)} 条记录（第 {page_num} 页）"
+                )
+
+            if next_page_token:
+                if next_page_token in seen_page_tokens:
+                    raise Exception(
+                        "检测到重复 page_token，可能导致死循环，请检查接口响应"
+                    )
+                seen_page_tokens.add(next_page_token)
+
+            page_token = next_page_token
 
             if not page_token:
                 break
@@ -220,6 +263,12 @@ class BitableAPI:
         Returns:
             是否创建成功
         """
+        if len(records) > self.MAX_BATCH_CREATE_SIZE:
+            self.logger.error(
+                f"批量创建记录数量 {len(records)} 超过接口上限 {self.MAX_BATCH_CREATE_SIZE}"
+            )
+            return False
+
         url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/batch_create"
         headers = self.auth.get_auth_headers()
 
@@ -273,6 +322,12 @@ class BitableAPI:
         Returns:
             是否更新成功
         """
+        if len(records) > self.MAX_BATCH_UPDATE_SIZE:
+            self.logger.error(
+                f"批量更新记录数量 {len(records)} 超过接口上限 {self.MAX_BATCH_UPDATE_SIZE}"
+            )
+            return False
+
         url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/batch_update"
         headers = self.auth.get_auth_headers()
 
@@ -324,6 +379,12 @@ class BitableAPI:
         Returns:
             是否删除成功
         """
+        if len(record_ids) > self.MAX_BATCH_DELETE_SIZE:
+            self.logger.error(
+                f"批量删除记录数量 {len(record_ids)} 超过接口上限 {self.MAX_BATCH_DELETE_SIZE}"
+            )
+            return False
+
         url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/batch_delete"
         headers = self.auth.get_auth_headers()
         data = {"records": record_ids}
