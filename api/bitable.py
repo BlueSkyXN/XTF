@@ -1,8 +1,103 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-多维表格API模块
-提供飞书多维表格的字段和记录操作功能
+多维表格 API 模块
+
+模块概述：
+    此模块封装了飞书多维表格（Bitable）的 API 操作，提供字段管理
+    和记录的增删改查功能。多维表格是飞书的结构化数据存储产品，
+    类似于在线数据库。
+
+主要功能：
+    1. 字段管理（获取字段列表、创建新字段）
+    2. 记录查询（搜索记录、获取全部记录）
+    3. 记录创建（批量创建）
+    4. 记录更新（批量更新）
+    5. 记录删除（批量删除）
+
+核心类：
+    BitableAPI:
+        飞书多维表格 API 客户端，封装所有多维表格相关的 API 调用。
+
+API 限制常量：
+    - MAX_SEARCH_PAGE_SIZE: 100（搜索接口每页最大记录数）
+    - MAX_BATCH_CREATE_SIZE: 1000（批量创建每次最大记录数）
+    - MAX_BATCH_UPDATE_SIZE: 1000（批量更新每次最大记录数）
+    - MAX_BATCH_DELETE_SIZE: 500（批量删除每次最大记录数）
+
+字段类型编码：
+    1  - 多行文本
+    2  - 数字
+    3  - 单选
+    4  - 多选
+    5  - 日期
+    7  - 复选框
+    11 - 人员
+    15 - 超链接
+    17 - 附件
+    19 - 单向关联
+    21 - 查找引用
+    22 - 公式
+    23 - 双向关联
+
+API 端点（基础路径：https://open.feishu.cn/open-apis/bitable/v1）：
+    字段：
+        GET  /apps/{app_token}/tables/{table_id}/fields - 获取字段列表
+        POST /apps/{app_token}/tables/{table_id}/fields - 创建字段
+    记录：
+        POST /apps/{app_token}/tables/{table_id}/records/search - 搜索记录
+        POST /apps/{app_token}/tables/{table_id}/records/batch_create - 批量创建
+        POST /apps/{app_token}/tables/{table_id}/records/batch_update - 批量更新
+        POST /apps/{app_token}/tables/{table_id}/records/batch_delete - 批量删除
+
+使用示例：
+    >>> from api import FeishuAuth, BitableAPI
+    >>> 
+    >>> auth = FeishuAuth(app_id, app_secret)
+    >>> api = BitableAPI(auth)
+    >>> 
+    >>> # 获取字段列表
+    >>> fields = api.list_fields(app_token, table_id)
+    >>> 
+    >>> # 创建字段
+    >>> api.create_field(app_token, table_id, "姓名", field_type=1)
+    >>> 
+    >>> # 获取所有记录
+    >>> records = api.get_all_records(app_token, table_id)
+    >>> 
+    >>> # 批量创建记录
+    >>> new_records = [{"fields": {"姓名": "张三", "年龄": 25}}]
+    >>> api.batch_create_records(app_token, table_id, new_records)
+
+分页处理：
+    搜索记录接口支持分页，使用 page_token 实现：
+    1. 首次请求不传 page_token
+    2. 响应中 has_more=true 时，使用返回的 page_token 继续请求
+    3. has_more=false 时表示已获取全部数据
+    
+    get_all_records 方法已封装完整的分页逻辑。
+
+性能优化参数：
+    - ignore_consistency_check: 跳过一致性检查，提高写入性能
+    - client_token: 幂等性标识，防止重复创建
+
+依赖关系：
+    内部模块：
+        - api.auth: 认证管理（FeishuAuth）
+        - api.base: 网络请求（RetryableAPIClient）
+    外部依赖：
+        - uuid: 生成幂等性标识
+        - logging: 日志记录
+
+注意事项：
+    1. 批量操作数量超过限制会返回失败
+    2. 字段名称在表格内必须唯一
+    3. 创建记录时字段名必须已存在
+    4. 删除记录需要 record_id，不支持按条件删除
+
+作者: XTF Team
+版本: 1.7.3+
+更新日期: 2026-01-24
 """
 
 import uuid

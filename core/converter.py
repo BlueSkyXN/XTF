@@ -2,7 +2,79 @@
 # -*- coding: utf-8 -*-
 """
 统一数据转换模块
-提供多维表格和电子表格的数据转换功能
+
+模块概述：
+    此模块提供 XTF 工具的数据转换功能，负责在 Excel/CSV 数据与飞书
+    API 数据格式之间进行转换。支持多维表格和电子表格两种目标类型，
+    提供智能类型检测、值转换、格式化等功能。
+
+主要功能：
+    1. 数据类型智能检测（数字、日期、布尔、选择等）
+    2. 值格式转换（Excel值 ↔ 飞书API格式）
+    3. 字段类型推荐（基于数据分析）
+    4. DataFrame 与记录列表互转
+    5. 列号与字母转换（A=1, Z=26, AA=27...）
+    6. 索引值哈希计算（用于记录匹配）
+
+核心类：
+    ConversionStats (TypedDict):
+        转换统计信息结构，记录成功/失败数量和警告信息
+    
+    DataConverter:
+        统一数据转换器，根据目标类型提供不同的转换策略
+
+字段类型策略：
+    - raw: 原值策略，不做任何转换，保持原始数据
+    - base: 基础策略，仅支持文本/数字/日期三种类型（推荐默认）
+    - auto: 自动策略，增加 Excel 验证检测（单选/多选）
+    - intelligence: 智能策略，基于置信度算法的高级类型推断
+
+飞书字段类型映射：
+    1  - 文本（多行文本）
+    2  - 数字
+    3  - 单选
+    4  - 多选
+    5  - 日期
+    7  - 复选框（布尔）
+    11 - 人员
+    15 - 超链接
+    17 - 附件
+
+类型检测算法：
+    1. 基于正则表达式的模式匹配
+    2. 基于数据分布的置信度计算
+    3. 基于 Excel 单元格验证信息
+    4. 多策略综合评估
+
+使用示例：
+    # 多维表格模式
+    >>> converter = DataConverter(TargetType.BITABLE)
+    >>> records = converter.df_to_records(dataframe, field_types)
+    >>> hash_val = converter.get_index_value_hash(row, "ID")
+    
+    # 电子表格模式
+    >>> converter = DataConverter(TargetType.SHEET)
+    >>> values = converter.df_to_values(dataframe, include_headers=True)
+    >>> df = converter.values_to_df(values)
+
+依赖关系：
+    内部模块：
+        - core.config: 目标类型枚举（TargetType）
+    外部依赖：
+        - pandas: 数据处理
+        - re: 正则表达式
+        - hashlib: 哈希计算
+        - datetime: 日期时间处理
+
+注意事项：
+    1. 空值会被转换为 None 或空字符串（取决于目标类型）
+    2. 日期格式支持多种中文和英文格式
+    3. 数字字符串中的千分位逗号会被自动处理
+    4. 布尔值支持中文（是/否）和英文（true/false/yes/no）
+
+作者: XTF Team
+版本: 1.7.3+
+更新日期: 2026-01-24
 """
 
 import re

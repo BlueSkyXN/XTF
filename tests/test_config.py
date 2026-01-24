@@ -2,7 +2,59 @@
 # -*- coding: utf-8 -*-
 """
 配置模块测试
-测试 core/config.py 中的配置管理功能
+
+模块概述：
+    此模块测试 core/config.py 中的配置管理功能，包括枚举类型、
+    数据类、配置管理器以及示例配置生成等。
+
+测试覆盖：
+    枚举类型测试（TestEnums）：
+        - TargetType 枚举值
+        - SyncMode 枚举值
+        - FieldTypeStrategy 枚举值
+    
+    选择性同步配置测试（TestSelectiveSyncConfig）：
+        - 默认值验证
+        - 自定义值验证
+    
+    同步配置测试（TestSyncConfig）：
+        - 多维表格配置创建
+        - 电子表格配置创建
+        - 缺失必需参数验证
+        - 字符串到枚举自动转换
+        - SelectiveSync 与 Clone 模式互斥
+        - 列名验证（重复、空值、None）
+        - max_gap_for_merge 范围验证
+    
+    配置管理器测试（TestConfigManager）：
+        - 从文件加载配置
+        - 加载不存在的文件
+        - 加载无效 YAML 文件
+        - 保存配置到文件
+    
+    示例配置创建测试（TestCreateSampleConfig）：
+        - 多维表格示例配置
+        - 电子表格示例配置
+        - 已存在文件不覆盖
+    
+    目标类型描述测试（TestGetTargetDescription）：
+        - 多维表格描述
+        - 电子表格描述
+
+测试策略：
+    - 使用 pytest fixtures 提供测试数据
+    - 使用临时目录进行文件操作测试
+    - 验证异常信息的准确性
+
+依赖关系：
+    测试目标：
+        - core.config 模块的所有类和函数
+    测试工具：
+        - pytest
+        - yaml
+
+作者: XTF Team
+版本: 1.7.3+
 """
 
 from pathlib import Path

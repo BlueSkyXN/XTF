@@ -2,7 +2,75 @@
 # -*- coding: utf-8 -*-
 """
 控制模块测试
-测试 core/control.py 中的重试和频控功能
+
+模块概述：
+    此模块测试 core/control.py 中的重试和频控功能，包括各种
+    重试策略、频控策略、请求控制器以及全局控制器单例。
+
+测试覆盖：
+    重试配置测试（TestRetryConfig）：
+        - 默认值验证
+        - 自定义值验证
+    
+    指数退避重试测试（TestExponentialBackoffRetry）：
+        - 延迟计算（2^n 增长）
+        - 最大等待时间限制
+        - 重试判断逻辑
+    
+    线性增长重试测试（TestLinearGrowthRetry）：
+        - 延迟计算（线性增长）
+        - 最大等待时间限制
+    
+    固定等待重试测试（TestFixedWaitRetry）：
+        - 固定延迟验证
+    
+    固定等待频控测试（TestFixedWaitRateLimit）：
+        - 立即执行判断
+        - 延迟后执行
+        - 延迟前阻止
+        - 等待方法
+        - 重置方法
+    
+    滑动窗口频控测试（TestSlidingWindowRateLimit）：
+        - 限制内执行
+        - 达到限制阻止
+        - 窗口过期后执行
+        - 重置方法
+    
+    固定窗口频控测试（TestFixedWindowRateLimit）：
+        - 新窗口执行
+        - 达到限制阻止
+        - 重置方法
+    
+    请求控制器测试（TestRequestController）：
+        - 成功执行请求
+        - 带重试执行
+        - 超过最大重试
+        - 带频控执行
+    
+    全局控制器测试（TestGlobalRequestController）：
+        - 单例模式验证
+        - 从配置创建（各种策略组合）
+        - 获取 API 客户端
+    
+    重试策略等待方法测试（TestRetryStrategyWait）：
+        - 等待返回值
+        - 最大等待时间遵守
+
+测试策略：
+    - 使用实际时间测量验证延迟
+    - 使用 mock 模拟异常场景
+    - 验证单例模式行为
+
+依赖关系：
+    测试目标：
+        - core.control 模块的所有类
+    测试工具：
+        - pytest
+        - time
+
+作者: XTF Team
+版本: 1.7.3+
 """
 
 import time

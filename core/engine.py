@@ -2,7 +2,84 @@
 # -*- coding: utf-8 -*-
 """
 统一同步引擎模块
-提供多维表格和电子表格的统一同步引擎
+
+模块概述：
+    此模块实现了 XTF 工具的核心同步逻辑，提供统一的同步引擎类
+    XTFSyncEngine，支持多维表格（Bitable）和电子表格（Sheet）
+    两种目标类型的数据同步。
+
+主要功能：
+    1. 统一的同步入口和流程控制
+    2. 多维表格字段管理（自动创建缺失字段）
+    3. 四种同步模式的具体实现
+    4. 批量数据处理与分块上传
+    5. 选择性列同步支持
+    6. 日志系统配置和管理
+    7. 全局请求控制器集成
+
+核心类：
+    XTFSyncEngine:
+        统一同步引擎，根据配置的目标类型自动选择对应的 API 客户端
+        和同步策略，执行数据同步操作。
+
+同步模式说明：
+    - full（全量同步）：
+        对比索引列，已存在的记录更新，不存在的新增
+        
+    - incremental（增量同步）：
+        仅新增本地有而远程没有的记录，跳过已存在记录
+        
+    - overwrite（覆盖同步）：
+        先删除远程表中与本地数据索引匹配的记录，再新增全部本地数据
+        
+    - clone（克隆同步）：
+        清空远程表全部数据，然后完整写入本地数据
+
+同步流程：
+    1. 初始化日志和 API 客户端
+    2. 获取/创建远程表字段（Bitable）
+    3. 获取远程现有数据
+    4. 根据同步模式执行相应操作
+    5. 批量处理数据（分块、重试、错误处理）
+    6. 返回同步结果
+
+依赖关系：
+    内部模块：
+        - core.config: 配置类（SyncConfig, SyncMode, TargetType）
+        - core.converter: 数据转换（DataConverter）
+        - api: API客户端（FeishuAuth, BitableAPI, SheetAPI等）
+    外部依赖：
+        - pandas: 数据处理
+        - logging: 日志记录
+
+性能优化：
+    1. 批量操作减少 API 调用次数
+    2. 预分块机制应对大数据量
+    3. 智能重试和频控策略
+    4. 选择性列同步减少数据传输
+
+错误处理：
+    - 三层数据上传保护机制
+    - 自动二分重试（针对请求过大错误）
+    - 详细的错误日志和状态反馈
+
+使用示例：
+    >>> from core.config import SyncConfig, TargetType
+    >>> from core.engine import XTFSyncEngine
+    >>> 
+    >>> config = SyncConfig(...)
+    >>> engine = XTFSyncEngine(config)
+    >>> success = engine.sync(dataframe)
+
+注意事项：
+    1. 同步前会自动设置日志，日志文件保存在 logs/ 目录
+    2. Bitable 模式支持自动创建缺失字段
+    3. 大数据量建议调整 batch_size 参数
+    4. clone 模式会清空远程表，请谨慎使用
+
+作者: XTF Team
+版本: 1.7.3+
+更新日期: 2026-01-24
 """
 
 import pandas as pd

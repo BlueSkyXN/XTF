@@ -2,7 +2,74 @@
 # -*- coding: utf-8 -*-
 """
 统一配置管理模块
-提供多维表格和电子表格的统一配置管理
+
+模块概述：
+    此模块提供 XTF 工具的完整配置管理功能，支持多维表格（Bitable）
+    和电子表格（Sheet）两种目标类型的配置，实现配置的统一管理和验证。
+
+主要功能：
+    1. 配置数据结构定义（枚举、数据类）
+    2. 配置文件的读取和保存（YAML格式）
+    3. 命令行参数解析
+    4. 配置验证和默认值处理
+    5. 高级控制器的创建
+
+核心类：
+    枚举类型：
+        - FieldTypeStrategy: 字段类型选择策略（raw/base/auto/intelligence）
+        - SyncMode: 同步模式（full/incremental/overwrite/clone）
+        - TargetType: 目标类型（bitable/sheet）
+    
+    配置数据类：
+        - SelectiveSyncConfig: 选择性同步配置
+        - SyncConfig: 统一同步配置（主配置类）
+    
+    管理器类：
+        - ConfigManager: 配置管理器（静态方法集合）
+
+配置优先级：
+    命令行参数 > 配置文件 > 智能推断 > 系统默认值
+
+配置验证规则：
+    - Bitable模式：必须提供 app_token 和 table_id
+    - Sheet模式：必须提供 spreadsheet_token 和 sheet_id
+    - SelectiveSync：与 Clone 模式互斥
+    - 列名验证：不允许重复、空值、None
+
+使用示例：
+    # 从配置文件创建配置
+    >>> config = ConfigManager.create_config()
+    
+    # 创建示例配置文件
+    >>> create_sample_config("config.yaml", TargetType.BITABLE)
+    
+    # 直接创建配置对象
+    >>> config = SyncConfig(
+    ...     file_path="data.xlsx",
+    ...     app_id="cli_xxx",
+    ...     app_secret="xxx",
+    ...     target_type=TargetType.SHEET,
+    ...     spreadsheet_token="xxx",
+    ...     sheet_id="xxx"
+    ... )
+
+依赖关系：
+    内部依赖：
+        - core.control: 高级控制器（GlobalRequestController）
+    外部依赖：
+        - yaml: YAML配置文件解析
+        - argparse: 命令行参数解析
+        - dataclasses: 数据类支持
+
+注意事项：
+    1. SyncConfig 的 __post_init__ 会自动进行类型转换和验证
+    2. Intelligence 策略仅支持配置文件设置，不支持命令行
+    3. SelectiveSync 的 max_gap_for_merge 上限为 50
+    4. 配置文件支持 UTF-8 编码的中文内容
+
+作者: XTF Team
+版本: 1.7.3+
+更新日期: 2026-01-24
 """
 
 import argparse

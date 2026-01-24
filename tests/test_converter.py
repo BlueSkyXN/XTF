@@ -2,7 +2,99 @@
 # -*- coding: utf-8 -*-
 """
 数据转换模块测试
-测试 core/converter.py 中的数据转换功能
+
+模块概述：
+    此模块测试 core/converter.py 中的数据转换功能，包括类型检测、
+    值转换、DataFrame 与记录格式转换等。
+
+测试覆盖：
+    初始化测试（TestDataConverterInit）：
+        - 多维表格模式初始化
+        - 电子表格模式初始化
+        - 统计重置
+    
+    索引值哈希测试（TestIndexValueHash）：
+        - 哈希计算
+        - 无索引列返回 None
+        - 缺失列返回 None
+    
+    记录索引构建测试（TestBuildRecordIndex）：
+        - 正常构建
+        - 无索引列处理
+        - 富文本格式处理
+    
+    类型检测测试（TestTypeDetection）：
+        - 数字字符串检测
+        - 日期字符串检测
+        - 增强日期检测
+        - 时间戳检测
+    
+    Excel 列数据分析测试（TestAnalyzeExcelColumnData）：
+        - 数字列分析
+        - 字符串列分析
+        - 空列分析
+    
+    字段类型策略测试（TestFieldTypeStrategies）：
+        - RAW 策略
+        - BASE 策略（数字、日期、低置信度）
+        - AUTO 策略（有/无验证）
+    
+    强制转换测试（TestForceConversion）：
+        - 转数字
+        - 转布尔值
+        - 转单选值
+        - 转多选值
+        - 转时间戳
+    
+    安全字段值转换测试（TestConvertFieldValueSafe）：
+        - null 值转换
+        - 带字段类型转换
+        - 智能转换
+    
+    简单值转换测试（TestSimpleConvertValue）：
+        - 数字转换
+        - 字符串转换
+        - null 值转换
+    
+    列转换测试（TestColumnConversion）：
+        - 列号转字母
+        - 字母转列号
+    
+    DataFrame 转值列表测试（TestDfToValues）：
+        - 带表头转换
+        - 不带表头转换
+        - 选择特定列
+    
+    值列表转 DataFrame 测试（TestValuesToDf）：
+        - 正常转换
+        - 空值列表
+        - 清理空行
+    
+    范围字符串生成测试（TestGetRangeString）：
+        - 生成范围字符串
+    
+    字段类型名称测试（TestFieldTypeName）：
+        - 获取中文名称
+    
+    DataFrame 转记录测试（TestDfToRecords）：
+        - 多维表格模式
+        - 电子表格模式抛出错误
+
+测试策略：
+    - 使用 pytest fixtures 提供测试数据
+    - 验证边界条件和异常情况
+    - 覆盖各种数据类型
+
+依赖关系：
+    测试目标：
+        - core.converter.DataConverter
+    测试工具：
+        - pytest
+        - pandas
+        - hashlib
+
+作者: XTF Team
+版本: 1.7.3+
 """
 
 import pytest

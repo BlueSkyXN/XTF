@@ -1,8 +1,98 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-统一控制模块
-提供全局的重试和频控管理功能，兼容现有配置系统
+统一控制模块 - 高级重试与频控策略
+
+模块概述：
+    此模块提供全局的重试和频率控制（频控）管理功能，实现了多种
+    重试策略和频控策略，支持灵活配置和组合使用，兼容现有配置系统。
+
+主要功能：
+    1. 重试策略实现（指数退避、线性增长、固定等待）
+    2. 频控策略实现（固定等待、滑动窗口、固定窗口）
+    3. 统一请求控制器（整合重试和频控）
+    4. 全局控制器单例（线程安全）
+    5. 增强的 API 客户端
+
+重试策略详解：
+    ExponentialBackoffRetry（指数退避）：
+        延迟时间按指数增长，适合应对突发限流
+        delay = initial_delay × multiplier^attempt
+        示例：0.5s → 1s → 2s → 4s → 8s
+    
+    LinearGrowthRetry（线性增长）：
+        延迟时间线性增长，适合稳定限流场景
+        delay = initial_delay + increment × attempt
+        示例：0.5s → 1s → 1.5s → 2s → 2.5s
+    
+    FixedWaitRetry（固定等待）：
+        延迟时间恒定，适合已知限流间隔的场景
+        delay = initial_delay（恒定）
+        示例：1s → 1s → 1s → 1s
+
+频控策略详解：
+    FixedWaitRateLimit（固定等待频控）：
+        每次请求后等待固定时间
+        适合：简单场景，API 有明确的调用间隔要求
+    
+    SlidingWindowRateLimit（滑动时间窗频控）：
+        在滑动的时间窗口内限制请求数量
+        适合：需要平滑请求分布的场景
+        特点：窗口随时间滑动，更精确的限流
+    
+    FixedWindowRateLimit（固定时间窗频控）：
+        在固定的时间窗口内限制请求数量
+        适合：API 按固定周期重置配额的场景
+        特点：窗口边界固定，实现简单
+
+配置示例（config.yaml）：
+    enable_advanced_control: true
+    retry_strategy_type: "exponential_backoff"
+    retry_initial_delay: 0.5
+    retry_multiplier: 2.0
+    retry_max_wait_time: 30.0
+    rate_limit_strategy_type: "sliding_window"
+    rate_limit_window_size: 1.0
+    rate_limit_max_requests: 10
+
+使用示例：
+    # 创建控制器
+    >>> from core.control import GlobalRequestController
+    >>> controller = GlobalRequestController.create_from_config(
+    ...     retry_type="exponential_backoff",
+    ...     retry_config={"initial_delay": 0.5, "max_retries": 3},
+    ...     rate_limit_type="sliding_window",
+    ...     rate_limit_config={"window_size": 1.0, "max_requests": 10}
+    ... )
+    
+    # 执行请求
+    >>> result = controller.get_controller().execute_request(api_call)
+
+设计模式：
+    - 策略模式：重试和频控策略可灵活替换
+    - 单例模式：全局控制器确保一致性
+    - 模板方法：基类定义接口，子类实现具体策略
+
+线程安全：
+    GlobalRequestController 使用 threading.Lock 保证线程安全，
+    适合多线程环境下的 API 调用控制。
+
+依赖关系：
+    外部依赖：
+        - time: 时间控制
+        - threading: 线程同步
+        - requests: HTTP请求（仅 EnhancedAPIClient）
+        - collections.deque: 滑动窗口数据结构
+
+注意事项：
+    1. 启用高级控制需设置 enable_advanced_control: true
+    2. 默认使用传统控制方式（向后兼容）
+    3. 重试次数过多可能导致整体延迟增加
+    4. 频控策略会阻塞当前线程
+
+作者: XTF Team
+版本: 1.7.3+
+更新日期: 2026-01-24
 """
 
 import time

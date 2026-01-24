@@ -1,12 +1,64 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-XTF (Excel To Feishu) - 统一入口
-支持多维表格和电子表格同步
+XTF (Excel To Feishu) - 统一入口模块
 
-文件格式支持：
-- Excel (.xlsx/.xls): ✅ 稳定支持，生产就绪
-- CSV (.csv): 🧪 实验性支持，测试阶段
+模块概述：
+    XTF（Excel To Feishu）是一款企业级数据同步工具，专门用于将本地Excel/CSV数据
+    同步到飞书平台。本模块作为程序的统一入口，整合了多维表格（Bitable）和电子表格
+    （Sheet）两种目标类型的同步功能。
+
+主要功能：
+    1. 命令行参数解析与配置管理
+    2. 数据文件读取与格式验证
+    3. 同步引擎初始化与执行
+    4. 日志系统配置
+    5. 用户交互与状态反馈
+
+支持的文件格式：
+    - Excel (.xlsx/.xls): ✅ 稳定支持，生产就绪
+      - 使用 Calamine 引擎（可选），性能提升 4-20 倍
+      - 支持 OpenPyXL 引擎作为备选
+    - CSV (.csv): 🧪 实验性支持，测试阶段
+      - 自动处理 UTF-8/GBK 编码
+      - 建议生产环境使用 Excel 格式
+
+支持的同步模式：
+    - full（全量同步）：更新已存在记录，新增不存在记录
+    - incremental（增量同步）：仅新增不存在的记录
+    - overwrite（覆盖同步）：删除已存在记录后新增
+    - clone（克隆同步）：清空远程表后完全重建
+
+使用示例：
+    # 基本用法（使用配置文件）
+    $ python XTF.py --target-type bitable --config config.yaml
+    
+    # 指定目标类型和同步模式
+    $ python XTF.py --target-type sheet --sync-mode full
+    
+    # 调试模式
+    $ python XTF.py --target-type bitable --log-level DEBUG
+
+依赖关系：
+    内部模块：
+        - core.config: 配置管理（SyncConfig, ConfigManager）
+        - core.engine: 同步引擎（XTFSyncEngine）
+        - core.reader: 文件读取（DataFileReader）
+        - utils.excel_reader: Excel引擎信息
+    外部依赖：
+        - pandas: 数据处理
+        - logging: 日志记录
+        - pathlib: 路径处理
+
+注意事项：
+    1. 首次运行时如果配置文件不存在，会自动生成示例配置
+    2. 命令行参数优先级高于配置文件
+    3. CSV 格式目前处于实验阶段，生产环境建议使用 Excel
+    4. 同步过程会在 logs/ 目录生成详细日志文件
+
+作者: XTF Team
+版本: 1.7.3+
+更新日期: 2026-01-24
 """
 
 import pandas as pd
@@ -28,7 +80,24 @@ from utils.excel_reader import print_engine_info
 
 
 def setup_logger():
-    """设置基础日志器"""
+    """
+    设置基础日志器
+    
+    初始化根日志器，配置控制台输出处理器和统一格式化器。
+    此函数确保日志系统只被初始化一次，避免重复添加处理器。
+    
+    日志格式：
+        时间戳 - 日志级别 - 消息内容
+        示例：2026-01-24 10:30:45,123 - INFO - 同步开始
+    
+    Returns:
+        logging.Logger: 配置好的根日志器实例
+    
+    注意：
+        - 默认日志级别为 INFO
+        - 实际运行时会根据配置文件或命令行参数调整日志级别
+        - 更详细的日志输出到 logs/ 目录的日志文件中
+    """
     logger = logging.getLogger()
     if not logger.handlers:
         handler = logging.StreamHandler()
@@ -40,7 +109,32 @@ def setup_logger():
 
 
 def main():
-    """主函数"""
+    """
+    主函数 - XTF程序入口点
+    
+    执行流程：
+        1. 初始化日志系统
+        2. 显示程序信息和 Excel 引擎状态
+        3. 解析目标类型（bitable/sheet）
+        4. 加载配置文件，若不存在则创建示例配置
+        5. 创建同步配置和引擎实例
+        6. 验证数据文件存在性和格式支持
+        7. 读取数据文件到 DataFrame
+        8. 执行数据同步
+        9. 输出同步结果和链接
+    
+    异常处理：
+        - KeyboardInterrupt: 用户中断（Ctrl+C），优雅退出
+        - Exception: 捕获所有其他异常，记录错误日志
+    
+    返回值：
+        无返回值，通过打印输出和日志记录同步状态
+    
+    注意：
+        - 配置优先级：命令行参数 > 配置文件 > 智能推断 > 系统默认
+        - CSV 文件会显示实验性警告
+        - 同步成功后会显示飞书文档链接
+    """
     logger = setup_logger()
 
     print("=" * 70)

@@ -1,12 +1,92 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-文件读取模块
-支持多种数据文件格式
+数据文件读取模块
+
+模块概述：
+    此模块提供统一的数据文件读取功能，支持多种文件格式的自动检测
+    和读取。作为 XTF 工具的输入层，负责将各种格式的数据文件转换
+    为 pandas DataFrame 供后续处理。
 
 格式支持状态：
-- Excel (.xlsx/.xls): ✅ 稳定支持，生产就绪（使用Calamine引擎优化性能）
-- CSV (.csv): 🧪 实验性支持，测试阶段
+    - Excel (.xlsx/.xls): ✅ 稳定支持，生产就绪
+        - 优先使用 Calamine 引擎（Rust实现，性能提升4-20倍）
+        - 自动降级到 OpenPyXL 引擎（Python实现，稳定可靠）
+    - CSV (.csv): 🧪 实验性支持，测试阶段
+        - 自动处理编码问题（UTF-8/GBK）
+        - 生产环境建议使用 Excel 格式
+
+主要功能：
+    1. 文件格式自动检测（基于扩展名）
+    2. Excel 文件智能读取（引擎自动选择）
+    3. CSV 文件编码自适应
+    4. 统一的错误处理
+    5. 格式支持查询
+
+核心类：
+    DataFileReader:
+        数据文件读取器，提供统一的文件读取接口。
+        根据文件扩展名自动选择合适的读取方式。
+
+读取流程：
+    1. 检查文件是否存在
+    2. 根据扩展名判断文件格式
+    3. 调用对应的读取方法
+    4. 返回 DataFrame 或抛出异常
+
+Excel 读取策略：
+    1. 优先尝试 Calamine 引擎（高性能）
+    2. Calamine 失败则降级到 OpenPyXL
+    3. 两者都失败则抛出异常
+
+CSV 编码处理：
+    1. 首先尝试 UTF-8 编码
+    2. UTF-8 失败则尝试 GBK（中文Windows Excel导出常用）
+    3. 两者都失败则抛出异常并提示手动指定编码
+
+使用示例：
+    >>> from core.reader import DataFileReader
+    >>> reader = DataFileReader()
+    >>> 
+    >>> # 读取 Excel 文件
+    >>> df = reader.read_file(Path('data.xlsx'))
+    >>> 
+    >>> # 读取 CSV 文件
+    >>> df = reader.read_file(Path('data.csv'))
+    >>> 
+    >>> # 带额外参数读取
+    >>> df = reader.read_file(Path('data.xlsx'), sheet_name='Sheet2')
+    >>> 
+    >>> # 检查格式支持
+    >>> if DataFileReader.is_supported(Path('file.xlsx')):
+    ...     df = reader.read_file(Path('file.xlsx'))
+
+类方法说明：
+    is_supported(file_path): 检查文件格式是否支持
+    get_supported_formats(): 获取支持的格式列表字符串
+
+依赖关系：
+    内部模块：
+        - utils.excel_reader: 智能Excel读取引擎（可选）
+    外部依赖：
+        - pandas: DataFrame 支持
+        - pathlib: 路径处理
+        - logging: 日志记录
+
+向后兼容性：
+    - Excel 读取逻辑与原有 pd.read_excel() 完全一致
+    - 不影响任何现有 Excel 处理功能
+    - 仅在输入层增加格式识别
+
+注意事项：
+    1. CSV 格式当前为实验性功能，生产环境请使用 Excel
+    2. 文件路径必须是 Path 对象
+    3. 读取失败会抛出相应异常（FileNotFoundError/ValueError）
+    4. 支持传递额外参数到底层 pandas 读取函数
+
+作者: XTF Team
+版本: 1.7.3+
+更新日期: 2026-01-24
 """
 
 import pandas as pd

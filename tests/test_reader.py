@@ -2,7 +2,68 @@
 # -*- coding: utf-8 -*-
 """
 文件读取模块测试
-测试 core/reader.py 中的文件读取功能
+
+模块概述：
+    此模块测试 core/reader.py 中的文件读取功能，包括支持的格式、
+    Excel 读取、CSV 读取以及各种边界情况。
+
+测试覆盖：
+    初始化测试（TestDataFileReaderInit）：
+        - 读取器初始化
+    
+    支持格式测试（TestSupportedFormats）：
+        - xlsx 格式支持
+        - xls 格式支持
+        - csv 格式支持
+        - 获取支持格式字符串
+    
+    格式支持检查测试（TestIsSupported）：
+        - xlsx 支持
+        - xls 支持
+        - csv 支持
+        - 不支持的格式（txt, json, xml）
+        - 大小写不敏感
+    
+    Excel 文件读取测试（TestReadExcel）：
+        - 读取 xlsx 文件
+        - 文件不存在异常
+        - 带额外参数读取
+    
+    CSV 文件读取测试（TestReadCsv）：
+        - 读取 CSV 文件
+        - UTF-8 编码
+        - GBK 编码
+        - 带额外参数读取
+    
+    不支持格式读取测试（TestReadUnsupportedFormat）：
+        - 读取 txt 格式
+        - 读取 json 格式
+    
+    文件格式自动检测测试（TestReadFileAutoDetection）：
+        - 自动检测 xlsx
+        - 自动检测 csv
+    
+    边界情况测试（TestEdgeCases）：
+        - 空 Excel 文件
+        - 空 CSV 文件
+        - 特殊字符
+        - 大文件
+        - 不同分隔符的 CSV
+
+测试策略：
+    - 使用 pytest 的 tmp_path fixture 创建临时文件
+    - 验证返回的 DataFrame 内容
+    - 测试异常情况和错误消息
+
+依赖关系：
+    测试目标：
+        - core.reader.DataFileReader
+    测试工具：
+        - pytest
+        - pandas
+
+作者: XTF Team
+版本: 1.7.3+
 """
 
 import pytest

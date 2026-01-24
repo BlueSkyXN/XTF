@@ -2,7 +2,80 @@
 # -*- coding: utf-8 -*-
 """
 基础网络层模块
-提供HTTP请求重试机制和频率限制功能，支持新的统一控制系统
+
+模块概述：
+    此模块提供 HTTP 请求的基础功能，包括频率限制和自动重试机制。
+    作为所有飞书 API 调用的底层支撑，确保请求的稳定性和可靠性。
+
+主要功能：
+    1. 接口调用频率限制（防止触发 API 限流）
+    2. 自动重试机制（处理临时性错误）
+    3. 支持新的统一控制系统（可选）
+    4. 指数退避策略（应对服务器繁忙）
+
+核心类：
+    RateLimiter:
+        接口频率限制器，通过控制调用间隔确保不超过 API 限流阈值。
+        使用简单的时间戳记录实现最小间隔控制。
+    
+    RetryableAPIClient:
+        可重试的 API 客户端，自动处理常见错误并重试：
+        - HTTP 429（频率限制）：等待后重试
+        - HTTP 5xx（服务器错误）：指数退避后重试
+        - 网络异常：指数退避后重试
+
+重试策略：
+    采用指数退避算法，等待时间为 2^attempt 秒：
+    - 第1次重试：等待 1 秒
+    - 第2次重试：等待 2 秒
+    - 第3次重试：等待 4 秒
+    以此类推...
+
+与高级控制系统的集成：
+    当配置了全局控制器时（enable_advanced_control=true），
+    RetryableAPIClient 会使用 core.control 中定义的高级策略，
+    否则使用传统的重试和频控机制（向后兼容）。
+
+使用示例：
+    # 基本使用
+    >>> limiter = RateLimiter(delay=0.5)  # 500ms间隔
+    >>> client = RetryableAPIClient(max_retries=3, rate_limiter=limiter)
+    >>> response = client.call_api("GET", "https://api.example.com/data")
+    
+    # 带参数的请求
+    >>> response = client.call_api(
+    ...     "POST",
+    ...     "https://api.example.com/create",
+    ...     json={"name": "test"},
+    ...     headers={"Authorization": "Bearer token"}
+    ... )
+
+配置参数：
+    RateLimiter:
+        - delay (float): 调用间隔时间，单位秒，默认 0.5
+    
+    RetryableAPIClient:
+        - max_retries (int): 最大重试次数，默认 3
+        - rate_limiter (RateLimiter): 频率限制器实例
+        - use_global_controller (bool): 是否使用全局控制器，默认 True
+
+依赖关系：
+    内部模块：
+        - core.control: 全局控制器（可选依赖）
+    外部依赖：
+        - requests: HTTP 请求库
+        - time: 时间控制
+        - logging: 日志记录
+
+注意事项：
+    1. 所有请求默认超时时间为 60 秒
+    2. 重试只针对可恢复的错误（429、5xx、网络异常）
+    3. 4xx 错误（除429外）不会触发重试
+    4. 全局控制器导入失败时会自动回退到传统模式
+
+作者: XTF Team
+版本: 1.7.3+
+更新日期: 2026-01-24
 """
 
 import time

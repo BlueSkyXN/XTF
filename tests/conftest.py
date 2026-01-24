@@ -2,7 +2,67 @@
 # -*- coding: utf-8 -*-
 """
 XTF 测试配置文件
-提供测试用的 fixtures 和公共配置
+
+模块概述：
+    此模块提供 pytest 测试框架的配置和共享 fixtures。Fixtures 是
+    pytest 的核心功能，用于提供测试所需的数据和对象，实现测试
+    代码的复用和隔离。
+
+主要功能：
+    1. 定义共享的测试 fixtures
+    2. 提供测试数据生成器
+    3. 管理临时文件和清理
+    4. 配置对象的工厂方法
+
+Fixtures 分类：
+    配置 Fixtures：
+        - sample_bitable_config: 多维表格测试配置
+        - sample_sheet_config: 电子表格测试配置
+        - sample_selective_sync_config: 选择性同步配置
+        - sample_config_dict: 配置字典
+    
+    数据 Fixtures：
+        - sample_dataframe: 基础测试 DataFrame
+        - sample_dataframe_with_types: 多类型测试 DataFrame
+        - sample_records: 飞书记录格式数据
+    
+    文件 Fixtures：
+        - temp_excel_file: 临时 Excel 文件
+        - temp_csv_file: 临时 CSV 文件
+        - temp_config_file: 临时配置文件
+
+使用示例：
+    # 在测试中使用 fixture
+    def test_something(sample_bitable_config):
+        config = sample_bitable_config
+        assert config.target_type == TargetType.BITABLE
+    
+    # 使用多个 fixtures
+    def test_sync(sample_sheet_config, sample_dataframe):
+        config = sample_sheet_config
+        df = sample_dataframe
+        # 执行测试...
+
+Fixture 作用域：
+    - function（默认）：每个测试函数创建新实例
+    - class：每个测试类创建一个实例
+    - module：每个模块创建一个实例
+    - session：整个测试会话创建一个实例
+
+临时文件处理：
+    使用 pytest 的 tmp_path fixture 创建临时目录，
+    测试结束后自动清理。
+
+依赖关系：
+    内部模块：
+        - core.config: 配置类
+    外部依赖：
+        - pytest: 测试框架
+        - pandas: 数据处理
+        - yaml: 配置文件
+
+作者: XTF Team
+版本: 1.7.3+
 """
 
 from pathlib import Path

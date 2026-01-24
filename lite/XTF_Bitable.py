@@ -1,9 +1,79 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-XTF (Excel To Feishu) - 本地表格同步到飞书多维表格工具
-支持四种同步模式：全量、增量、覆盖、克隆
-具备智能字段管理、频率限制、重试机制等企业级功能
+XTF_Bitable - 独立多维表格同步脚本（Legacy）
+
+模块概述：
+    这是 XTF 工具的独立多维表格同步脚本，包含完整的同步功能，
+    无需依赖其他模块即可运行。此脚本主要用于单文件部署场景
+    或 CI/CD 自动构建的独立二进制文件。
+
+⚠️ 注意：此为 Legacy 版本
+    推荐使用模块化版本：python XTF.py --target-type bitable
+    此脚本保留用于向后兼容和单文件部署需求。
+
+主要功能：
+    1. 本地 Excel 文件读取
+    2. 飞书认证和令牌管理
+    3. 多维表格字段管理
+    4. 四种同步模式实现
+    5. 批量记录操作
+    6. 频率限制和重试机制
+    7. 日志记录
+
+支持的同步模式：
+    - full（全量同步）：更新已存在，新增不存在
+    - incremental（增量同步）：仅新增不存在的记录
+    - overwrite（覆盖同步）：删除后新增
+    - clone（克隆同步）：清空后重建
+
+使用方法：
+    # 使用配置文件
+    $ python XTF_Bitable.py --config config.yaml
+    
+    # 命令行指定参数
+    $ python XTF_Bitable.py --file-path data.xlsx \\
+        --app-id cli_xxx --app-secret xxx \\
+        --app-token xxx --table-id xxx
+
+配置文件格式（YAML）：
+    file_path: data.xlsx
+    app_id: cli_xxx
+    app_secret: xxx
+    app_token: xxx
+    table_id: xxx
+    sync_mode: full
+    index_column: ID
+    batch_size: 500
+    rate_limit_delay: 0.5
+    max_retries: 3
+    create_missing_fields: true
+    log_level: INFO
+
+内置类：
+    - SyncMode: 同步模式枚举
+    - SyncConfig: 同步配置数据类
+    - RateLimiter: 频率限制器
+    - RetryableAPIClient: 可重试 API 客户端
+    - FeishuAuth: 飞书认证管理
+    - BitableAPI: 多维表格 API 封装
+    - XTFSyncer: 同步引擎
+
+与模块化版本的区别：
+    1. 所有代码在单文件中，无外部模块依赖
+    2. 不支持高级控制策略（重试/频控）
+    3. 不支持选择性列同步
+    4. 字段类型策略简化
+
+适用场景：
+    - 需要单文件部署
+    - CI/CD 构建独立可执行文件
+    - 环境限制无法安装完整包
+    - 快速原型验证
+
+作者: XTF Team
+版本: 1.7.3+ (Legacy)
+更新日期: 2026-01-24
 """
 
 import pandas as pd

@@ -2,7 +2,57 @@
 # -*- coding: utf-8 -*-
 """
 API 基础模块测试
-测试 api/base.py 中的 HTTP 客户端功能
+
+模块概述：
+    此模块测试 api/base.py 中的 HTTP 客户端功能，包括频率限制器
+    和可重试 API 客户端的各种场景。
+
+测试覆盖：
+    RateLimiter（频率限制器）：
+        - 默认延迟配置
+        - 自定义延迟配置
+        - 首次调用无需等待
+        - 强制执行调用间隔
+        - 足够时间后无需额外等待
+    
+    RetryableAPIClient（可重试 API 客户端）：
+        初始化测试：
+            - 默认参数值
+            - 自定义参数值
+        
+        API 调用测试：
+            - 成功调用
+            - 带参数调用
+            - 服务器错误重试
+            - 频率限制重试
+            - 最大重试次数
+            - 请求异常重试
+        
+        HTTP 方法测试：
+            - GET 方法
+            - POST 方法
+            - PUT 方法
+            - DELETE 方法
+        
+        指数退避测试：
+            - 退避时间验证
+
+测试策略：
+    - 使用 unittest.mock 模拟 HTTP 请求
+    - 使用 time.sleep 模拟验证等待时间
+    - 独立测试各个功能点
+
+依赖关系：
+    测试目标：
+        - api.base.RateLimiter
+        - api.base.RetryableAPIClient
+    测试工具：
+        - pytest
+        - unittest.mock
+        - requests
+
+作者: XTF Team
+版本: 1.7.3+
 """
 
 import time

@@ -1,8 +1,100 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-电子表格API模块
-提供飞书电子表格的读写操作功能
+电子表格 API 模块
+
+模块概述：
+    此模块封装了飞书电子表格（Sheets）的 API 操作，提供电子表格的
+    读取和写入功能。电子表格是飞书的在线表格产品，类似于 Excel Online
+    或 Google Sheets。
+
+主要功能：
+    1. 获取电子表格信息
+    2. 读取指定范围的数据
+    3. 写入数据（支持大数据量自动分块）
+    4. 批量单元格操作
+    5. 行列操作（清空、删除、追加）
+    6. 选择性列同步
+    7. 范围优化（合并相邻列）
+
+核心类：
+    SheetAPI:
+        飞书电子表格 API 客户端，封装所有电子表格相关的 API 调用。
+        支持配置起始位置（start_row, start_column）。
+
+写入策略：
+    1. 预分块：将大数据量按行和列预先分割
+    2. 自动二分重试：遇到"请求过大"错误时自动缩小批次
+    3. 频率控制：请求间自动添加延迟避免限流
+
+范围表示法：
+    使用 A1 表示法：{sheet_id}!{start_col}{start_row}:{end_col}{end_row}
+    示例：Sheet1!A1:C10 表示 Sheet1 工作表的 A1 到 C10 区域
+
+列号转换：
+    A=1, B=2, ..., Z=26, AA=27, AB=28, ...
+    提供 column_letter_to_number 和 column_number_to_letter 方法
+
+API 端点（基础路径：https://open.feishu.cn/open-apis/sheets）：
+    信息：
+        GET  /v3/spreadsheets/{token} - 获取电子表格信息
+    数据：
+        GET  /v2/spreadsheets/{token}/values/{range} - 读取数据
+        PUT  /v2/spreadsheets/{token}/values - 写入数据
+        POST /v2/spreadsheets/{token}/values_batch_update - 批量更新
+    行列：
+        POST /v2/spreadsheets/{token}/insert_dimension_range - 插入行/列
+        DELETE /v2/spreadsheets/{token}/dimension_range - 删除行/列
+
+错误码处理：
+    - 90227: 请求过大（自动触发二分重试）
+    - 其他错误码按标准流程处理
+
+使用示例：
+    >>> from api import FeishuAuth, SheetAPI
+    >>> 
+    >>> auth = FeishuAuth(app_id, app_secret)
+    >>> api = SheetAPI(auth, start_row=1, start_column="A")
+    >>> 
+    >>> # 获取表格信息
+    >>> info = api.get_sheet_info(spreadsheet_token)
+    >>> 
+    >>> # 读取数据
+    >>> data = api.get_sheet_data(spreadsheet_token, "Sheet1!A1:C10")
+    >>> 
+    >>> # 写入数据
+    >>> values = [["姓名", "年龄"], ["张三", 25], ["李四", 30]]
+    >>> api.write_sheet_data(spreadsheet_token, sheet_id, values)
+
+选择性列同步：
+    支持只同步指定的列，而非全部数据：
+    1. 配置 selective_sync.columns 指定要同步的列名
+    2. 系统自动计算列范围并优化（合并相邻列）
+    3. 仅更新指定列的数据，保留其他列不变
+
+性能特性：
+    - 自动分块：大数据按 row_batch_size 和 col_batch_size 分块
+    - 二分重试：请求过大时自动减半批次大小
+    - 范围优化：相邻列合并为连续范围减少 API 调用
+    - 并行写入：支持配置写入间隔控制并发
+
+依赖关系：
+    内部模块：
+        - api.auth: 认证管理（FeishuAuth）
+        - api.base: 网络请求（RetryableAPIClient）
+    外部依赖：
+        - time: 延迟控制
+        - logging: 日志记录
+
+注意事项：
+    1. 行号从 1 开始（1-based）
+    2. 写入空值会清除单元格内容
+    3. 大数据量写入建议调整 batch_size
+    4. clone 模式会清空整个工作表
+
+作者: XTF Team
+版本: 1.7.3+
+更新日期: 2026-01-24
 """
 
 import logging

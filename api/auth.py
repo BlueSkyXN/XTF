@@ -2,7 +2,74 @@
 # -*- coding: utf-8 -*-
 """
 飞书认证模块
-负责获取和管理飞书访问令牌
+
+模块概述：
+    此模块负责飞书开放平台的认证管理，包括获取、缓存和刷新
+    租户访问令牌（tenant_access_token）。所有飞书 API 调用
+    都需要通过此模块获取认证信息。
+
+主要功能：
+    1. 获取租户访问令牌
+    2. 令牌缓存和自动刷新
+    3. 生成 API 调用所需的认证头
+
+核心类：
+    FeishuAuth:
+        飞书认证管理器，负责管理应用的认证生命周期。
+        使用自建应用的 app_id 和 app_secret 获取令牌。
+
+认证流程：
+    1. 使用 app_id 和 app_secret 调用飞书认证接口
+    2. 获取 tenant_access_token 和过期时间
+    3. 缓存令牌，在过期前 5 分钟自动刷新
+    4. 为 API 调用提供 Bearer Token 认证头
+
+令牌管理策略：
+    - 首次调用时获取新令牌
+    - 令牌有效期内直接返回缓存的令牌
+    - 令牌即将过期（5分钟内）时自动刷新
+    - 默认令牌有效期为 2 小时（7200秒）
+
+API 端点：
+    获取令牌：POST https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal
+
+使用示例：
+    # 初始化认证管理器
+    >>> auth = FeishuAuth(app_id="cli_xxx", app_secret="xxx")
+    >>> 
+    >>> # 获取访问令牌
+    >>> token = auth.get_tenant_access_token()
+    >>> 
+    >>> # 获取认证头（推荐方式）
+    >>> headers = auth.get_auth_headers()
+    >>> # headers = {
+    >>> #     "Authorization": "Bearer xxx",
+    >>> #     "Content-Type": "application/json; charset=utf-8"
+    >>> # }
+
+错误处理：
+    - 认证失败会抛出包含错误码和错误信息的异常
+    - 响应解析失败会抛出包含 HTTP 状态码的异常
+    - 常见错误码：
+        - 99991663: app_id 不存在
+        - 99991664: app_secret 错误
+        - 10003: 应用未启用
+
+依赖关系：
+    内部模块：
+        - api.base: RetryableAPIClient, RateLimiter
+    外部依赖：
+        - logging: 日志记录
+        - datetime: 时间处理
+
+安全注意事项：
+    1. app_secret 是敏感信息，不要提交到代码仓库
+    2. 令牌应妥善保管，不要在日志中输出完整令牌
+    3. 建议使用环境变量或配置文件管理凭据
+
+作者: XTF Team
+版本: 1.7.3+
+更新日期: 2026-01-24
 """
 
 import logging
