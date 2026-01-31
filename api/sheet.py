@@ -136,11 +136,33 @@ class SheetAPI:
         self.start_col_num = self.column_letter_to_number(start_column)
 
     def _validate_spreadsheet_token(self, spreadsheet_token: str) -> str:
-        """验证电子表格令牌格式，防止 SSRF 和路径遍历攻击"""
+        """
+        验证电子表格令牌格式，防止 SSRF 和路径遍历攻击
+        
+        Args:
+            spreadsheet_token: 电子表格令牌
+        
+        Returns:
+            str: 验证通过的令牌
+        
+        Raises:
+            ValidationError: 当令牌格式无效时
+        """
         return validate_feishu_spreadsheet_token(spreadsheet_token)
 
     def _validate_sheet_id(self, sheet_id: str) -> str:
-        """验证工作表 ID 格式，防止 SSRF 和路径遍历攻击"""
+        """
+        验证工作表 ID 格式，防止 SSRF 和路径遍历攻击
+        
+        Args:
+            sheet_id: 工作表 ID
+        
+        Returns:
+            str: 验证通过的 ID
+        
+        Raises:
+            ValidationError: 当 ID 格式无效时
+        """
         return validate_feishu_sheet_id(sheet_id)
 
     def get_sheet_info(self, spreadsheet_token: str) -> Dict[str, Any]:

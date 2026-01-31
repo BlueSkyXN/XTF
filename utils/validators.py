@@ -54,11 +54,13 @@ def validate_token(token: str, token_type: str = "token") -> str:
         'abc123_def-ghi'
         >>> validate_token("../../../etc", "app_token")  # 抛出 ValidationError
     """
-    if not token:
-        raise ValidationError(f"无效的 {token_type}: 不能为空")
-    
+    # 首先检查类型
     if not isinstance(token, str):
         raise ValidationError(f"无效的 {token_type}: 必须是字符串类型")
+    
+    # 然后检查是否为空
+    if not token:
+        raise ValidationError(f"无效的 {token_type}: 不能为空")
     
     # 检查是否包含路径遍历序列
     dangerous_patterns = ['..', '/', '\\', '%2e', '%2f', '%5c']

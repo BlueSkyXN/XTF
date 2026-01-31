@@ -70,8 +70,16 @@ class TestValidateToken:
 
     def test_none_token_rejected(self):
         """测试 None 令牌被拒绝"""
-        with pytest.raises(ValidationError, match="不能为空"):
+        with pytest.raises(ValidationError, match="必须是字符串类型"):
             validate_token(None, "test")
+
+    def test_non_string_token_rejected(self):
+        """测试非字符串类型令牌被拒绝"""
+        with pytest.raises(ValidationError, match="必须是字符串类型"):
+            validate_token(123, "test")
+        
+        with pytest.raises(ValidationError, match="必须是字符串类型"):
+            validate_token(["abc"], "test")
 
     def test_path_traversal_rejected(self):
         """测试路径遍历被拒绝"""
