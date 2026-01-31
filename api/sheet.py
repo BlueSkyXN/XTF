@@ -103,6 +103,7 @@ from typing import Dict, Any, List, Optional, Tuple
 
 from .auth import FeishuAuth
 from .base import RetryableAPIClient
+from utils.validators import validate_feishu_spreadsheet_token, validate_feishu_sheet_id
 
 
 class SheetAPI:
@@ -134,6 +135,14 @@ class SheetAPI:
         self.start_column = start_column
         self.start_col_num = self.column_letter_to_number(start_column)
 
+    def _validate_spreadsheet_token(self, spreadsheet_token: str) -> str:
+        """验证电子表格令牌格式，防止 SSRF 和路径遍历攻击"""
+        return validate_feishu_spreadsheet_token(spreadsheet_token)
+
+    def _validate_sheet_id(self, sheet_id: str) -> str:
+        """验证工作表 ID 格式，防止 SSRF 和路径遍历攻击"""
+        return validate_feishu_sheet_id(sheet_id)
+
     def get_sheet_info(self, spreadsheet_token: str) -> Dict[str, Any]:
         """
         获取电子表格信息
@@ -147,6 +156,9 @@ class SheetAPI:
         Raises:
             Exception: 当API调用失败时
         """
+        # 验证令牌格式，防止 SSRF 和路径遍历
+        spreadsheet_token = self._validate_spreadsheet_token(spreadsheet_token)
+        
         url = f"https://open.feishu.cn/open-apis/sheets/v3/spreadsheets/{spreadsheet_token}"
         headers = self.auth.get_auth_headers()
 
@@ -181,6 +193,9 @@ class SheetAPI:
         Raises:
             Exception: 当API调用失败时
         """
+        # 验证令牌格式，防止 SSRF 和路径遍历
+        spreadsheet_token = self._validate_spreadsheet_token(spreadsheet_token)
+        
         # 验证范围有效性
         is_valid, error_msg = self._validate_range(spreadsheet_token, range_str)
         if not is_valid:
@@ -231,6 +246,10 @@ class SheetAPI:
         Returns:
             是否写入成功
         """
+        # 验证令牌格式，防止 SSRF 和路径遍历
+        spreadsheet_token = self._validate_spreadsheet_token(spreadsheet_token)
+        sheet_id = self._validate_sheet_id(sheet_id)
+        
         if not values:
             self.logger.warning("写入数据为空")
             return True
@@ -332,6 +351,10 @@ class SheetAPI:
         Returns:
             是否追加成功
         """
+        # 验证令牌格式，防止 SSRF 和路径遍历
+        spreadsheet_token = self._validate_spreadsheet_token(spreadsheet_token)
+        sheet_id = self._validate_sheet_id(sheet_id)
+
         if not values:
             self.logger.warning("追加数据为空")
             return True
@@ -422,6 +445,10 @@ class SheetAPI:
         Returns:
             是否写入成功
         """
+        # 验证令牌格式，防止 SSRF 和路径遍历
+        spreadsheet_token = self._validate_spreadsheet_token(spreadsheet_token)
+        sheet_id = self._validate_sheet_id(sheet_id)
+        
         if not column_data:
             self.logger.warning("选择性写入数据为空")
             return True
@@ -553,6 +580,10 @@ class SheetAPI:
         Returns:
             是否清空成功
         """
+        # 验证令牌格式，防止 SSRF 和路径遍历
+        spreadsheet_token = self._validate_spreadsheet_token(spreadsheet_token)
+        sheet_id = self._validate_sheet_id(sheet_id)
+        
         # 构建完整范围字符串用于验证
         full_range = f"{sheet_id}!{range_str}"
 
@@ -598,6 +629,9 @@ class SheetAPI:
         Returns:
             是否设置成功
         """
+        # 验证令牌格式，防止 SSRF 和路径遍历
+        spreadsheet_token = self._validate_spreadsheet_token(spreadsheet_token)
+        
         if not options:
             self.logger.warning("下拉列表选项为空，跳过设置")
             return True
@@ -858,6 +892,9 @@ class SheetAPI:
         Returns:
             是否设置成功
         """
+        # 验证令牌格式，防止 SSRF 和路径遍历
+        spreadsheet_token = self._validate_spreadsheet_token(spreadsheet_token)
+        
         if not ranges:
             self.logger.warning("样式设置范围为空，跳过设置")
             return True

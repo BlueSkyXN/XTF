@@ -106,6 +106,7 @@ from typing import Dict, Any, List, Optional, Tuple, Union
 
 from .auth import FeishuAuth
 from .base import RetryableAPIClient
+from utils.validators import validate_feishu_app_token, validate_feishu_table_id
 
 
 class BitableAPI:
@@ -131,6 +132,10 @@ class BitableAPI:
         self.api_client = api_client or auth.api_client
         self.logger = logging.getLogger("XTF.bitable")
 
+    def _validate_tokens(self, app_token: str, table_id: str) -> Tuple[str, str]:
+        """验证令牌格式，防止 SSRF 和路径遍历攻击"""
+        return validate_feishu_app_token(app_token), validate_feishu_table_id(table_id)
+
     def list_fields(self, app_token: str, table_id: str) -> List[Dict[str, Any]]:
         """
         列出表格字段
@@ -145,6 +150,9 @@ class BitableAPI:
         Raises:
             Exception: 当API调用失败时
         """
+        # 验证令牌格式，防止 SSRF 和路径遍历
+        app_token, table_id = self._validate_tokens(app_token, table_id)
+        
         url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/fields"
         headers = self.auth.get_auth_headers()
 
@@ -197,6 +205,9 @@ class BitableAPI:
         Returns:
             是否创建成功
         """
+        # 验证令牌格式，防止 SSRF 和路径遍历
+        app_token, table_id = self._validate_tokens(app_token, table_id)
+        
         url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/fields"
         headers = self.auth.get_auth_headers()
         data = {"field_name": field_name, "type": field_type}
@@ -248,6 +259,9 @@ class BitableAPI:
         Raises:
             Exception: 当API调用失败时
         """
+        # 验证令牌格式，防止 SSRF 和路径遍历
+        app_token, table_id = self._validate_tokens(app_token, table_id)
+        
         url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/search"
         headers = self.auth.get_auth_headers()
 
@@ -364,6 +378,9 @@ class BitableAPI:
             )
             return False
 
+        # 验证令牌格式，防止 SSRF 和路径遍历
+        app_token, table_id = self._validate_tokens(app_token, table_id)
+        
         url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/batch_create"
         headers = self.auth.get_auth_headers()
 
@@ -423,6 +440,9 @@ class BitableAPI:
             )
             return False
 
+        # 验证令牌格式，防止 SSRF 和路径遍历
+        app_token, table_id = self._validate_tokens(app_token, table_id)
+        
         url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/batch_update"
         headers = self.auth.get_auth_headers()
 
@@ -480,6 +500,9 @@ class BitableAPI:
             )
             return False
 
+        # 验证令牌格式，防止 SSRF 和路径遍历
+        app_token, table_id = self._validate_tokens(app_token, table_id)
+        
         url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/batch_delete"
         headers = self.auth.get_auth_headers()
         data = {"records": record_ids}
