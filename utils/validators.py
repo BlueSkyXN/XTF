@@ -169,11 +169,15 @@ def validate_file_path(
         >>> validate_file_path(Path("data.xlsx"), [".xlsx", ".csv"])
         PosixPath('/path/to/data.xlsx')
     """
-    if not file_path:
+    if file_path is None:
         raise ValidationError("文件路径不能为空")
     
     # 转换为字符串进行检查
     path_str = str(file_path)
+    
+    # 检查是否为空路径
+    if not path_str or path_str == '.':
+        raise ValidationError("文件路径不能为空")
     
     # 检查路径遍历序列
     if '..' in path_str:
