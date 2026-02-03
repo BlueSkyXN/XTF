@@ -85,6 +85,65 @@ XTF 通过主入口 [`XTF.py`](XTF.py) 支持**多维表格**（bitable）和**�
 | start_row         | int     | 1      | ✅       | `--start-row` | 起始行号（1-based）         |
 | start_column      | str     | A      | ✅       | `--start-column` | 起始列号                    |
 
+### 电子表格读取渲染选项
+
+| 参数名                | 类型    | 默认值 | CLI 支持 | CLI 参数 | 说明                         |
+|-----------------------|---------|--------|----------|----------|------------------------------|
+| sheet_value_render_option | str | null | ❌ | 仅YAML | 值渲染选项：ToString/Formula/FormattedValue/UnformattedValue |
+| sheet_datetime_render_option | str | null | ❌ | 仅YAML | 日期渲染选项：FormattedString |
+
+**渲染选项说明**：
+- `ToString`: 返回纯文本（适合展示）
+- `Formula`: 返回公式文本（适合校验公式是否被改动）
+- `FormattedValue`: 返回计算并格式化后的值（**推荐**：对比"结果"）
+- `UnformattedValue`: 返回计算后的原始值（适合精确数值对比）
+- `FormattedString`: 日期以格式化字符串返回（推荐与 FormattedValue 配合）
+
+### 电子表格分块控制
+
+| 参数名                | 类型    | 默认值 | CLI 支持 | CLI 参数 | 说明                         |
+|-----------------------|---------|--------|----------|----------|------------------------------|
+| sheet_scan_max_rows   | int     | 5000   | ❌       | 仅YAML | 读取分块最大行数             |
+| sheet_scan_max_cols   | int     | 100    | ❌       | 仅YAML | 读取分块最大列数             |
+| sheet_write_max_rows  | int     | 5000   | ❌       | 仅YAML | 写入/清空分块最大行数        |
+| sheet_write_max_cols  | int     | 100    | ❌       | 仅YAML | 写入/清空分块最大列数        |
+
+**分块说明**：遇到 10MB/90221 限制时会自动行优先二分，必要时列二分。
+
+### 电子表格逻辑同步与结果检测
+
+| 参数名                | 类型    | 默认值 | CLI 支持 | CLI 参数 | 说明                         |
+|-----------------------|---------|--------|----------|----------|------------------------------|
+| sheet_validate_results | bool   | false  | ❌       | 仅YAML | 是否启用结果检测（会双读云端数据） |
+| sheet_protect_formulas | bool   | false  | ❌       | 仅YAML | 是否保护云端公式列不被覆盖   |
+| sheet_report_column_diff | bool | false  | ❌       | 仅YAML | 是否输出列级差异报告         |
+| sheet_diff_tolerance  | float   | 0.001  | ❌       | 仅YAML | 数值差异容忍度（浮点数比较） |
+
+**功能说明**：
+- **结果检测**：启用后会双读云端（Formula + FormattedValue），检测本地与云端的差异
+- **公式保护**：启用后公式列只检测不覆盖，数据列正常同步（启用此项会自动启用结果检测）
+- **差异报告**：启用后在日志中输出列级差异统计（公式列/数据列分类展示）
+- **容忍度**：数值比较时的容忍度，避免浮点数精度问题
+
+**使用场景**：
+1. **只检测差异但仍然同步**：`sheet_validate_results=true`, `sheet_protect_formulas=false`
+2. **保护公式+检测差异**（推荐）：`sheet_validate_results=true`, `sheet_protect_formulas=true`
+3. **保护公式+差异报告**：以上配置 + `sheet_report_column_diff=true`
+
+**差异报告示例**：
+```
+========================================
+📊 列差异检测报告
+========================================
+🔒 公式列（已保护，不覆盖）:
+  ✓ 销售额: 120/39749 行结果不一致 (0.30%)
+  → 建议: 检查输入数据列是否变化
+
+📝 数据列（已同步）:
+  ✓ 问题分类: 50 行差异 → 已更新
+========================================
+```
+
 ### Intelligence 策略专用配置（多平台通用）
 
 | 参数名                | 类型    | 默认值 | CLI 支持 | CLI 参数 | 说明                         |

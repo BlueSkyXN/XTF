@@ -105,8 +105,24 @@ from .auth import FeishuAuth
 from .base import RetryableAPIClient
 
 
+class FeishuAPIError(Exception):
+    """飞书API错误（包含错误码）"""
+
+    def __init__(self, code: int, msg: str):
+        self.code = code
+        self.msg = msg
+        super().__init__(f"Feishu API error {code}: {msg}")
+
+
 class SheetAPI:
     """飞书电子表格API客户端"""
+
+    # 单次扫描范围上限（尽量避免触发 90221: TooLargeResponse）
+    MAX_SCAN_ROWS_PER_REQUEST = 5000
+    MAX_SCAN_COLS_PER_REQUEST = 100
+    # 单次写入/清空范围上限（对齐写入接口限制）
+    MAX_WRITE_ROWS_PER_REQUEST = 5000
+    MAX_WRITE_COLS_PER_REQUEST = 100
 
     def __init__(
         self,
@@ -114,6 +130,12 @@ class SheetAPI:
         api_client: Optional[RetryableAPIClient] = None,
         start_row: int = 1,
         start_column: str = "A",
+        scan_max_rows: Optional[int] = None,
+        scan_max_cols: Optional[int] = None,
+        write_max_rows: Optional[int] = None,
+        write_max_cols: Optional[int] = None,
+        value_render_option: Optional[str] = None,
+        datetime_render_option: Optional[str] = None,
     ):
         """
         初始化电子表格API客户端
@@ -133,6 +155,14 @@ class SheetAPI:
         self.start_row = start_row
         self.start_column = start_column
         self.start_col_num = self.column_letter_to_number(start_column)
+        # 扫描/写入范围限制（可配置）
+        self.scan_max_rows = scan_max_rows or self.MAX_SCAN_ROWS_PER_REQUEST
+        self.scan_max_cols = scan_max_cols or self.MAX_SCAN_COLS_PER_REQUEST
+        self.write_max_rows = write_max_rows or self.MAX_WRITE_ROWS_PER_REQUEST
+        self.write_max_cols = write_max_cols or self.MAX_WRITE_COLS_PER_REQUEST
+        # 读取渲染选项（可配置）
+        self.value_render_option = value_render_option
+        self.datetime_render_option = datetime_render_option
 
     def get_sheet_info(self, spreadsheet_token: str) -> Dict[str, Any]:
         """
@@ -150,7 +180,13 @@ class SheetAPI:
         url = f"https://open.feishu.cn/open-apis/sheets/v3/spreadsheets/{spreadsheet_token}"
         headers = self.auth.get_auth_headers()
 
-        response = self.api_client.call_api("GET", url, headers=headers)
+        params = {}
+        if self.value_render_option:
+            params["valueRenderOption"] = self.value_render_option
+        if self.datetime_render_option:
+            params["dateTimeRenderOption"] = self.datetime_render_option
+
+        response = self.api_client.call_api("GET", url, headers=headers, params=params)
 
         try:
             result = response.json()
@@ -166,6 +202,62 @@ class SheetAPI:
             )
 
         return result.get("data", {})
+
+    def get_sheet_meta(self, spreadsheet_token: str, sheet_id: str) -> Dict[str, Any]:
+        """
+        获取工作表属性信息（sheet 级别）
+
+        Args:
+            spreadsheet_token: 电子表格Token
+            sheet_id: 工作表ID
+
+        Returns:
+            工作表信息字典
+        """
+        url = f"https://open.feishu.cn/open-apis/sheets/v3/spreadsheets/{spreadsheet_token}/sheets/{sheet_id}"
+        headers = self.auth.get_auth_headers()
+
+        response = self.api_client.call_api("GET", url, headers=headers)
+
+        try:
+            result = response.json()
+        except ValueError as e:
+            raise Exception(
+                f"获取工作表信息响应解析失败: {e}, HTTP状态码: {response.status_code}"
+            )
+
+        if result.get("code") != 0:
+            error_msg = result.get("msg", "未知错误")
+            raise Exception(
+                f"获取工作表信息失败: 错误码 {result.get('code')}, 错误信息: {error_msg}"
+            )
+
+        return result.get("data", {}).get("sheet", {})
+
+    def get_sheet_grid_properties(
+        self, spreadsheet_token: str, sheet_id: str
+    ) -> Tuple[int, int]:
+        """
+        获取工作表网格属性（行数、列数）
+
+        Returns:
+            (row_count, column_count)
+        """
+        sheet = self.get_sheet_meta(spreadsheet_token, sheet_id)
+        resource_type = sheet.get("resource_type", "sheet")
+        if resource_type != "sheet":
+            raise Exception(f"工作表类型异常: {resource_type}")
+
+        grid = sheet.get("grid_properties") or {}
+        row_count = int(grid.get("row_count", 0) or 0)
+        col_count = int(grid.get("column_count", 0) or 0)
+
+        if row_count <= 0 or col_count <= 0:
+            raise Exception(
+                f"工作表网格属性无效: row_count={row_count}, column_count={col_count}"
+            )
+
+        return row_count, col_count
 
     def get_sheet_data(self, spreadsheet_token: str, range_str: str) -> List[List[Any]]:
         """
@@ -200,13 +292,230 @@ class SheetAPI:
 
         if result.get("code") != 0:
             error_msg = result.get("msg", "未知错误")
-            raise Exception(
-                f"读取电子表格数据失败: 错误码 {result.get('code')}, 错误信息: {error_msg}"
-            )
+            raise FeishuAPIError(int(result.get("code")), error_msg)
 
         data = result.get("data", {})
         value_range = data.get("valueRange", {})
         return value_range.get("values", [])
+
+    def identify_formula_columns(
+        self,
+        formula_data: List[List[Any]],
+        headers: Optional[List[str]] = None
+    ) -> set:
+        """
+        识别包含公式的列
+
+        Args:
+            formula_data: 使用 Formula 渲染选项读取的数据
+            headers: 列名列表（可选，用于返回列名而不是列索引）
+
+        Returns:
+            包含公式的列集合（列名或列索引）
+        """
+        formula_cols = set()
+
+        if not formula_data:
+            return formula_cols
+
+        # 遍历所有列
+        num_cols = max(len(row) for row in formula_data) if formula_data else 0
+
+        for col_idx in range(num_cols):
+            has_formula = False
+            # 检查该列是否有单元格以 = 开头（公式标识）
+            for row in formula_data:
+                if col_idx < len(row):
+                    cell_value = str(row[col_idx]) if row[col_idx] is not None else ""
+                    if cell_value.startswith("="):
+                        has_formula = True
+                        break
+
+            if has_formula:
+                if headers and col_idx < len(headers):
+                    formula_cols.add(headers[col_idx])
+                else:
+                    formula_cols.add(col_idx)
+
+        return formula_cols
+
+    def get_sheet_data_chunked(
+        self,
+        spreadsheet_token: str,
+        sheet_id: str,
+        start_row: int,
+        end_row: int,
+        start_col: str,
+        end_col: str,
+        max_rows_per_request: Optional[int] = None,
+        max_cols_per_request: Optional[int] = None,
+    ) -> List[List[Any]]:
+        """
+        分块读取工作表数据，避免单次请求过大
+
+        Args:
+            spreadsheet_token: 电子表格Token
+            sheet_id: 工作表ID
+            start_row: 起始行（1-based）
+            end_row: 结束行（1-based）
+            start_col: 起始列（字母）
+            end_col: 结束列（字母）
+            max_rows_per_request: 单次请求最大行数
+            max_cols_per_request: 单次请求最大列数
+
+        Returns:
+            二维数组表示的表格数据
+        """
+        max_rows = max_rows_per_request or self.scan_max_rows
+        max_cols = max_cols_per_request or self.scan_max_cols
+
+        start_col_num = self.column_letter_to_number(start_col)
+        end_col_num = self.column_letter_to_number(end_col)
+
+        if start_row > end_row or start_col_num > end_col_num:
+            return []
+
+        total_cols = end_col_num - start_col_num + 1
+        total_rows = end_row - start_row + 1
+
+        self.logger.info(
+            f"📖 分块读取: 总范围 {sheet_id}!{start_col}{start_row}:{end_col}{end_row} "
+            f"(总计 {total_rows} 行 × {total_cols} 列), 单次上限 {max_rows} 行 × {max_cols} 列"
+        )
+
+        def _is_too_large_response(err: Exception) -> bool:
+            if isinstance(err, FeishuAPIError) and err.code in (90221, 90227):
+                return True
+            msg = str(err)
+            return (
+                "90221" in msg
+                or "90227" in msg
+                or "TooLargeResponse" in msg
+                or "TooLargeRequest" in msg
+                or "data exceeded" in msg
+            )
+
+        def _pad_rows(values: List[List[Any]], expected_rows: int) -> List[List[Any]]:
+            if len(values) < expected_rows:
+                values.extend([[] for _ in range(expected_rows - len(values))])
+            return values
+
+        def _read_range(range_str: str) -> List[List[Any]]:
+            return self.get_sheet_data(spreadsheet_token, range_str)
+
+        def _build_col_ranges(
+            col_start_num: int, col_end_num: int, col_step: int
+        ) -> List[Tuple[int, int]]:
+            ranges = []
+            for c_start in range(col_start_num, col_end_num + 1, col_step):
+                c_end = min(c_start + col_step - 1, col_end_num)
+                ranges.append((c_start, c_end))
+            return ranges
+
+        def _read_row_block(
+            row_start: int,
+            row_end: int,
+            col_ranges: List[Tuple[int, int]],
+        ) -> List[List[Any]]:
+            chunk_rows = row_end - row_start + 1
+            if len(col_ranges) == 1 and col_ranges[0] == (
+                start_col_num,
+                end_col_num,
+            ):
+                range_str = (
+                    f"{sheet_id}!{start_col}{row_start}:{end_col}{row_end}"
+                )
+                chunk_values = _read_range(range_str)
+                return _pad_rows(chunk_values, chunk_rows)
+
+            # 列分块读取后拼接
+            row_chunk_values = [[None] * total_cols for _ in range(chunk_rows)]
+            for col_start_num, col_end_num in col_ranges:
+                col_offset = col_start_num - start_col_num
+                col_start_letter = self.column_number_to_letter(col_start_num)
+                col_end_letter = self.column_number_to_letter(col_end_num)
+                range_str = (
+                    f"{sheet_id}!"
+                    f"{col_start_letter}{row_start}:{col_end_letter}{row_end}"
+                )
+                chunk_values = _read_range(range_str)
+                for r_idx, row in enumerate(chunk_values):
+                    if r_idx >= chunk_rows:
+                        break
+                    for c_idx, cell in enumerate(row):
+                        target_col = col_offset + c_idx
+                        if target_col < total_cols:
+                            row_chunk_values[r_idx][target_col] = cell
+            return row_chunk_values
+
+        def _read_single_row_adaptive_cols(
+            row_idx: int, col_start_num: int, col_end_num: int
+        ) -> List[Any]:
+            col_span = col_end_num - col_start_num + 1
+            col_start_letter = self.column_number_to_letter(col_start_num)
+            col_end_letter = self.column_number_to_letter(col_end_num)
+            range_str = (
+                f"{sheet_id}!"
+                f"{col_start_letter}{row_idx}:{col_end_letter}{row_idx}"
+            )
+            try:
+                values = _read_range(range_str)
+                row = values[0] if values else []
+                if len(row) < col_span:
+                    row.extend([None] * (col_span - len(row)))
+                return row
+            except Exception as e:
+                if _is_too_large_response(e) and col_span > 1:
+                    mid = col_start_num + (col_span // 2) - 1
+                    left = _read_single_row_adaptive_cols(
+                        row_idx, col_start_num, mid
+                    )
+                    right = _read_single_row_adaptive_cols(
+                        row_idx, mid + 1, col_end_num
+                    )
+                    return left + right
+                raise
+
+        values_all: List[List[Any]] = []
+        col_ranges = _build_col_ranges(start_col_num, end_col_num, max_cols)
+
+        row_start = start_row
+        while row_start <= end_row:
+            row_chunk_size = min(max_rows, end_row - row_start + 1)
+            while True:
+                row_end = row_start + row_chunk_size - 1
+                try:
+                    rows_values = _read_row_block(row_start, row_end, col_ranges)
+                    values_all.extend(rows_values)
+                    break
+                except Exception as e:
+                    if _is_too_large_response(e):
+                        if row_chunk_size > 1:
+                            new_size = max(1, row_chunk_size // 2)
+                            self.logger.warning(
+                                f"读取范围过大(90221)，行数减半重试: "
+                                f"{row_chunk_size} -> {new_size} 行"
+                            )
+                            row_chunk_size = new_size
+                            continue
+                        # 单行仍过大，按列二分读取
+                        self.logger.warning(
+                            f"单行读取仍过大，启用列二分读取: 第 {row_start} 行"
+                        )
+                        row_values = _read_single_row_adaptive_cols(
+                            row_start, start_col_num, end_col_num
+                        )
+                        if len(row_values) < total_cols:
+                            row_values.extend(
+                                [None] * (total_cols - len(row_values))
+                            )
+                        values_all.append(row_values)
+                        break
+                    raise
+
+            row_start = row_end + 1
+
+        return values_all
 
     def write_sheet_data(
         self,
@@ -540,7 +849,12 @@ class SheetAPI:
         return ranges_data
 
     def clear_sheet_data(
-        self, spreadsheet_token: str, sheet_id: str, range_str: str
+        self,
+        spreadsheet_token: str,
+        sheet_id: str,
+        range_str: str,
+        max_rows_per_batch: Optional[int] = None,
+        max_cols_per_batch: Optional[int] = None,
     ) -> bool:
         """
         清空电子表格指定范围的数据
@@ -549,6 +863,8 @@ class SheetAPI:
             spreadsheet_token: 电子表格Token
             sheet_id: 工作表ID
             range_str: 范围字符串，如 "A1:Z1000"
+            max_rows_per_batch: 单次清空最大行数
+            max_cols_per_batch: 单次清空最大列数
 
         Returns:
             是否清空成功
@@ -562,18 +878,109 @@ class SheetAPI:
             self.logger.error(f"清空数据范围验证失败: {error_msg}")
             return False
 
-        self.logger.info(f"准备清空范围: {full_range}")
-        # 通过调用batch_update并传递空值数组来清空
-        # 修复: 使用空的 `values` 数组 `[]` 来清空范围，而不是 `[[]]`
-        value_ranges = [{"range": full_range, "values": []}]
-        success, _ = self._batch_update_ranges(
-            spreadsheet_token, value_ranges, is_clear=True
+        max_rows = max_rows_per_batch or self.write_max_rows
+        max_cols = max_cols_per_batch or self.write_max_cols
+
+        self.logger.info(
+            f"准备清空范围: {full_range} (单次上限 {max_rows} 行 × {max_cols} 列)"
         )
-        if success:
-            self.logger.info(f"✅ 范围 {full_range} 清空成功")
-        else:
-            self.logger.error(f"❌ 范围 {full_range} 清空失败")
-        return success
+
+        def _build_empty_values_for_range(range_to_clear: str) -> Optional[List[List[str]]]:
+            import re
+
+            match = re.match(r"([^!]+)!([A-Z]+)(\d+):([A-Z]+)(\d+)", range_to_clear)
+            if not match:
+                return None
+            _, start_col, start_row, end_col, end_row = match.groups()
+            start_row_i, end_row_i = int(start_row), int(end_row)
+            start_col_num = self.column_letter_to_number(start_col)
+            end_col_num = self.column_letter_to_number(end_col)
+
+            rows = end_row_i - start_row_i + 1
+            cols = end_col_num - start_col_num + 1
+            if rows <= 0 or cols <= 0:
+                return None
+
+            # 清空通过写入空字符串实现，避免 values 为空导致的 90226 错误
+            empty_row = [""] * cols
+            return [empty_row] * rows
+
+        def _split_range_half(range_to_split: str) -> Optional[List[str]]:
+            import re
+
+            match = re.match(r"([^!]+)!([A-Z]+)(\d+):([A-Z]+)(\d+)", range_to_split)
+            if not match:
+                return None
+            sheet_id, start_col, start_row, end_col, end_row = match.groups()
+            start_row_i, end_row_i = int(start_row), int(end_row)
+            start_col_num = self.column_letter_to_number(start_col)
+            end_col_num = self.column_letter_to_number(end_col)
+
+            if start_row_i < end_row_i:
+                mid = (start_row_i + end_row_i) // 2
+                return [
+                    f"{sheet_id}!{start_col}{start_row_i}:{end_col}{mid}",
+                    f"{sheet_id}!{start_col}{mid + 1}:{end_col}{end_row_i}",
+                ]
+
+            if start_col_num < end_col_num:
+                mid_col = (start_col_num + end_col_num) // 2
+                left_col = self.column_number_to_letter(mid_col)
+                right_col = self.column_number_to_letter(mid_col + 1)
+                return [
+                    f"{sheet_id}!{start_col}{start_row_i}:{left_col}{end_row_i}",
+                    f"{sheet_id}!{right_col}{start_row_i}:{end_col}{end_row_i}",
+                ]
+
+            return None
+
+        # 先按行列上限分块，避免单次范围过大
+        chunks = self._split_range_into_chunks(full_range, max_rows, max_cols)
+        total_chunks = len(chunks)
+        self.logger.info(f"📋 清空范围分块: {total_chunks} 个块")
+
+        for i, chunk_ranges in enumerate(chunks, 1):
+            # 每个 chunk_ranges 里目前只有一个范围
+            for chunk_range in chunk_ranges:
+                stack = [chunk_range]
+                while stack:
+                    current_range = stack.pop()
+                    empty_values = _build_empty_values_for_range(current_range)
+                    if empty_values is None:
+                        self.logger.error(f"无法构建清空数据矩阵: {current_range}")
+                        return False
+                    value_ranges = [{"range": current_range, "values": empty_values}]
+                    success, error_code = self._batch_update_ranges(
+                        spreadsheet_token, value_ranges, is_clear=True
+                    )
+                    if success:
+                        self.logger.info(
+                            f"✅ 清空成功: {current_range} (块 {i}/{total_chunks})"
+                        )
+                        continue
+
+                    # 如果请求过大，按行优先二分拆分重试
+                    if error_code == self.ERROR_CODE_REQUEST_TOO_LARGE:
+                        self.logger.warning(
+                            f"清空范围过大(90227)，启用二分拆分: {current_range}"
+                        )
+                        sub_ranges = _split_range_half(current_range)
+                        if not sub_ranges:
+                            self.logger.error(
+                                f"无法拆分范围，清空失败: {current_range}"
+                            )
+                            return False
+                        # LIFO，先处理左半边
+                        stack.extend(reversed(sub_ranges))
+                        continue
+
+                    # 其他错误直接失败
+                    self.logger.error(
+                        f"❌ 范围 {current_range} 清空失败 (错误码 {error_code})"
+                    )
+                    return False
+
+        return True
 
     def set_dropdown_validation(
         self,
@@ -912,8 +1319,14 @@ class SheetAPI:
                         detail = range_details[0]
                         style_type = self._get_style_type_description(style)
                         range_info = f"{detail['col_name']}{detail['start_row']}:{detail['col_name']}{detail['end_row']}"
+                        if isinstance(detail["start_row"], int) and isinstance(
+                            detail["end_row"], int
+                        ):
+                            row_count = detail["end_row"] - detail["start_row"] + 1
+                        else:
+                            row_count = "未知"
                         self.logger.info(
-                            f"✅ {detail['col_name']}列样式设置成功: 范围 {range_info}, 格式 {style_type}, 共 {detail['end_row'] - detail['start_row'] + 1} 行"
+                            f"✅ {detail['col_name']}列样式设置成功: 范围 {range_info}, 格式 {style_type}, 共 {row_count} 行"
                         )
                     else:
                         total_ranges = len(chunk_ranges)
@@ -945,8 +1358,8 @@ class SheetAPI:
                 "col_name": (
                     start_col if start_col == end_col else f"{start_col}-{end_col}"
                 ),
-                "start_row": start_row,
-                "end_row": end_row,
+                "start_row": int(start_row),
+                "end_row": int(end_row),
             }
         return {"col_name": "未知", "start_row": "?", "end_row": "?"}
 

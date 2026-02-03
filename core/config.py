@@ -147,6 +147,20 @@ class SyncConfig:
     sheet_id: Optional[str] = None
     start_row: int = 1  # 开始行号（1-based）
     start_column: str = "A"  # 开始列号
+    # 电子表格读取渲染选项（可选）
+    sheet_value_render_option: Optional[str] = None  # ToString/Formula/FormattedValue/UnformattedValue
+    sheet_datetime_render_option: Optional[str] = None  # FormattedString
+    # 电子表格读取/写入范围控制（默认 5000x100）
+    sheet_scan_max_rows: int = 5000
+    sheet_scan_max_cols: int = 100
+    sheet_write_max_rows: int = 5000
+    sheet_write_max_cols: int = 100
+
+    # 电子表格逻辑同步与结果检测（默认全部关闭）
+    sheet_validate_results: bool = False  # 是否启用结果检测
+    sheet_protect_formulas: bool = False  # 是否保护云端公式列不被覆盖
+    sheet_report_column_diff: bool = False  # 是否输出列级差异报告
+    sheet_diff_tolerance: float = 0.001  # 数值差异容忍度（浮点数比较）
 
     # 同步设置
     sync_mode: SyncMode = SyncMode.FULL
@@ -207,6 +221,59 @@ class SyncConfig:
 
             # 增强的配置组合有效性检查
             self._validate_selective_sync_config()
+
+        # 规范化读取渲染参数（大小写容错）
+        if self.sheet_value_render_option is not None:
+            val = str(self.sheet_value_render_option).strip()
+            if not val or val.lower() == "none":
+                self.sheet_value_render_option = None
+            else:
+                mapping = {
+                    "tostring": "ToString",
+                    "formula": "Formula",
+                    "formattedvalue": "FormattedValue",
+                    "unformattedvalue": "UnformattedValue",
+                }
+                self.sheet_value_render_option = mapping.get(val.lower(), val)
+
+        if self.sheet_datetime_render_option is not None:
+            val = str(self.sheet_datetime_render_option).strip()
+            if not val or val.lower() == "none":
+                self.sheet_datetime_render_option = None
+            else:
+                mapping = {"formattedstring": "FormattedString"}
+                self.sheet_datetime_render_option = mapping.get(val.lower(), val)
+
+        # 验证 sheet 扫描/写入范围参数
+        if self.sheet_scan_max_rows <= 0 or self.sheet_scan_max_cols <= 0:
+            raise ValueError("sheet_scan_max_rows/sheet_scan_max_cols 必须为正整数")
+        if self.sheet_write_max_rows <= 0 or self.sheet_write_max_cols <= 0:
+            raise ValueError("sheet_write_max_rows/sheet_write_max_cols 必须为正整数")
+
+        # 读取渲染参数合法性校验（可选）
+        allowed_value_render = {
+            None,
+            "ToString",
+            "Formula",
+            "FormattedValue",
+            "UnformattedValue",
+        }
+        allowed_datetime_render = {None, "FormattedString"}
+        if self.sheet_value_render_option not in allowed_value_render:
+            raise ValueError(
+                f"sheet_value_render_option 无效: {self.sheet_value_render_option}"
+            )
+        if self.sheet_datetime_render_option not in allowed_datetime_render:
+            raise ValueError(
+                f"sheet_datetime_render_option 无效: {self.sheet_datetime_render_option}"
+            )
+
+        # 验证逻辑同步与结果检测配置
+        if self.sheet_diff_tolerance < 0:
+            raise ValueError("sheet_diff_tolerance 不能为负数")
+        if self.sheet_protect_formulas and not self.sheet_validate_results:
+            # 保护公式时必须启用结果检测（需要双读）
+            self.sheet_validate_results = True
 
     def _validate_selective_sync_config(self):
         """验证selective_sync配置的详细有效性"""
@@ -438,6 +505,16 @@ class ConfigManager:
                 "rate_limit_delay": 0.1,
                 "max_retries": 3,
                 "log_level": "INFO",
+                "sheet_value_render_option": None,
+                "sheet_datetime_render_option": None,
+                "sheet_scan_max_rows": 5000,
+                "sheet_scan_max_cols": 100,
+                "sheet_write_max_rows": 5000,
+                "sheet_write_max_cols": 100,
+                "sheet_validate_results": False,
+                "sheet_protect_formulas": False,
+                "sheet_report_column_diff": False,
+                "sheet_diff_tolerance": 0.001,
                 "selective_sync": {
                     "enabled": False,
                     "columns": None,
@@ -520,6 +597,8 @@ class ConfigManager:
         if args.start_column:
             config_data["start_column"] = args.start_column
             cli_overrides.append(f"start_column={args.start_column}")
+
+        # Sheet 扫描/写入与读取渲染参数（仅配置文件支持，不做命令行）
 
         # 通用参数
         if args.index_column:
@@ -650,6 +729,16 @@ def create_sample_config(
             "rate_limit_delay": 0.1,
             "max_retries": 3,
             "log_level": "INFO",
+            "sheet_value_render_option": None,
+            "sheet_datetime_render_option": None,
+            "sheet_scan_max_rows": 5000,
+            "sheet_scan_max_cols": 100,
+            "sheet_write_max_rows": 5000,
+            "sheet_write_max_cols": 100,
+            "sheet_validate_results": False,
+            "sheet_protect_formulas": False,
+            "sheet_report_column_diff": False,
+            "sheet_diff_tolerance": 0.001,
             "selective_sync": {
                 "enabled": False,
                 "columns": ["column1", "column2", "column3"],

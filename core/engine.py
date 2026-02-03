@@ -131,9 +131,18 @@ class XTFSyncEngine:
                 self.api_client,
                 start_row=self.config.start_row,
                 start_column=self.config.start_column,
+                scan_max_rows=self.config.sheet_scan_max_rows,
+                scan_max_cols=self.config.sheet_scan_max_cols,
+                write_max_rows=self.config.sheet_write_max_rows,
+                write_max_cols=self.config.sheet_write_max_cols,
+                value_render_option=self.config.sheet_value_render_option,
+                datetime_render_option=self.config.sheet_datetime_render_option,
             )
         # 初始化数据转换器
         self.converter = DataConverter(config.target_type)
+        # 缓存工作表网格属性，避免重复请求
+        self._sheet_grid_cache: Optional[Tuple[int, int]] = None
+        self._sheet_grid_cache_key: Optional[Tuple[str, str]] = None
 
     def _init_global_controller(self):
         """初始化全局请求控制器"""
@@ -417,6 +426,41 @@ class XTFSyncEngine:
 
     # ========== 电子表格专用方法 ==========
 
+    def _get_sheet_grid_properties(self) -> Optional[Tuple[int, int]]:
+        """获取工作表网格属性（行数、列数）"""
+        if self.config.target_type != TargetType.SHEET:
+            return None
+        if not isinstance(self.api, SheetAPI):
+            return None
+        if not self.config.spreadsheet_token or not self.config.sheet_id:
+            return None
+        cache_key = (self.config.spreadsheet_token, self.config.sheet_id)
+        if self._sheet_grid_cache_key == cache_key and self._sheet_grid_cache:
+            return self._sheet_grid_cache
+        try:
+            grid = self.api.get_sheet_grid_properties(
+                self.config.spreadsheet_token, self.config.sheet_id
+            )
+            self._sheet_grid_cache = grid
+            self._sheet_grid_cache_key = cache_key
+            return grid
+        except Exception as e:
+            self.logger.warning(f"获取工作表网格属性失败: {e}")
+            return None
+
+    def _build_sheet_full_range(self) -> Optional[str]:
+        """构建覆盖整个工作表的范围字符串（基于网格属性）"""
+        grid = self._get_sheet_grid_properties()
+        if not grid:
+            return None
+        row_count, col_count = grid
+        if row_count <= 0 or col_count <= 0:
+            return None
+        if not isinstance(self.api, SheetAPI):
+            return None
+        end_col = self.api.column_number_to_letter(col_count)
+        return f"A1:{end_col}{row_count}"
+
     def get_current_sheet_data(self) -> pd.DataFrame:
         """获取当前电子表格数据"""
         if self.config.target_type != TargetType.SHEET:
@@ -424,8 +468,39 @@ class XTFSyncEngine:
 
         # 构建从配置起始点开始的读取范围
         start_cell = f"{self.config.start_column}{self.config.start_row}"
-        # 定义一个足够大的范围来捕获所有数据，飞书API会自动裁剪到有数据的实际范围
-        read_range = f"{self.config.sheet_id}!{start_cell}:ZZ500000"
+        read_range = None
+        end_row = None
+        end_col = None
+
+        # 优先使用工作表网格属性精确限定范围
+        grid = self._get_sheet_grid_properties()
+        if grid and isinstance(self.api, SheetAPI):
+            row_count, col_count = grid
+            start_col_num = self.api.column_letter_to_number(
+                self.config.start_column
+            )
+            if row_count < self.config.start_row or col_count < start_col_num:
+                self.logger.info(
+                    f"工作表网格范围小于起始位置: "
+                    f"row_count={row_count}, column_count={col_count}, "
+                    f"start={start_cell}"
+                )
+                return pd.DataFrame()
+
+            end_row = row_count
+            end_col = self.api.column_number_to_letter(col_count)
+            read_range = (
+                f"{self.config.sheet_id}!"
+                f"{self.config.start_column}{self.config.start_row}:{end_col}{end_row}"
+            )
+        else:
+            # 兜底：使用历史默认范围（注意：可能较大）
+            end_row = 500000
+            end_col = "ZZ"
+            read_range = f"{self.config.sheet_id}!{start_cell}:{end_col}{end_row}"
+            self.logger.warning(
+                "无法获取工作表网格属性，退回默认读取范围，可能较大"
+            )
 
         self.logger.info(f"尝试从范围读取数据: {read_range}")
 
@@ -436,7 +511,17 @@ class XTFSyncEngine:
                 self.logger.error("电子表格的 spreadsheet_token 未配置")
                 return pd.DataFrame()
 
-            values = self.api.get_sheet_data(self.config.spreadsheet_token, read_range)
+            if not (end_row and end_col):
+                return pd.DataFrame()
+
+            values = self.api.get_sheet_data_chunked(
+                self.config.spreadsheet_token,
+                self.config.sheet_id,
+                self.config.start_row,
+                end_row,
+                self.config.start_column,
+                end_col,
+            )
             df = self.converter.values_to_df(values)
 
             if not df.empty:
@@ -461,6 +546,262 @@ class XTFSyncEngine:
             self.logger.warning(f"尝试从范围 {read_range} 读取数据失败: {e}")
             self.logger.warning("无法获取电子表格数据，将使用覆盖模式")
             return pd.DataFrame()
+
+    def get_sheet_data_with_validation(
+        self
+    ) -> tuple[pd.DataFrame, Optional[pd.DataFrame], Optional[set]]:
+        """
+        获取电子表格数据（支持双读用于结果检测）
+
+        Returns:
+            (result_df, formula_df, formula_columns):
+            - result_df: 计算结果数据（用于比较）
+            - formula_df: 公式数据（仅在启用 validate_results 时返回）
+            - formula_columns: 包含公式的列集合（列名）
+        """
+        if not self.config.sheet_validate_results:
+            # 未启用检测，使用原有单次读取逻辑
+            return self.get_current_sheet_data(), None, None
+
+        # 启用检测，执行双读
+        if not isinstance(self.api, SheetAPI):
+            return pd.DataFrame(), None, None
+
+        if not self.config.spreadsheet_token or not self.config.sheet_id:
+            return pd.DataFrame(), None, None
+
+        # 获取网格范围
+        grid = self._get_sheet_grid_properties()
+        if not grid:
+            self.logger.warning("无法获取工作表网格属性，无法进行双读")
+            return self.get_current_sheet_data(), None, None
+
+        row_count, col_count = grid
+        start_col_num = self.api.column_letter_to_number(self.config.start_column)
+        if row_count < self.config.start_row or col_count < start_col_num:
+            self.logger.info("工作表范围小于起始位置，视为空表")
+            return pd.DataFrame(), None, None
+
+        end_row = row_count
+        end_col = self.api.column_number_to_letter(col_count)
+
+        self.logger.info("🔍 启用结果检测，开始双读云端数据...")
+
+        # 第一次读取：公式模式
+        self.logger.info("  📖 读取公式数据...")
+        try:
+            # 临时设置读取选项为 Formula
+            original_value_option = self.config.sheet_value_render_option
+            original_datetime_option = self.config.sheet_datetime_render_option
+
+            # 强制使用 Formula 模式读取
+            self.config.sheet_value_render_option = "Formula"
+            self.config.sheet_datetime_render_option = None
+
+            formula_values = self.api.get_sheet_data_chunked(
+                self.config.spreadsheet_token,
+                self.config.sheet_id,
+                self.config.start_row,
+                end_row,
+                self.config.start_column,
+                end_col,
+            )
+            formula_df = self.converter.values_to_df(formula_values)
+
+            # 恢复原有配置
+            self.config.sheet_value_render_option = original_value_option
+            self.config.sheet_datetime_render_option = original_datetime_option
+
+        except Exception as e:
+            self.logger.warning(f"读取公式数据失败: {e}")
+            return self.get_current_sheet_data(), None, None
+
+        # 第二次读取：结果模式
+        self.logger.info("  📊 读取计算结果数据...")
+        try:
+            # 使用配置的读取选项（或 FormattedValue 作为默认）
+            if not self.config.sheet_value_render_option:
+                self.config.sheet_value_render_option = "FormattedValue"
+            if not self.config.sheet_datetime_render_option:
+                self.config.sheet_datetime_render_option = "FormattedString"
+
+            result_values = self.api.get_sheet_data_chunked(
+                self.config.spreadsheet_token,
+                self.config.sheet_id,
+                self.config.start_row,
+                end_row,
+                self.config.start_column,
+                end_col,
+            )
+            result_df = self.converter.values_to_df(result_values)
+
+        except Exception as e:
+            self.logger.warning(f"读取结果数据失败: {e}")
+            return self.get_current_sheet_data(), None, None
+
+        # 识别公式列
+        if formula_df.empty:
+            formula_columns = set()
+        else:
+            # 转换为二维列表用于识别
+            formula_data = [formula_df.columns.tolist()] + formula_df.values.tolist()
+            formula_columns = self.api.identify_formula_columns(
+                formula_data, headers=formula_df.columns.tolist()
+            )
+
+        if formula_columns:
+            self.logger.info(f"  🔒 识别到公式列: {sorted(formula_columns)}")
+        else:
+            self.logger.info("  ℹ️  未识别到公式列")
+
+        return result_df, formula_df, formula_columns
+
+    def validate_and_report_differences(
+        self,
+        local_df: pd.DataFrame,
+        remote_result_df: pd.DataFrame,
+        formula_columns: Optional[set],
+    ) -> Dict[str, Any]:
+        """
+        检测本地数据与云端结果的差异，生成列级差异报告
+
+        Args:
+            local_df: 本地数据
+            remote_result_df: 云端结果数据
+            formula_columns: 公式列集合
+
+        Returns:
+            差异统计字典
+        """
+        if formula_columns is None:
+            formula_columns = set()
+
+        diff_stats = {
+            "formula_columns": {},  # 公式列差异: {列名: 差异行数}
+            "data_columns": {},  # 数据列差异: {列名: 差异行数}
+            "error_columns": {},  # 异常列: {列名: 错误信息}
+            "total_rows": len(local_df),
+        }
+
+        # 遍历所有列
+        for col in local_df.columns:
+            if col not in remote_result_df.columns:
+                diff_stats["error_columns"][col] = "云端不存在此列"
+                continue
+
+            try:
+                diff_count = 0
+                local_col = local_df[col]
+                remote_col = remote_result_df[col]
+
+                # 逐行比较
+                for idx in range(len(local_col)):
+                    if idx >= len(remote_col):
+                        diff_count += 1
+                        continue
+
+                    local_val = local_col.iloc[idx]
+                    remote_val = remote_col.iloc[idx]
+
+                    if not self._values_equal(local_val, remote_val):
+                        diff_count += 1
+
+                # 记录差异
+                if diff_count > 0:
+                    if col in formula_columns:
+                        diff_stats["formula_columns"][col] = diff_count
+                    else:
+                        diff_stats["data_columns"][col] = diff_count
+
+            except Exception as e:
+                diff_stats["error_columns"][col] = str(e)
+
+        return diff_stats
+
+    def _values_equal(self, val1: Any, val2: Any) -> bool:
+        """
+        比较两个值是否相等（考虑数值容差）
+
+        Args:
+            val1: 第一个值
+            val2: 第二个值
+
+        Returns:
+            是否相等
+        """
+        import pandas as pd
+        import numpy as np
+
+        # 都是空值
+        if pd.isnull(val1) and pd.isnull(val2):
+            return True
+
+        # 一个空一个不空
+        if pd.isnull(val1) or pd.isnull(val2):
+            return False
+
+        # 都是数值类型
+        try:
+            num1 = float(val1)
+            num2 = float(val2)
+            return abs(num1 - num2) <= self.config.sheet_diff_tolerance
+        except (ValueError, TypeError):
+            pass
+
+        # 字符串比较
+        return str(val1).strip() == str(val2).strip()
+
+    def print_column_diff_report(self, diff_stats: Dict[str, Any]):
+        """
+        打印列级差异报告
+
+        Args:
+            diff_stats: 差异统计字典
+        """
+        if not self.config.sheet_report_column_diff:
+            return
+
+        total_rows = diff_stats["total_rows"]
+        formula_cols = diff_stats["formula_columns"]
+        data_cols = diff_stats["data_columns"]
+        error_cols = diff_stats["error_columns"]
+
+        # 统计信息
+        total_cols = len(formula_cols) + len(data_cols) + len(error_cols)
+        diff_cols = len(formula_cols) + len(data_cols)
+
+        print("\n" + "=" * 60)
+        print("📊 列差异检测报告")
+        print(f"时间: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"模式: 逻辑同步+结果检测")
+        print("=" * 60)
+
+        if formula_cols:
+            print("\n🔒 公式列（已保护，不覆盖）:")
+            for col, diff_count in sorted(formula_cols.items()):
+                pct = (diff_count / total_rows * 100) if total_rows > 0 else 0
+                print(f"  ✓ {col}: {diff_count}/{total_rows} 行结果不一致 ({pct:.2f}%)")
+            if self.config.sheet_protect_formulas:
+                print("  → 建议: 检查输入数据列是否变化")
+
+        if data_cols:
+            print("\n📝 数据列（已同步）:")
+            for col, diff_count in sorted(data_cols.items()):
+                print(f"  ✓ {col}: {diff_count} 行差异 → 已更新")
+
+        if error_cols:
+            print("\n⚠️  异常列（类型不匹配或无法比较）:")
+            for col, error in sorted(error_cols.items()):
+                print(f"  ✗ {col}: {error}")
+
+        print("\n" + "=" * 60)
+        print(f"总计: {diff_cols}/{total_cols} 列有差异")
+        if self.config.sheet_protect_formulas:
+            print(f"同步完成: {len(data_cols)}/{total_cols} 列")
+            print(f"保护跳过: {len(formula_cols)}/{total_cols} 列")
+        else:
+            print(f"同步完成: {len(data_cols) + len(formula_cols)}/{total_cols} 列")
+        print("=" * 60 + "\n")
 
     # ========== 选择性同步辅助方法 ==========
 
@@ -657,8 +998,8 @@ class XTFSyncEngine:
             self.logger.warning("未指定索引列，将执行完全覆盖操作")
             return self.sync_clone(df)
 
-        # 获取现有数据
-        current_df = self.get_current_sheet_data()
+        # 获取现有数据（支持双读和差异检测）
+        current_df, formula_df, formula_columns = self.get_sheet_data_with_validation()
 
         if current_df.empty:
             self.logger.info("电子表格为空，执行新增操作")
@@ -671,6 +1012,24 @@ class XTFSyncEngine:
             )
             return self._sync_selective_columns_sheet(df, current_df)
 
+        # 差异检测与报告
+        if self.config.sheet_validate_results and formula_columns is not None:
+            diff_stats = self.validate_and_report_differences(
+                df, current_df, formula_columns
+            )
+            self.print_column_diff_report(diff_stats)
+
+        # 公式保护：过滤掉公式列
+        sync_df = df
+        if self.config.sheet_protect_formulas and formula_columns:
+            # 只同步非公式列
+            non_formula_cols = [col for col in df.columns if col not in formula_columns]
+            if not non_formula_cols:
+                self.logger.warning("所有列都是公式列，且启用了公式保护，无需同步")
+                return True
+            sync_df = df[non_formula_cols].copy()
+            self.logger.info(f"🔒 公式保护已启用，仅同步 {len(non_formula_cols)} 个数据列")
+
         # 原有的完整表格同步逻辑
         current_index = self.converter.build_data_index(
             current_df, self.config.index_column
@@ -680,7 +1039,7 @@ class XTFSyncEngine:
         update_rows = []
         new_rows = []
 
-        for _, row in df.iterrows():
+        for _, row in sync_df.iterrows():
             index_hash = self.converter.get_index_value_hash(
                 row, self.config.index_column
             )
@@ -702,7 +1061,7 @@ class XTFSyncEngine:
             # 更新现有行
             updated_df = current_df.copy()
             for current_row_idx, new_row in update_rows:
-                for col in df.columns:
+                for col in sync_df.columns:
                     if col in updated_df.columns:
                         # 使用 .iloc 双索引避免链式赋值问题 (SettingWithCopyWarning)
                         updated_df.iloc[current_row_idx, updated_df.columns.get_loc(col)] = new_row[col]
@@ -1322,9 +1681,12 @@ class XTFSyncEngine:
                 and self.config.spreadsheet_token
                 and self.config.sheet_id
             ):
-                # 假设一个足够大的范围来清空
+                clear_range = self._build_sheet_full_range()
+                if not clear_range:
+                    self.logger.error("无法获取工作表网格范围，清空失败")
+                    return False
                 return self.api.clear_sheet_data(
-                    self.config.spreadsheet_token, self.config.sheet_id, "A1:ZZZ10000"
+                    self.config.spreadsheet_token, self.config.sheet_id, clear_range
                 )
             return False
 
@@ -1472,9 +1834,12 @@ class XTFSyncEngine:
             and self.config.sheet_id
         ):
             self.logger.info("清空现有数据...")
-            # 注意：这里的范围可能需要根据实际最大数据量调整，或者先获取表格元数据
+            clear_range = self._build_sheet_full_range()
+            if not clear_range:
+                self.logger.error("无法获取工作表网格范围，清空失败")
+                return False
             clear_success = self.api.clear_sheet_data(
-                self.config.spreadsheet_token, self.config.sheet_id, "A1:ZZZ500000"
+                self.config.spreadsheet_token, self.config.sheet_id, clear_range
             )
             if not clear_success:
                 self.logger.error("清空电子表格失败，终止克隆同步")
