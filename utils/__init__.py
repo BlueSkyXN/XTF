@@ -10,10 +10,12 @@ XTF 工具模块包
 包结构：
     utils/
     ├── __init__.py         - 包初始化
-    └── excel_reader.py     - Excel 智能读取模块
+    ├── excel_reader.py     - Excel 智能读取模块
+    └── validators.py       - 输入验证模块
 
 当前功能：
     - Excel 智能读取（自动选择最优引擎）
+    - 输入验证（防止 SSRF、路径遍历等安全漏洞）
 
 设计原则：
     - 工具函数应是无状态的纯函数
