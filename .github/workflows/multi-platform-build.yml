@@ -42,7 +42,23 @@ jobs:
     - name: Set commit version
       id: version
       run: |
-        VERSION=$(git log --format=%B -1 | head -1)
+        # Get commit message and sanitize it for filename usage
+        # 1. Get first line of commit message
+        # 2. Replace invalid chars (/:<>|?*" ) with underscore
+        # 3. Truncate to 50 chars to avoid too long filenames
+        RAW_VERSION=$(git log --format=%B -1 | head -1)
+        VERSION=$(echo "$RAW_VERSION" | tr -c '[:alnum:]._-' '_' | sed 's/__*/_/g' | cut -c 1-50)
+
+        # Remove trailing underscores
+        VERSION=${VERSION%_}
+
+        # Fallback if empty
+        if [ -z "$VERSION" ]; then
+          VERSION="unknown-$(git rev-parse --short HEAD)"
+        fi
+
+        echo "Original version: $RAW_VERSION"
+        echo "Sanitized version: $VERSION"
         echo "VERSION=$VERSION" >> $GITHUB_ENV
         echo "version=$VERSION" >> $GITHUB_OUTPUT
       shell: bash
@@ -143,7 +159,23 @@ jobs:
     - name: Set commit version
       id: version
       run: |
-        VERSION=$(git log --format=%B -1 | head -1)
+        # Get commit message and sanitize it for filename usage
+        # 1. Get first line of commit message
+        # 2. Replace invalid chars (/:<>|?*" ) with underscore
+        # 3. Truncate to 50 chars to avoid too long filenames
+        RAW_VERSION=$(git log --format=%B -1 | head -1)
+        VERSION=$(echo "$RAW_VERSION" | tr -c '[:alnum:]._-' '_' | sed 's/__*/_/g' | cut -c 1-50)
+
+        # Remove trailing underscores
+        VERSION=${VERSION%_}
+
+        # Fallback if empty
+        if [ -z "$VERSION" ]; then
+          VERSION="unknown-$(git rev-parse --short HEAD)"
+        fi
+
+        echo "Original version: $RAW_VERSION"
+        echo "Sanitized version: $VERSION"
         echo "VERSION=$VERSION" >> $GITHUB_ENV
         echo "version=$VERSION" >> $GITHUB_OUTPUT
       shell: bash
@@ -235,7 +267,23 @@ jobs:
     - name: Set commit version
       id: version
       run: |
-        VERSION=$(git log --format=%B -1 | head -1)
+        # Get commit message and sanitize it for filename usage
+        # 1. Get first line of commit message
+        # 2. Replace invalid chars (/:<>|?*" ) with underscore
+        # 3. Truncate to 50 chars to avoid too long filenames
+        RAW_VERSION=$(git log --format=%B -1 | head -1)
+        VERSION=$(echo "$RAW_VERSION" | tr -c '[:alnum:]._-' '_' | sed 's/__*/_/g' | cut -c 1-50)
+
+        # Remove trailing underscores
+        VERSION=${VERSION%_}
+
+        # Fallback if empty
+        if [ -z "$VERSION" ]; then
+          VERSION="unknown-$(git rev-parse --short HEAD)"
+        fi
+
+        echo "Original version: $RAW_VERSION"
+        echo "Sanitized version: $VERSION"
         echo "VERSION=$VERSION" >> $GITHUB_ENV
         echo "version=$VERSION" >> $GITHUB_OUTPUT
       shell: bash
@@ -310,7 +358,23 @@ jobs:
     - name: Set commit version
       id: version
       run: |
-        VERSION=$(git log --format=%B -1 | head -1)
+        # Get commit message and sanitize it for filename usage
+        # 1. Get first line of commit message
+        # 2. Replace invalid chars (/:<>|?*" ) with underscore
+        # 3. Truncate to 50 chars to avoid too long filenames
+        RAW_VERSION=$(git log --format=%B -1 | head -1)
+        VERSION=$(echo "$RAW_VERSION" | tr -c '[:alnum:]._-' '_' | sed 's/__*/_/g' | cut -c 1-50)
+
+        # Remove trailing underscores
+        VERSION=${VERSION%_}
+
+        # Fallback if empty
+        if [ -z "$VERSION" ]; then
+          VERSION="unknown-$(git rev-parse --short HEAD)"
+        fi
+
+        echo "Original version: $RAW_VERSION"
+        echo "Sanitized version: $VERSION"
         echo "VERSION=$VERSION" >> $GITHUB_ENV
         echo "version=$VERSION" >> $GITHUB_OUTPUT
       shell: bash
@@ -379,7 +443,23 @@ jobs:
     - name: Set commit version
       id: version
       run: |
-        VERSION=$(git log --format=%B -1 | head -1)
+        # Get commit message and sanitize it for filename usage
+        # 1. Get first line of commit message
+        # 2. Replace invalid chars (/:<>|?*" ) with underscore
+        # 3. Truncate to 50 chars to avoid too long filenames
+        RAW_VERSION=$(git log --format=%B -1 | head -1)
+        VERSION=$(echo "$RAW_VERSION" | tr -c '[:alnum:]._-' '_' | sed 's/__*/_/g' | cut -c 1-50)
+
+        # Remove trailing underscores
+        VERSION=${VERSION%_}
+
+        # Fallback if empty
+        if [ -z "$VERSION" ]; then
+          VERSION="unknown-$(git rev-parse --short HEAD)"
+        fi
+
+        echo "Original version: $RAW_VERSION"
+        echo "Sanitized version: $VERSION"
         echo "VERSION=$VERSION" >> $GITHUB_ENV
         echo "version=$VERSION" >> $GITHUB_OUTPUT
       shell: bash
@@ -437,7 +517,23 @@ jobs:
     - name: Set commit version
       id: version
       run: |
-        VERSION=$(git log --format=%B -1 | head -1)
+        # Get commit message and sanitize it for filename usage
+        # 1. Get first line of commit message
+        # 2. Replace invalid chars (/:<>|?*" ) with underscore
+        # 3. Truncate to 50 chars to avoid too long filenames
+        RAW_VERSION=$(git log --format=%B -1 | head -1)
+        VERSION=$(echo "$RAW_VERSION" | tr -c '[:alnum:]._-' '_' | sed 's/__*/_/g' | cut -c 1-50)
+
+        # Remove trailing underscores
+        VERSION=${VERSION%_}
+
+        # Fallback if empty
+        if [ -z "$VERSION" ]; then
+          VERSION="unknown-$(git rev-parse --short HEAD)"
+        fi
+
+        echo "Original version: $RAW_VERSION"
+        echo "Sanitized version: $VERSION"
         echo "VERSION=$VERSION" >> $GITHUB_ENV
         echo "version=$VERSION" >> $GITHUB_OUTPUT
       shell: bash

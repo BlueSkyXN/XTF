@@ -782,7 +782,7 @@ class XTFSyncEngine:
         print("\n" + "=" * 60)
         print("📊 列差异检测报告")
         print(f"时间: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        print(f"模式: 逻辑同步+结果检测")
+        print("模式: 逻辑同步+结果检测")
         print("=" * 60)
 
         if formula_cols:
