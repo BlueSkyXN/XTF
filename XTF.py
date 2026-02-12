@@ -182,6 +182,8 @@ def main():
         print("\n📋 已加载配置:")
         print(f"  配置文件: {config_file}")
         print(f"  数据文件: {config.file_path}")
+        if config.excel_sheet_name is not None:
+            print(f"  Excel工作表: {config.excel_sheet_name}")
         print(f"  同步模式: {config.sync_mode.value}")
         print(f"  索引列: {config.index_column or '未指定'}")
         print(f"  批处理大小: {config.batch_size}")
@@ -230,12 +232,26 @@ def main():
             print("   ⚠️  警告: CSV格式当前处于实验性测试阶段")
             print("   🏭 生产环境建议使用Excel格式(.xlsx/.xls)")
 
+        # 准备读取参数
+        is_excel_with_sheet = (
+            config.excel_sheet_name is not None
+            and file_path.suffix.lower() in ['.xlsx', '.xls']
+        )
+
+        read_kwargs = {}
+        if is_excel_with_sheet:
+            read_kwargs['sheet_name'] = config.excel_sheet_name
+
         try:
             reader = DataFileReader()
-            df = reader.read_file(file_path)
+            df = reader.read_file(file_path, **read_kwargs)
             print(f"✅ 文件读取成功，共 {len(df)} 行，{len(df.columns)} 列")
+            if is_excel_with_sheet:
+                print(f"   读取工作表: {config.excel_sheet_name}")
         except ValueError as e:
             print(f"\n❌ 文件读取失败: {e}")
+            if is_excel_with_sheet and ("Worksheet" in str(e) or "sheet" in str(e).lower()):
+                print(f"💡 提示: 指定的工作表 '{config.excel_sheet_name}' 可能不存在，请检查名称或索引")
             return
         except Exception as e:
             print(f"\n❌ 文件读取异常: {e}")

@@ -8,6 +8,8 @@
 # 基础配置
 file_path: "data.xlsx"                    # 数据文件路径（推荐 .xlsx，稳定可靠）
                                           # 🧪 也支持 .csv（测试阶段）
+excel_sheet_name: null                   # Excel工作表名称或索引（0=第一个sheet），null=默认第一个
+                                          # 仅对Excel文件(.xlsx/.xls)生效，CSV文件忽略此参数
 app_id: "cli_your_app_id_here"            # 飞书应用ID
 app_secret: "your_app_secret_here"        # 飞书应用密钥
 target_type: "bitable"                    # 目标类型: bitable(多维表格) 或 sheet(电子表格)
