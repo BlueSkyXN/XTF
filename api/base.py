@@ -17,7 +17,7 @@
     RateLimiter:
         接口频率限制器，通过控制调用间隔确保不超过 API 限流阈值。
         使用简单的时间戳记录实现最小间隔控制。
-    
+
     RetryableAPIClient:
         可重试的 API 客户端，自动处理常见错误并重试：
         - HTTP 429（频率限制）：等待后重试
@@ -41,7 +41,7 @@
     >>> limiter = RateLimiter(delay=0.5)  # 500ms间隔
     >>> client = RetryableAPIClient(max_retries=3, rate_limiter=limiter)
     >>> response = client.call_api("GET", "https://api.example.com/data")
-    
+
     # 带参数的请求
     >>> response = client.call_api(
     ...     "POST",
@@ -53,7 +53,7 @@
 配置参数：
     RateLimiter:
         - delay (float): 调用间隔时间，单位秒，默认 0.5
-    
+
     RetryableAPIClient:
         - max_retries (int): 最大重试次数，默认 3
         - rate_limiter (RateLimiter): 频率限制器实例

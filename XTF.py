@@ -32,10 +32,10 @@ XTF (Excel To Feishu) - 统一入口模块
 使用示例：
     # 基本用法（使用配置文件）
     $ python XTF.py --target-type bitable --config config.yaml
-    
+
     # 指定目标类型和同步模式
     $ python XTF.py --target-type sheet --sync-mode full
-    
+
     # 调试模式
     $ python XTF.py --target-type bitable --log-level DEBUG
 
@@ -82,17 +82,17 @@ from utils.excel_reader import print_engine_info
 def setup_logger():
     """
     设置基础日志器
-    
+
     初始化根日志器，配置控制台输出处理器和统一格式化器。
     此函数确保日志系统只被初始化一次，避免重复添加处理器。
-    
+
     日志格式：
         时间戳 - 日志级别 - 消息内容
         示例：2026-01-24 10:30:45,123 - INFO - 同步开始
-    
+
     Returns:
         logging.Logger: 配置好的根日志器实例
-    
+
     注意：
         - 默认日志级别为 INFO
         - 实际运行时会根据配置文件或命令行参数调整日志级别
@@ -111,7 +111,7 @@ def setup_logger():
 def main():
     """
     主函数 - XTF程序入口点
-    
+
     执行流程：
         1. 初始化日志系统
         2. 显示程序信息和 Excel 引擎状态
@@ -122,14 +122,14 @@ def main():
         7. 读取数据文件到 DataFrame
         8. 执行数据同步
         9. 输出同步结果和链接
-    
+
     异常处理：
         - KeyboardInterrupt: 用户中断（Ctrl+C），优雅退出
         - Exception: 捕获所有其他异常，记录错误日志
-    
+
     返回值：
         无返回值，通过打印输出和日志记录同步状态
-    
+
     注意：
         - 配置优先级：命令行参数 > 配置文件 > 智能推断 > 系统默认
         - CSV 文件会显示实验性警告
@@ -235,12 +235,12 @@ def main():
         # 准备读取参数
         is_excel_with_sheet = (
             config.excel_sheet_name is not None
-            and file_path.suffix.lower() in ['.xlsx', '.xls']
+            and file_path.suffix.lower() in [".xlsx", ".xls"]
         )
 
         read_kwargs = {}
         if is_excel_with_sheet:
-            read_kwargs['sheet_name'] = config.excel_sheet_name
+            read_kwargs["sheet_name"] = config.excel_sheet_name
 
         try:
             reader = DataFileReader()
@@ -250,8 +250,12 @@ def main():
                 print(f"   读取工作表: {config.excel_sheet_name}")
         except ValueError as e:
             print(f"\n❌ 文件读取失败: {e}")
-            if is_excel_with_sheet and ("Worksheet" in str(e) or "sheet" in str(e).lower()):
-                print(f"💡 提示: 指定的工作表 '{config.excel_sheet_name}' 可能不存在，请检查名称或索引")
+            if is_excel_with_sheet and (
+                "Worksheet" in str(e) or "sheet" in str(e).lower()
+            ):
+                print(
+                    f"💡 提示: 指定的工作表 '{config.excel_sheet_name}' 可能不存在，请检查名称或索引"
+                )
             return
         except Exception as e:
             print(f"\n❌ 文件读取异常: {e}")

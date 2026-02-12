@@ -47,16 +47,16 @@ CSV 编码处理：
 使用示例：
     >>> from core.reader import DataFileReader
     >>> reader = DataFileReader()
-    >>> 
+    >>>
     >>> # 读取 Excel 文件
     >>> df = reader.read_file(Path('data.xlsx'))
-    >>> 
+    >>>
     >>> # 读取 CSV 文件
     >>> df = reader.read_file(Path('data.csv'))
-    >>> 
+    >>>
     >>> # 带额外参数读取
     >>> df = reader.read_file(Path('data.xlsx'), sheet_name='Sheet2')
-    >>> 
+    >>>
     >>> # 检查格式支持
     >>> if DataFileReader.is_supported(Path('file.xlsx')):
     ...     df = reader.read_file(Path('file.xlsx'))

@@ -19,12 +19,12 @@
         延迟时间按指数增长，适合应对突发限流
         delay = initial_delay × multiplier^attempt
         示例：0.5s → 1s → 2s → 4s → 8s
-    
+
     LinearGrowthRetry（线性增长）：
         延迟时间线性增长，适合稳定限流场景
         delay = initial_delay + increment × attempt
         示例：0.5s → 1s → 1.5s → 2s → 2.5s
-    
+
     FixedWaitRetry（固定等待）：
         延迟时间恒定，适合已知限流间隔的场景
         delay = initial_delay（恒定）
@@ -34,12 +34,12 @@
     FixedWaitRateLimit（固定等待频控）：
         每次请求后等待固定时间
         适合：简单场景，API 有明确的调用间隔要求
-    
+
     SlidingWindowRateLimit（滑动时间窗频控）：
         在滑动的时间窗口内限制请求数量
         适合：需要平滑请求分布的场景
         特点：窗口随时间滑动，更精确的限流
-    
+
     FixedWindowRateLimit（固定时间窗频控）：
         在固定的时间窗口内限制请求数量
         适合：API 按固定周期重置配额的场景
@@ -64,7 +64,7 @@
     ...     rate_limit_type="sliding_window",
     ...     rate_limit_config={"window_size": 1.0, "max_requests": 10}
     ... )
-    
+
     # 执行请求
     >>> result = controller.get_controller().execute_request(api_call)
 

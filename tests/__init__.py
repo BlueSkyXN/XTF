@@ -20,13 +20,13 @@ XTF 测试套件包
 运行测试：
     # 运行所有测试
     $ pytest tests/
-    
+
     # 运行特定测试文件
     $ pytest tests/test_config.py
-    
+
     # 运行带覆盖率报告
     $ pytest tests/ --cov=core --cov=api
-    
+
     # 详细输出
     $ pytest tests/ -v
 

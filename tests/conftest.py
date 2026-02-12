@@ -20,12 +20,12 @@ Fixtures 分类：
         - sample_sheet_config: 电子表格测试配置
         - sample_selective_sync_config: 选择性同步配置
         - sample_config_dict: 配置字典
-    
+
     数据 Fixtures：
         - sample_dataframe: 基础测试 DataFrame
         - sample_dataframe_with_types: 多类型测试 DataFrame
         - sample_records: 飞书记录格式数据
-    
+
     文件 Fixtures：
         - temp_excel_file: 临时 Excel 文件
         - temp_csv_file: 临时 CSV 文件
@@ -36,7 +36,7 @@ Fixtures 分类：
     def test_something(sample_bitable_config):
         config = sample_bitable_config
         assert config.target_type == TargetType.BITABLE
-    
+
     # 使用多个 fixtures
     def test_sync(sample_sheet_config, sample_dataframe):
         config = sample_sheet_config

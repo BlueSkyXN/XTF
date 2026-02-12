@@ -19,11 +19,11 @@
         - FieldTypeStrategy: 字段类型选择策略（raw/base/auto/intelligence）
         - SyncMode: 同步模式（full/incremental/overwrite/clone）
         - TargetType: 目标类型（bitable/sheet）
-    
+
     配置数据类：
         - SelectiveSyncConfig: 选择性同步配置
         - SyncConfig: 统一同步配置（主配置类）
-    
+
     管理器类：
         - ConfigManager: 配置管理器（静态方法集合）
 
@@ -39,10 +39,10 @@
 使用示例：
     # 从配置文件创建配置
     >>> config = ConfigManager.create_config()
-    
+
     # 创建示例配置文件
     >>> create_sample_config("config.yaml", TargetType.BITABLE)
-    
+
     # 直接创建配置对象
     >>> config = SyncConfig(
     ...     file_path="data.xlsx",
@@ -148,7 +148,9 @@ class SyncConfig:
     start_row: int = 1  # 开始行号（1-based）
     start_column: str = "A"  # 开始列号
     # 电子表格读取渲染选项（可选）
-    sheet_value_render_option: Optional[str] = None  # ToString/Formula/FormattedValue/UnformattedValue
+    sheet_value_render_option: Optional[str] = (
+        None  # ToString/Formula/FormattedValue/UnformattedValue
+    )
     sheet_datetime_render_option: Optional[str] = None  # FormattedString
     # 电子表格读取/写入范围控制（默认 5000x100）
     sheet_scan_max_rows: int = 5000

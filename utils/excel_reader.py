@@ -15,7 +15,7 @@ Excel 智能读取模块
         - 支持格式：.xlsx, .xlsm, .xls, .xlsb, .ods
         - 限制：仅支持读取，不支持写入
         - 安装：pip install python-calamine
-    
+
     OpenPyXL:
         - 实现语言：Python
         - 性能：📊 标准性能
@@ -31,10 +31,10 @@ Excel 智能读取模块
 核心函数：
     smart_read_excel(file_path, sheet_name, **kwargs):
         智能读取 Excel 文件，自动选择最优引擎
-    
+
     get_available_engines():
         检测当前环境可用的 Excel 读取引擎
-    
+
     print_engine_info(verbose):
         打印/返回当前可用的 Excel 引擎信息
 
@@ -49,13 +49,13 @@ Excel 智能读取模块
     >>> df = smart_read_excel('data.xlsx')
     >>> df = smart_read_excel('data.xlsx', sheet_name='Sheet2')
     >>> df = smart_read_excel('data.xlsx', header=0, dtype={'ID': str})
-    
+
     # 检测可用引擎
     >>> from utils.excel_reader import get_available_engines
     >>> engines = get_available_engines()
     >>> print(f"主引擎: {engines['primary']}")
     >>> print(f"备用引擎: {engines['fallback']}")
-    
+
     # 打印引擎信息
     >>> from utils.excel_reader import print_engine_info
     >>> print_engine_info()

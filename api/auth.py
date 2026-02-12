@@ -36,10 +36,10 @@ API 端点：
 使用示例：
     # 初始化认证管理器
     >>> auth = FeishuAuth(app_id="cli_xxx", app_secret="xxx")
-    >>> 
+    >>>
     >>> # 获取访问令牌
     >>> token = auth.get_tenant_access_token()
-    >>> 
+    >>>
     >>> # 获取认证头（推荐方式）
     >>> headers = auth.get_auth_headers()
     >>> # headers = {

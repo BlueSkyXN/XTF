@@ -52,16 +52,16 @@ API 端点（基础路径：https://open.feishu.cn/open-apis/sheets）：
 
 使用示例：
     >>> from api import FeishuAuth, SheetAPI
-    >>> 
+    >>>
     >>> auth = FeishuAuth(app_id, app_secret)
     >>> api = SheetAPI(auth, start_row=1, start_column="A")
-    >>> 
+    >>>
     >>> # 获取表格信息
     >>> info = api.get_sheet_info(spreadsheet_token)
-    >>> 
+    >>>
     >>> # 读取数据
     >>> data = api.get_sheet_data(spreadsheet_token, "Sheet1!A1:C10")
-    >>> 
+    >>>
     >>> # 写入数据
     >>> values = [["姓名", "年龄"], ["张三", 25], ["李四", 30]]
     >>> api.write_sheet_data(spreadsheet_token, sheet_id, values)
@@ -299,9 +299,7 @@ class SheetAPI:
         return value_range.get("values", [])
 
     def identify_formula_columns(
-        self,
-        formula_data: List[List[Any]],
-        headers: Optional[List[str]] = None
+        self, formula_data: List[List[Any]], headers: Optional[List[str]] = None
     ) -> set:
         """
         识别包含公式的列
@@ -422,9 +420,7 @@ class SheetAPI:
                 start_col_num,
                 end_col_num,
             ):
-                range_str = (
-                    f"{sheet_id}!{start_col}{row_start}:{end_col}{row_end}"
-                )
+                range_str = f"{sheet_id}!{start_col}{row_start}:{end_col}{row_end}"
                 chunk_values = _read_range(range_str)
                 return _pad_rows(chunk_values, chunk_rows)
 
@@ -455,8 +451,7 @@ class SheetAPI:
             col_start_letter = self.column_number_to_letter(col_start_num)
             col_end_letter = self.column_number_to_letter(col_end_num)
             range_str = (
-                f"{sheet_id}!"
-                f"{col_start_letter}{row_idx}:{col_end_letter}{row_idx}"
+                f"{sheet_id}!" f"{col_start_letter}{row_idx}:{col_end_letter}{row_idx}"
             )
             try:
                 values = _read_range(range_str)
@@ -467,9 +462,7 @@ class SheetAPI:
             except Exception as e:
                 if _is_too_large_response(e) and col_span > 1:
                     mid = col_start_num + (col_span // 2) - 1
-                    left = _read_single_row_adaptive_cols(
-                        row_idx, col_start_num, mid
-                    )
+                    left = _read_single_row_adaptive_cols(row_idx, col_start_num, mid)
                     right = _read_single_row_adaptive_cols(
                         row_idx, mid + 1, col_end_num
                     )
@@ -506,9 +499,7 @@ class SheetAPI:
                             row_start, start_col_num, end_col_num
                         )
                         if len(row_values) < total_cols:
-                            row_values.extend(
-                                [None] * (total_cols - len(row_values))
-                            )
+                            row_values.extend([None] * (total_cols - len(row_values)))
                         values_all.append(row_values)
                         break
                     raise
@@ -885,7 +876,9 @@ class SheetAPI:
             f"准备清空范围: {full_range} (单次上限 {max_rows} 行 × {max_cols} 列)"
         )
 
-        def _build_empty_values_for_range(range_to_clear: str) -> Optional[List[List[str]]]:
+        def _build_empty_values_for_range(
+            range_to_clear: str,
+        ) -> Optional[List[List[str]]]:
             import re
 
             match = re.match(r"([^!]+)!([A-Z]+)(\d+):([A-Z]+)(\d+)", range_to_clear)

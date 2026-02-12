@@ -52,19 +52,19 @@ API 端点（基础路径：https://open.feishu.cn/open-apis/bitable/v1）：
 
 使用示例：
     >>> from api import FeishuAuth, BitableAPI
-    >>> 
+    >>>
     >>> auth = FeishuAuth(app_id, app_secret)
     >>> api = BitableAPI(auth)
-    >>> 
+    >>>
     >>> # 获取字段列表
     >>> fields = api.list_fields(app_token, table_id)
-    >>> 
+    >>>
     >>> # 创建字段
     >>> api.create_field(app_token, table_id, "姓名", field_type=1)
-    >>> 
+    >>>
     >>> # 获取所有记录
     >>> records = api.get_all_records(app_token, table_id)
-    >>> 
+    >>>
     >>> # 批量创建记录
     >>> new_records = [{"fields": {"姓名": "张三", "年龄": 25}}]
     >>> api.batch_create_records(app_token, table_id, new_records)
@@ -74,7 +74,7 @@ API 端点（基础路径：https://open.feishu.cn/open-apis/bitable/v1）：
     1. 首次请求不传 page_token
     2. 响应中 has_more=true 时，使用返回的 page_token 继续请求
     3. has_more=false 时表示已获取全部数据
-    
+
     get_all_records 方法已封装完整的分页逻辑。
 
 性能优化参数：
@@ -121,13 +121,13 @@ class BitableAPI:
     # 数据来源：https://open.feishu.cn/document/ukTMukTMukTM/uUzN04SN3QjL1cDN
     # 作为程序内嵌上限使用，不额外折扣
     OFFICIAL_RATE_LIMITS = {
-        "search": 20,         # 查询记录
-        "batch_get": 20,      # 批量获取记录
-        "batch_create": 50,   # 新增多条记录
-        "batch_update": 50,   # 更新多条记录
-        "batch_delete": 50,   # 删除多条记录
-        "list_fields": 20,    # 列出字段
-        "create_field": 10,   # 新增字段
+        "search": 20,  # 查询记录
+        "batch_get": 20,  # 批量获取记录
+        "batch_create": 50,  # 新增多条记录
+        "batch_update": 50,  # 更新多条记录
+        "batch_delete": 50,  # 删除多条记录
+        "list_fields": 20,  # 列出字段
+        "create_field": 10,  # 新增字段
     }
 
     # 需要重试的飞书业务错误码（瞬态错误，重试可能恢复）
@@ -205,7 +205,7 @@ class BitableAPI:
 
             # 可重试的业务错误
             if attempt < max_retries:
-                wait_time = 2 ** attempt
+                wait_time = 2**attempt
                 error_msg = result.get("msg", "未知错误")
                 self.logger.warning(
                     f"飞书业务错误码 {code}（{error_msg}），等待 {wait_time}s 后第 {attempt + 1} 次重试..."
@@ -363,9 +363,7 @@ class BitableAPI:
         )
 
         if result is None:
-            raise Exception(
-                f"搜索记录响应解析失败, HTTP状态码: {response.status_code}"
-            )
+            raise Exception(f"搜索记录响应解析失败, HTTP状态码: {response.status_code}")
 
         if result.get("code") != 0:
             error_msg = result.get("msg", "未知错误")
@@ -415,11 +413,7 @@ class BitableAPI:
             all_records.extend(records)
             page_num += 1
 
-            if (
-                page_num == 1
-                or page_num % 5 == 0
-                or not next_page_token
-            ):
+            if page_num == 1 or page_num % 5 == 0 or not next_page_token:
                 self.logger.info(
                     f"已拉取 {len(all_records)} 条记录（第 {page_num} 页）"
                 )

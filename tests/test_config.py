@@ -12,11 +12,11 @@
         - TargetType 枚举值
         - SyncMode 枚举值
         - FieldTypeStrategy 枚举值
-    
+
     选择性同步配置测试（TestSelectiveSyncConfig）：
         - 默认值验证
         - 自定义值验证
-    
+
     同步配置测试（TestSyncConfig）：
         - 多维表格配置创建
         - 电子表格配置创建
@@ -25,18 +25,18 @@
         - SelectiveSync 与 Clone 模式互斥
         - 列名验证（重复、空值、None）
         - max_gap_for_merge 范围验证
-    
+
     配置管理器测试（TestConfigManager）：
         - 从文件加载配置
         - 加载不存在的文件
         - 加载无效 YAML 文件
         - 保存配置到文件
-    
+
     示例配置创建测试（TestCreateSampleConfig）：
         - 多维表格示例配置
         - 电子表格示例配置
         - 已存在文件不覆盖
-    
+
     目标类型描述测试（TestGetTargetDescription）：
         - 多维表格描述
         - 电子表格描述

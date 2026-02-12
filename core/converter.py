@@ -19,7 +19,7 @@
 核心类：
     ConversionStats (TypedDict):
         转换统计信息结构，记录成功/失败数量和警告信息
-    
+
     DataConverter:
         统一数据转换器，根据目标类型提供不同的转换策略
 
@@ -51,7 +51,7 @@
     >>> converter = DataConverter(TargetType.BITABLE)
     >>> records = converter.df_to_records(dataframe, field_types)
     >>> hash_val = converter.get_index_value_hash(row, "ID")
-    
+
     # 电子表格模式
     >>> converter = DataConverter(TargetType.SHEET)
     >>> values = converter.df_to_values(dataframe, include_headers=True)
@@ -134,8 +134,7 @@ class DataConverter:
 
                 try:
                     if all(
-                        pd.isna(item)
-                        or (isinstance(item, str) and not item.strip())
+                        pd.isna(item) or (isinstance(item, str) and not item.strip())
                         for item in value
                     ):
                         return None
@@ -1277,11 +1276,13 @@ class DataConverter:
         return column_data
 
     def get_column_positions(
-        self, df: pd.DataFrame, selected_columns: Optional[List[str]] = None,
-        start_column_offset: int = 0
+        self,
+        df: pd.DataFrame,
+        selected_columns: Optional[List[str]] = None,
+        start_column_offset: int = 0,
     ) -> Dict[str, int]:
         """获取列在原始DataFrame中的位置映射（1-based），考虑起始列偏移
-        
+
         Args:
             df: DataFrame
             selected_columns: 选择的列名列表

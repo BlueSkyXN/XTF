@@ -25,13 +25,13 @@
 同步模式说明：
     - full（全量同步）：
         对比索引列，已存在的记录更新，不存在的新增
-        
+
     - incremental（增量同步）：
         仅新增本地有而远程没有的记录，跳过已存在记录
-        
+
     - overwrite（覆盖同步）：
         先删除远程表中与本地数据索引匹配的记录，再新增全部本地数据
-        
+
     - clone（克隆同步）：
         清空远程表全部数据，然后完整写入本地数据
 
@@ -66,7 +66,7 @@
 使用示例：
     >>> from core.config import SyncConfig, TargetType
     >>> from core.engine import XTFSyncEngine
-    >>> 
+    >>>
     >>> config = SyncConfig(...)
     >>> engine = XTFSyncEngine(config)
     >>> success = engine.sync(dataframe)
@@ -485,9 +485,7 @@ class XTFSyncEngine:
         grid = self._get_sheet_grid_properties()
         if grid and isinstance(self.api, SheetAPI):
             row_count, col_count = grid
-            start_col_num = self.api.column_letter_to_number(
-                self.config.start_column
-            )
+            start_col_num = self.api.column_letter_to_number(self.config.start_column)
             if row_count < self.config.start_row or col_count < start_col_num:
                 self.logger.info(
                     f"工作表网格范围小于起始位置: "
@@ -507,9 +505,7 @@ class XTFSyncEngine:
             end_row = 500000
             end_col = "ZZ"
             read_range = f"{self.config.sheet_id}!{start_cell}:{end_col}{end_row}"
-            self.logger.warning(
-                "无法获取工作表网格属性，退回默认读取范围，可能较大"
-            )
+            self.logger.warning("无法获取工作表网格属性，退回默认读取范围，可能较大")
 
         self.logger.info(f"尝试从范围读取数据: {read_range}")
 
@@ -557,7 +553,7 @@ class XTFSyncEngine:
             return pd.DataFrame()
 
     def get_sheet_data_with_validation(
-        self
+        self,
     ) -> tuple[pd.DataFrame, Optional[pd.DataFrame], Optional[set]]:
         """
         获取电子表格数据（支持双读用于结果检测）
@@ -1070,7 +1066,9 @@ class XTFSyncEngine:
                 self.logger.warning("所有列都是公式列，且启用了公式保护，无需同步")
                 return True
             sync_df = df[non_formula_cols].copy()
-            self.logger.info(f"🔒 公式保护已启用，仅同步 {len(non_formula_cols)} 个数据列")
+            self.logger.info(
+                f"🔒 公式保护已启用，仅同步 {len(non_formula_cols)} 个数据列"
+            )
 
         # 原有的完整表格同步逻辑
         current_index = self.converter.build_data_index(
@@ -1106,7 +1104,9 @@ class XTFSyncEngine:
                 for col in sync_df.columns:
                     if col in updated_df.columns:
                         # 使用 .iloc 双索引避免链式赋值问题 (SettingWithCopyWarning)
-                        updated_df.iloc[current_row_idx, updated_df.columns.get_loc(col)] = new_row[col]
+                        updated_df.iloc[
+                            current_row_idx, updated_df.columns.get_loc(col)
+                        ] = new_row[col]
 
             # 写入更新后的数据
             values = self.converter.df_to_values(updated_df)
@@ -1528,15 +1528,13 @@ class XTFSyncEngine:
                 current_df = pd.DataFrame(columns=effective_columns)
 
         # 准备选择性列数据
-        column_data = self.converter.df_to_column_data(
-            df, effective_columns
-        )
-        
+        column_data = self.converter.df_to_column_data(df, effective_columns)
+
         # 获取起始列偏移量
         start_col_offset = 0
         if isinstance(self.api, SheetAPI):
             start_col_offset = self.api.start_col_num - 1
-            
+
         column_positions = self.converter.get_column_positions(
             current_df, effective_columns, start_col_offset
         )

@@ -10,39 +10,39 @@
 测试覆盖：
     初始化测试（TestDataFileReaderInit）：
         - 读取器初始化
-    
+
     支持格式测试（TestSupportedFormats）：
         - xlsx 格式支持
         - xls 格式支持
         - csv 格式支持
         - 获取支持格式字符串
-    
+
     格式支持检查测试（TestIsSupported）：
         - xlsx 支持
         - xls 支持
         - csv 支持
         - 不支持的格式（txt, json, xml）
         - 大小写不敏感
-    
+
     Excel 文件读取测试（TestReadExcel）：
         - 读取 xlsx 文件
         - 文件不存在异常
         - 带额外参数读取
-    
+
     CSV 文件读取测试（TestReadCsv）：
         - 读取 CSV 文件
         - UTF-8 编码
         - GBK 编码
         - 带额外参数读取
-    
+
     不支持格式读取测试（TestReadUnsupportedFormat）：
         - 读取 txt 格式
         - 读取 json 格式
-    
+
     文件格式自动检测测试（TestReadFileAutoDetection）：
         - 自动检测 xlsx
         - 自动检测 csv
-    
+
     边界情况测试（TestEdgeCases）：
         - 空 Excel 文件
         - 空 CSV 文件

@@ -18,11 +18,11 @@
 导出的类：
     认证相关：
         - FeishuAuth: 飞书认证管理器，负责获取和刷新访问令牌
-    
+
     网络层：
         - RateLimiter: 接口频率限制器
         - RetryableAPIClient: 可重试的 API 客户端
-    
+
     业务 API：
         - BitableAPI: 多维表格 API 客户端
         - SheetAPI: 电子表格 API 客户端
@@ -34,14 +34,14 @@ API 调用流程：
 
 使用示例：
     >>> from api import FeishuAuth, BitableAPI, RateLimiter, RetryableAPIClient
-    >>> 
+    >>>
     >>> # 初始化认证
     >>> auth = FeishuAuth(app_id, app_secret)
-    >>> 
+    >>>
     >>> # 初始化 API 客户端
     >>> rate_limiter = RateLimiter(delay=0.5)
     >>> api_client = RetryableAPIClient(max_retries=3, rate_limiter=rate_limiter)
-    >>> 
+    >>>
     >>> # 初始化多维表格 API
     >>> bitable_api = BitableAPI(auth, api_client)
     >>> records = bitable_api.get_all_records(app_token, table_id)
