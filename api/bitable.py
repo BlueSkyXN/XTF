@@ -117,6 +117,37 @@ class BitableAPI:
     MAX_BATCH_UPDATE_SIZE = 1000
     MAX_BATCH_DELETE_SIZE = 500
 
+    # 飞书官方接口频率限制（次/秒）
+    # 数据来源：https://open.feishu.cn/document/ukTMukTMukTM/uUzN04SN3QjL1cDN
+    # 作为程序内嵌上限使用，不额外折扣
+    OFFICIAL_RATE_LIMITS = {
+        "search": 20,         # 查询记录
+        "batch_get": 20,      # 批量获取记录
+        "batch_create": 50,   # 新增多条记录
+        "batch_update": 50,   # 更新多条记录
+        "batch_delete": 50,   # 删除多条记录
+        "list_fields": 20,    # 列出字段
+        "create_field": 10,   # 新增字段
+    }
+
+    # 需要重试的飞书业务错误码（瞬态错误，重试可能恢复）
+    RETRYABLE_BIZ_CODES = {
+        1254290,  # TooManyRequest: 请求过快
+        1254607,  # Data not ready: 前置操作未完成或数据过大
+        1254002,  # Fail: 通用失败（并发/超时等）
+        1254001,  # InternalError: 服务器内部错误
+        1254006,  # Timeout: 超时
+    }
+
+    # 明确不重试的飞书业务错误码（永久性错误，重试无意义）
+    NON_RETRYABLE_BIZ_CODES = {
+        1254000,  # InvalidParameter: 参数错误
+        1254003,  # PermissionDenied: 权限不足
+        1254004,  # NotFound: 资源不存在
+        1254005,  # DuplicateRecord: 记录重复
+        1254040,  # FieldNotFound: 字段不存在
+    }
+
     def __init__(
         self, auth: FeishuAuth, api_client: Optional[RetryableAPIClient] = None
     ):
@@ -130,6 +161,60 @@ class BitableAPI:
         self.auth = auth
         self.api_client = api_client or auth.api_client
         self.logger = logging.getLogger("XTF.bitable")
+
+    def _is_retryable_biz_code(self, code: int) -> bool:
+        """判断飞书业务错误码是否可重试"""
+        if code in self.RETRYABLE_BIZ_CODES:
+            return True
+        if code != 0 and code not in self.NON_RETRYABLE_BIZ_CODES:
+            self.logger.warning(
+                f"未知的飞书业务错误码 {code}，不进行重试。如该错误可恢复，请反馈以更新重试列表。"
+            )
+        return False
+
+    def _call_api_with_biz_retry(
+        self, method: str, url: str, max_retries: int = 3, **kwargs
+    ):
+        """
+        调用API并处理飞书业务错误码重试。
+
+        飞书部分限流错误以 HTTP 200 + 业务错误码返回（如 1254290 TooManyRequest），
+        HTTP层面的重试机制无法捕获这类错误，需要在应用层检查并重试。
+
+        Args:
+            method: HTTP方法
+            url: 请求URL
+            max_retries: 最大重试次数
+            **kwargs: 传递给 call_api 的参数
+
+        Returns:
+            (response, result_dict) 元组
+        """
+        import time as _time
+
+        for attempt in range(max_retries + 1):
+            response = self.api_client.call_api(method, url, **kwargs)
+            try:
+                result = response.json()
+            except ValueError:
+                return response, None
+
+            code = result.get("code", 0)
+            if code == 0 or not self._is_retryable_biz_code(code):
+                return response, result
+
+            # 可重试的业务错误
+            if attempt < max_retries:
+                wait_time = 2 ** attempt
+                error_msg = result.get("msg", "未知错误")
+                self.logger.warning(
+                    f"飞书业务错误码 {code}（{error_msg}），等待 {wait_time}s 后第 {attempt + 1} 次重试..."
+                )
+                _time.sleep(wait_time)
+            else:
+                return response, result
+
+        return response, result
 
     def list_fields(self, app_token: str, table_id: str) -> List[Dict[str, Any]]:
         """
@@ -156,15 +241,13 @@ class BitableAPI:
             if page_token:
                 params["page_token"] = page_token
 
-            response = self.api_client.call_api(
+            response, result = self._call_api_with_biz_retry(
                 "GET", url, headers=headers, params=params
             )
 
-            try:
-                result = response.json()
-            except ValueError as e:
+            if result is None:
                 raise Exception(
-                    f"获取字段列表响应解析失败: {e}, HTTP状态码: {response.status_code}"
+                    f"获取字段列表响应解析失败, HTTP状态码: {response.status_code}"
                 )
 
             if result.get("code") != 0:
@@ -201,13 +284,13 @@ class BitableAPI:
         headers = self.auth.get_auth_headers()
         data = {"field_name": field_name, "type": field_type}
 
-        response = self.api_client.call_api("POST", url, headers=headers, json=data)
+        response, result = self._call_api_with_biz_retry(
+            "POST", url, headers=headers, json=data
+        )
 
-        try:
-            result = response.json()
-        except ValueError as e:
+        if result is None:
             self.logger.error(
-                f"创建字段 '{field_name}' 响应解析失败: {e}, HTTP状态码: {response.status_code}"
+                f"创建字段 '{field_name}' 响应解析失败, HTTP状态码: {response.status_code}"
             )
             return False
 
@@ -232,6 +315,7 @@ class BitableAPI:
         table_id: str,
         page_token: Optional[str] = None,
         page_size: int = 100,
+        field_names: Optional[List[str]] = None,
     ) -> Tuple[List[Dict], Optional[str]]:
         """
         搜索记录
@@ -241,6 +325,7 @@ class BitableAPI:
             table_id: 数据表ID
             page_token: 分页标记
             page_size: 页面大小
+            field_names: 指定返回的字段名称列表，为None时返回全部字段
 
         Returns:
             记录列表和下一页标记的元组
@@ -268,18 +353,18 @@ class BitableAPI:
         if page_token:
             params["page_token"] = page_token
 
-        # 请求体可以包含过滤条件、排序等（当前为空）
+        # 请求体：支持 field_names 指定返回字段，减少不必要的数据传输
         data: Dict[str, Any] = {}
+        if field_names is not None:
+            data["field_names"] = field_names
 
-        response = self.api_client.call_api(
+        response, result = self._call_api_with_biz_retry(
             "POST", url, headers=headers, params=params, json=data
         )
 
-        try:
-            result = response.json()
-        except ValueError as e:
+        if result is None:
             raise Exception(
-                f"搜索记录响应解析失败: {e}, HTTP状态码: {response.status_code}"
+                f"搜索记录响应解析失败, HTTP状态码: {response.status_code}"
             )
 
         if result.get("code") != 0:
@@ -296,13 +381,16 @@ class BitableAPI:
 
         return records, next_page_token
 
-    def get_all_records(self, app_token: str, table_id: str) -> List[Dict]:
+    def get_all_records(
+        self, app_token: str, table_id: str, field_names: Optional[List[str]] = None
+    ) -> List[Dict]:
         """
         获取所有记录
 
         Args:
             app_token: 应用Token
             table_id: 数据表ID
+            field_names: 指定返回的字段名称列表，为None时返回全部字段
 
         Returns:
             所有记录的列表
@@ -312,11 +400,17 @@ class BitableAPI:
         page_num = 0
         seen_page_tokens = set()
 
-        self.logger.info("开始拉取全部记录...")
+        if field_names is None:
+            field_hint = "（全部字段）"
+        elif len(field_names) == 0:
+            field_hint = "（仅 record_id）"
+        else:
+            field_hint = f"（指定字段: {field_names}）"
+        self.logger.info(f"开始拉取全部记录...{field_hint}")
 
         while True:
             records, next_page_token = self.search_records(
-                app_token, table_id, page_token
+                app_token, table_id, page_token, field_names=field_names
             )
             all_records.extend(records)
             page_num += 1
@@ -377,15 +471,13 @@ class BitableAPI:
 
         data = {"records": records}
 
-        response = self.api_client.call_api(
+        response, result = self._call_api_with_biz_retry(
             "POST", url, headers=headers, params=params, json=data
         )
 
-        try:
-            result = response.json()
-        except ValueError as e:
+        if result is None:
             self.logger.error(
-                f"批量创建记录响应解析失败: {e}, HTTP状态码: {response.status_code}"
+                f"批量创建记录响应解析失败, HTTP状态码: {response.status_code}"
             )
             self.logger.debug(f"响应内容: {response.text[:500]}")
             return False
@@ -434,15 +526,13 @@ class BitableAPI:
 
         data = {"records": records}
 
-        response = self.api_client.call_api(
+        response, result = self._call_api_with_biz_retry(
             "POST", url, headers=headers, params=params, json=data
         )
 
-        try:
-            result = response.json()
-        except ValueError as e:
+        if result is None:
             self.logger.error(
-                f"批量更新记录响应解析失败: {e}, HTTP状态码: {response.status_code}"
+                f"批量更新记录响应解析失败, HTTP状态码: {response.status_code}"
             )
             self.logger.debug(f"响应内容: {response.text[:500]}")
             return False
@@ -484,13 +574,13 @@ class BitableAPI:
         headers = self.auth.get_auth_headers()
         data = {"records": record_ids}
 
-        response = self.api_client.call_api("POST", url, headers=headers, json=data)
+        response, result = self._call_api_with_biz_retry(
+            "POST", url, headers=headers, json=data
+        )
 
-        try:
-            result = response.json()
-        except ValueError as e:
+        if result is None:
             self.logger.error(
-                f"批量删除记录响应解析失败: {e}, HTTP状态码: {response.status_code}"
+                f"批量删除记录响应解析失败, HTTP状态码: {response.status_code}"
             )
             self.logger.debug(f"响应内容: {response.text[:500]}")
             return False

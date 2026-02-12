@@ -51,10 +51,10 @@ jobs:
         run: black --check .
 
       - name: Run MyPy
-        run: mypy core/ api/ --ignore-missing-imports
+        run: mypy core/ api/ utils/ --ignore-missing-imports
 
       - name: Check Python syntax
-        run: python -m py_compile XTF.py core/*.py api/*.py
+        run: python -m py_compile XTF.py core/*.py api/*.py utils/*.py
 
   test:
     name: Unit Tests
@@ -113,7 +113,7 @@ jobs:
 
       - name: Run tests with coverage
         if: ${{ hashFiles('tests/**/test_*.py', 'tests/**/*_test.py') != '' }}
-        run: pytest tests/ -v -m "not integration" --tb=short --cov=core --cov=api --cov-report=xml --cov-report=term
+        run: pytest tests/ -v -m "not integration" --tb=short --cov=core --cov=api --cov=utils --cov-report=xml --cov-report=term
 
       - name: No tests found
         if: ${{ hashFiles('tests/**/test_*.py', 'tests/**/*_test.py') == '' }}

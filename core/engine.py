@@ -337,14 +337,23 @@ class XTFSyncEngine:
             self.logger.error(f"字段检查失败: {e}")
             return False, {}
 
-    def get_all_bitable_records(self) -> List[Dict]:
-        """获取所有多维表格记录"""
+    def get_all_bitable_records(
+        self, field_names: Optional[List[str]] = None
+    ) -> List[Dict]:
+        """获取所有多维表格记录
+
+        Args:
+            field_names: 指定返回的字段名称列表，为None时返回全部字段。
+                         用于减少不必要的数据传输，提升查询性能。
+        """
         if not isinstance(self.api, BitableAPI):
             return []
         if not self.config.app_token or not self.config.table_id:
             self.logger.error("多维表格的 app_token 或 table_id 未配置")
             return []
-        return self.api.get_all_records(self.config.app_token, self.config.table_id)
+        return self.api.get_all_records(
+            self.config.app_token, self.config.table_id, field_names=field_names
+        )
 
     def process_in_batches(
         self, items: List[Any], batch_size: int, processor_func, *args, **kwargs
@@ -856,6 +865,38 @@ class XTFSyncEngine:
         target_columns = self._get_effective_selective_columns(df)
         return df[target_columns]
 
+    # ========== Bitable 字段查询优化 ==========
+
+    def _get_bitable_fetch_field_names(
+        self, df: pd.DataFrame, mode: str
+    ) -> Optional[List[str]]:
+        """
+        根据同步模式计算获取远程记录时需要的字段列表。
+
+        通过飞书查询记录API的 field_names 参数，只返回必要的字段，
+        减少不必要的数据传输，提升查询性能。
+
+        Args:
+            df: 本地数据 DataFrame
+            mode: 同步模式 ('full', 'incremental', 'overwrite', 'clone')
+
+        Returns:
+            field_names 列表，None 表示获取全部字段
+        """
+        if mode == "clone":
+            # clone 模式只需 record_id（API 固定返回），使用空 field_names 返回最小字段集
+            return []
+
+        index_col = self.config.index_column
+        if not index_col:
+            return None  # 无索引列时无法优化
+
+        # full / incremental / overwrite：仅需索引列用于匹配和获取 record_id
+        if mode in ("full", "incremental", "overwrite"):
+            return [index_col]
+
+        return None
+
     # ========== 统一同步方法 ==========
 
     def sync_full(self, df: pd.DataFrame) -> bool:
@@ -894,8 +935,9 @@ class XTFSyncEngine:
                 )
             return False
 
-        # 获取现有记录并建立索引
-        existing_records = self.get_all_bitable_records()
+        # 获取现有记录并建立索引（使用field_names优化，减少数据传输）
+        fetch_fields = self._get_bitable_fetch_field_names(df, "full")
+        existing_records = self.get_all_bitable_records(field_names=fetch_fields)
         self.logger.info(f"🔍 获取到现有记录数量: {len(existing_records)}")
 
         existing_index = self.converter.build_record_index(
@@ -1285,8 +1327,9 @@ class XTFSyncEngine:
                 )
             return False
 
-        # 获取现有记录并建立索引
-        existing_records = self.get_all_bitable_records()
+        # 获取现有记录并建立索引（仅获取索引列，减少数据传输）
+        fetch_fields = self._get_bitable_fetch_field_names(df, "incremental")
+        existing_records = self.get_all_bitable_records(field_names=fetch_fields)
         existing_index = self.converter.build_record_index(
             existing_records, self.config.index_column
         )
@@ -1550,8 +1593,9 @@ class XTFSyncEngine:
 
     def _sync_overwrite_bitable(self, df: pd.DataFrame) -> bool:
         """多维表格覆盖同步"""
-        # 获取现有记录并建立索引
-        existing_records = self.get_all_bitable_records()
+        # 获取现有记录并建立索引（仅获取索引列，减少数据传输）
+        fetch_fields = self._get_bitable_fetch_field_names(df, "overwrite")
+        existing_records = self.get_all_bitable_records(field_names=fetch_fields)
         existing_index = self.converter.build_record_index(
             existing_records, self.config.index_column
         )
@@ -1776,8 +1820,9 @@ class XTFSyncEngine:
 
     def _sync_clone_bitable(self, df: pd.DataFrame) -> bool:
         """多维表格克隆同步"""
-        # 获取所有现有记录
-        existing_records = self.get_all_bitable_records()
+        # 获取所有现有记录（仅获取最小字段集，clone模式只需record_id）
+        fetch_fields = self._get_bitable_fetch_field_names(df, "clone")
+        existing_records = self.get_all_bitable_records(field_names=fetch_fields)
         existing_record_ids = [record["record_id"] for record in existing_records]
 
         self.logger.info(

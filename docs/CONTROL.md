@@ -326,10 +326,76 @@ INFO  - 批量操作完成: 500/500 条记录, 重试 2 次
 | 吞吐量不足 | 增大 `rate_limit_max_requests`，减小延迟 |
 | 突发限流 | 从固定窗口切换到滑动窗口 |
 
-### 飞书 API 限制参考
+### 飞书 API 频率限制参考
+
+**多维表格（Bitable）官方限制**：
+
+| 接口 | 官方限制（程序内嵌上限） | 说明 |
+|------|------------------------|------|
+| 查询记录 (search) | 20 次/秒 | 搜索+分页拉取 |
+| 批量获取 (batch_get) | 20 次/秒 | 按 ID 获取 |
+| 新增记录 (batch_create) | 50 次/秒 | 批量写入 |
+| 更新记录 (batch_update) | 50 次/秒 | 批量更新 |
+| 删除记录 (batch_delete) | 50 次/秒 | 批量删除 |
+| 列出字段 (list_fields) | 20 次/秒 | 字段管理 |
+| 新增字段 (create_field) | 10 次/秒 | 字段创建 |
+
+> 数据来源：[飞书开放平台 API 频率限制](https://open.feishu.cn/document/ukTMukTMukTM/uUzN04SN3QjL1cDN)
+>
+> 官方限制直接作为程序内嵌上限，在 `api/bitable.py` 中定义为 `OFFICIAL_RATE_LIMITS` 常量。
+
+**关键业务错误码处理**：
+
+| 错误码 | 描述 | 处理方式 |
+|--------|------|----------|
+| `1254290` | TooManyRequest（请求过快） | ✅ 自动重试（指数退避） |
+| `1254607` | Data not ready（数据未就绪） | ✅ 自动重试（等待后重试） |
+| `1254002` | Fail（通用失败，常见于并发/超时） | ✅ 自动重试 |
+| `1254001` | InternalError（服务器内部错误） | ✅ 自动重试 |
+| `1254006` | Timeout（超时） | ✅ 自动重试 |
+| `1254000` | InvalidParameter（参数错误） | ❌ 不重试 |
+| `1254003` | PermissionDenied（权限不足） | ❌ 不重试 |
+| `1254004` | NotFound（资源不存在） | ❌ 不重试 |
+| `1254005` | DuplicateRecord（记录重复） | ❌ 不重试 |
+| `1254040` | FieldNotFound（字段不存在） | ❌ 不重试 |
+
+> 注意：上述错误码以 HTTP 200 返回，HTTP 层面的重试无法捕获。
+> 程序在 `BitableAPI._call_api_with_biz_retry()` 中实现应用层重试。
+> 遇到未知错误码时，程序不会重试但会打印 WARNING 日志，便于后续维护。
+
+**两层重试架构**：
+
+```
+请求流程：
+  频控策略（控制发送速率）
+    → HTTP 请求
+      → 第一层：HTTP 重试（429/5xx/网络异常）    [api/base.py]
+        → 第二层：业务重试（飞书业务错误码）       [api/bitable.py]
+```
+
+- **标准模式**：固定间隔 + HTTP 重试 + 业务重试
+- **高级模式**：高级频控策略 + 高级重试策略 + 业务重试
+- 业务重试始终在最内层工作，与标准/高级模式无关
+
+> 详细分析：`local/retry-mechanism-analysis.md`
+
+**建议的频控配置**：
+
+```yaml
+# 查询密集型（大量数据拉取）
+rate_limit_strategy_type: "sliding_window"
+rate_limit_window_size: 1.0
+rate_limit_max_requests: 20   # 查询 API 官方上限
+
+# 写入密集型（大量数据同步）
+rate_limit_strategy_type: "sliding_window"
+rate_limit_window_size: 1.0
+rate_limit_max_requests: 50   # 写入 API 官方上限
+```
 
 | 接口 | 限制 | 建议 |
 |------|------|------|
-| 多维表格批量操作 | ~100 次/秒 | `rate_limit_max_requests: 10-20` |
+| 多维表格查询操作 | 20 次/秒 | `rate_limit_max_requests: 20` |
+| 多维表格写入操作 | 50 次/秒 | `rate_limit_max_requests: 50` |
 | 电子表格读写 | ~100 次/秒 | `rate_limit_max_requests: 10-20` |
 | 单次请求体积 | ≤ 10MB | 使用分块 + 二分重试 |

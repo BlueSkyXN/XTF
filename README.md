@@ -61,7 +61,7 @@ python XTF.py --field-type-strategy intelligence --log-level DEBUG
 
 > ⚠️ overwrite/clone 会删除远程数据，生产环境请先备份！
 
-**详细说明**：[docs/SYNC.md](docs/SYNC.md)
+**详细说明**：[docs/SYNC.md](docs/SYNC.md)（含 Bitable/Sheet 分版本详解）
 
 ## 字段类型策略
 
@@ -118,7 +118,7 @@ XTF/
 | **[docs/README.md](docs/README.md)** | 📚 文档中心，导航与快速入门 |
 | **[docs/ARCH.md](docs/ARCH.md)** | 系统架构，四层设计，组件交互 |
 | **[docs/CONFIG.md](docs/CONFIG.md)** | 配置参数完整参考，CLI 映射 |
-| **[docs/SYNC.md](docs/SYNC.md)** | 同步模式详解，选择性列同步 |
+| **[docs/SYNC.md](docs/SYNC.md)** | 同步模式详解（含 Bitable/Sheet 分版本）、选择性列同步 |
 | **[docs/FIELD_TYPES.md](docs/FIELD_TYPES.md)** | 字段类型策略，检测算法，转换规则 |
 | **[docs/SHEET.md](docs/SHEET.md)** | 电子表格算法，分块机制，公式保护 |
 | **[docs/CONTROL.md](docs/CONTROL.md)** | 高级重试与频控策略配置 |
@@ -133,6 +133,9 @@ XTF/
 
 **Q: 大数据集处理超时？**
 降低 `--batch-size`（如 100-200），增大 `--max-retries`，或启用高级频控。详见 [docs/SHEET.md](docs/SHEET.md)。
+
+**Q: 频繁触发 API 限流（错误码 1254290）？**
+程序内嵌飞书官方频率限制（查询 20/s，写入 50/s）并对限流错误码自动重试。如仍频繁限流，请启用高级频控：详见 [docs/CONTROL.md](docs/CONTROL.md)。
 
 **Q: 字段类型推荐不准确？**
 降级到 `base` 策略确保稳定，或调整 Intelligence 策略的置信度阈值。详见 [docs/FIELD_TYPES.md](docs/FIELD_TYPES.md)。

@@ -74,6 +74,25 @@ batch_size: 500                           # 批处理大小
 rate_limit_delay: 0.5                     # 接口调用间隔(秒)
 max_retries: 3                            # 最大重试次数
 
+# 飞书官方 API 频率限制参考（应用级别）:
+#
+# 多维表格 (Bitable):
+#   查询记录 (search):     20 次/秒
+#   批量获取 (batch_get):  20 次/秒
+#   新增记录 (batch_create): 50 次/秒
+#   更新记录 (batch_update): 50 次/秒
+#   删除记录 (batch_delete): 50 次/秒
+#   列出字段 (list_fields):  20 次/秒
+#   新增字段 (create_field): 10 次/秒
+#
+# 程序直接使用官方限制作为内嵌上限。
+# 当触发限流（错误码 1254290）时，程序会自动等待并重试。
+#
+# rate_limit_delay 用于传统模式下的串行请求间隔控制:
+#   - Bitable 推荐: 0.05 ~ 0.5 秒
+#   - Sheet 推荐: 0.1 ~ 0.5 秒
+#   - 如频繁遇到限流，可适当增大
+
 # 智能字段类型配置 (支持多维表格和电子表格)
 field_type_strategy: "base"                # 字段类型策略: base/auto/intelligence/raw
 
@@ -154,3 +173,24 @@ selective_sync:
 
 # 日志设置
 log_level: "INFO"                         # 日志级别: DEBUG/INFO/WARNING/ERROR
+
+# 高级控制开关（可选，默认关闭）
+# enable_advanced_control: false           # 是否启用高级重试和频控策略
+#
+# 高级重试配置（仅当 enable_advanced_control: true 时生效）
+# retry_strategy_type: "exponential_backoff"  # 策略: exponential_backoff / linear_growth / fixed_wait
+# retry_initial_delay: 0.5                   # 初始延迟（秒）
+# retry_multiplier: 2.0                      # 指数退避倍数（仅 exponential_backoff）
+# retry_increment: 0.5                       # 线性增长步长（仅 linear_growth）
+# retry_max_wait_time: 30.0                  # 最大单次等待时间（秒）
+#
+# 高级频控配置（仅当 enable_advanced_control: true 时生效）
+# rate_limit_strategy_type: "sliding_window"  # 策略: fixed_wait / sliding_window / fixed_window
+# rate_limit_window_size: 1.0                 # 时间窗大小（秒）
+# rate_limit_max_requests: 10                 # 时间窗内最大请求数
+#
+# 建议: 对于大批量同步任务，推荐使用 sliding_window 频控策略：
+#   enable_advanced_control: true
+#   rate_limit_strategy_type: "sliding_window"
+#   rate_limit_window_size: 1.0
+#   rate_limit_max_requests: 20   # 查询类 API 官方上限

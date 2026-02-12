@@ -66,9 +66,14 @@ jobs:
           --strip \
           --hidden-import=core.config \
           --hidden-import=core.engine \
+          --hidden-import=core.converter \
+          --hidden-import=core.control \
+          --hidden-import=core.reader \
           --hidden-import=api.auth \
+          --hidden-import=api.base \
           --hidden-import=api.bitable \
           --hidden-import=api.sheet \
+          --hidden-import=utils.excel_reader \
           XTF.py \
           --distpath dist/${{ matrix.platform }}
       shell: bash
