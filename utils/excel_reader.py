@@ -166,7 +166,7 @@ def smart_read_excel(
         raise Exception(error_msg) from e
 
 
-def get_available_engines() -> dict:
+def get_available_engines() -> EngineInfo:
     """
     检测当前环境可用的 Excel 读取引擎
 
@@ -242,7 +242,9 @@ def print_engine_info(verbose: bool = True) -> Optional[str]:
     elif engines["openpyxl"]:
         info = "📖 Excel引擎: OpenPyXL (标准模式)"
     else:
-        info = "⚠️ 警告: 未安装 Excel 引擎，请运行: pip install python-calamine openpyxl"
+        info = (
+            "⚠️ 警告: 未安装 Excel 引擎，请运行: pip install python-calamine openpyxl"
+        )
 
     if verbose:
         print(info)

@@ -99,7 +99,7 @@ API 端点（基础路径：https://open.feishu.cn/open-apis/sheets）：
 
 import logging
 import time
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional, Tuple, Union
 
 from .auth import FeishuAuth
 from .base import RetryableAPIClient
@@ -300,7 +300,7 @@ class SheetAPI:
 
     def identify_formula_columns(
         self, formula_data: List[List[Any]], headers: Optional[List[str]] = None
-    ) -> set:
+    ) -> set[Union[str, int]]:
         """
         识别包含公式的列
 
@@ -311,7 +311,7 @@ class SheetAPI:
         Returns:
             包含公式的列集合（列名或列索引）
         """
-        formula_cols = set()
+        formula_cols: set[Union[str, int]] = set()
 
         if not formula_data:
             return formula_cols
@@ -1315,7 +1315,9 @@ class SheetAPI:
                         if isinstance(detail["start_row"], int) and isinstance(
                             detail["end_row"], int
                         ):
-                            row_count = detail["end_row"] - detail["start_row"] + 1
+                            row_count: Union[int, str] = (
+                                detail["end_row"] - detail["start_row"] + 1
+                            )
                         else:
                             row_count = "未知"
                         self.logger.info(

@@ -514,6 +514,9 @@ class XTFSyncEngine:
             if not self.config.spreadsheet_token:
                 self.logger.error("电子表格的 spreadsheet_token 未配置")
                 return pd.DataFrame()
+            if not self.config.sheet_id:
+                self.logger.error("电子表格的 sheet_id 未配置")
+                return pd.DataFrame()
 
             if not (end_row and end_col):
                 return pd.DataFrame()
@@ -649,8 +652,11 @@ class XTFSyncEngine:
         else:
             # 转换为二维列表用于识别
             formula_data = [formula_df.columns.tolist()] + formula_df.values.tolist()
-            formula_columns = self.api.identify_formula_columns(
-                formula_data, headers=formula_df.columns.tolist()
+            formula_columns = set(
+                str(col)
+                for col in self.api.identify_formula_columns(
+                    formula_data, headers=formula_df.columns.tolist()
+                )
             )
 
         if formula_columns:
@@ -680,17 +686,20 @@ class XTFSyncEngine:
         if formula_columns is None:
             formula_columns = set()
 
-        diff_stats = {
-            "formula_columns": {},  # 公式列差异: {列名: 差异行数}
-            "data_columns": {},  # 数据列差异: {列名: 差异行数}
-            "error_columns": {},  # 异常列: {列名: 错误信息}
+        formula_diff: Dict[str, int] = {}
+        data_diff: Dict[str, int] = {}
+        error_diff: Dict[str, str] = {}
+        diff_stats: Dict[str, Any] = {
+            "formula_columns": formula_diff,  # 公式列差异: {列名: 差异行数}
+            "data_columns": data_diff,  # 数据列差异: {列名: 差异行数}
+            "error_columns": error_diff,  # 异常列: {列名: 错误信息}
             "total_rows": len(local_df),
         }
 
         # 遍历所有列
         for col in local_df.columns:
             if col not in remote_result_df.columns:
-                diff_stats["error_columns"][col] = "云端不存在此列"
+                error_diff[str(col)] = "云端不存在此列"
                 continue
 
             try:
@@ -713,12 +722,12 @@ class XTFSyncEngine:
                 # 记录差异
                 if diff_count > 0:
                     if col in formula_columns:
-                        diff_stats["formula_columns"][col] = diff_count
+                        formula_diff[str(col)] = diff_count
                     else:
-                        diff_stats["data_columns"][col] = diff_count
+                        data_diff[str(col)] = diff_count
 
             except Exception as e:
-                diff_stats["error_columns"][col] = str(e)
+                error_diff[str(col)] = str(e)
 
         return diff_stats
 

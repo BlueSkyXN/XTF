@@ -175,8 +175,8 @@ class DataConverter:
         if isinstance(value, dt.date):
             return value.isoformat()
 
-        if isinstance(value, numbers.Number) and not isinstance(value, bool):
-            timestamp = int(value)
+        if isinstance(value, numbers.Real) and not isinstance(value, bool):
+            timestamp = int(float(value))
             if timestamp > 2524608000:
                 seconds = timestamp / 1000
             elif timestamp > 946684800:

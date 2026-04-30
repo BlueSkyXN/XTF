@@ -106,7 +106,6 @@ from typing import Any, Callable, Optional, Union
 
 import requests  # type: ignore[import-untyped]
 
-
 # ============================================================================
 # 重试策略实现
 # ============================================================================
@@ -525,28 +524,28 @@ class GlobalRequestController:
             rate_limit_config = {"delay": 0.1}
 
         if rate_limit_type == "fixed_wait":
-            rate_config = FixedWaitRateConfig(
+            fixed_wait_config = FixedWaitRateConfig(
                 **{k: v for k, v in rate_limit_config.items() if k in ["delay"]}
             )
-            rate_limit_strategy = FixedWaitRateLimit(rate_config)
+            rate_limit_strategy = FixedWaitRateLimit(fixed_wait_config)
         elif rate_limit_type == "sliding_window":
-            rate_config = SlidingWindowRateConfig(
+            sliding_window_config = SlidingWindowRateConfig(
                 **{
                     k: v
                     for k, v in rate_limit_config.items()
                     if k in ["window_size", "max_requests"]
                 }
             )
-            rate_limit_strategy = SlidingWindowRateLimit(rate_config)
+            rate_limit_strategy = SlidingWindowRateLimit(sliding_window_config)
         elif rate_limit_type == "fixed_window":
-            rate_config = FixedWindowRateConfig(
+            fixed_window_config = FixedWindowRateConfig(
                 **{
                     k: v
                     for k, v in rate_limit_config.items()
                     if k in ["window_size", "max_requests"]
                 }
             )
-            rate_limit_strategy = FixedWindowRateLimit(rate_config)
+            rate_limit_strategy = FixedWindowRateLimit(fixed_window_config)
 
         # 创建控制器
         controller = RequestController(retry_strategy, rate_limit_strategy)
