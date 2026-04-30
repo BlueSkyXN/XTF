@@ -101,7 +101,7 @@ import pytest
 import pandas as pd
 import hashlib
 
-from core.config import TargetType, FieldTypeStrategy
+from core.config import TargetType
 from core.converter import DataConverter
 
 
@@ -156,6 +156,32 @@ class TestIndexValueHash:
         hash_value = converter.get_index_value_hash(row, "ID")
         assert hash_value is None
 
+    def test_get_index_value_hash_rich_text_matches_plain_text(self):
+        """测试本地普通文本和飞书富文本返回值生成相同索引哈希"""
+        converter = DataConverter(TargetType.BITABLE)
+        plain_row = pd.Series({"ID": "李宁少昊运动户外专卖店"})
+        rich_text_row = pd.Series(
+            {"ID": [{"text": "李宁少昊运动户外专卖店", "type": "text"}]}
+        )
+
+        plain_hash = converter.get_index_value_hash(plain_row, "ID", {"ID": 1})
+        rich_text_hash = converter.get_index_value_hash(rich_text_row, "ID", {"ID": 1})
+
+        assert plain_hash == rich_text_hash
+
+    def test_get_index_value_hash_date_string_matches_timestamp(self):
+        """测试本地日期字符串和飞书日期时间戳生成相同索引哈希"""
+        converter = DataConverter(TargetType.BITABLE)
+        date_row = pd.Series({"Date": "2026-03-03"})
+        timestamp_row = pd.Series({"Date": 1772496000000})
+
+        date_hash = converter.get_index_value_hash(date_row, "Date", {"Date": 5})
+        timestamp_hash = converter.get_index_value_hash(
+            timestamp_row, "Date", {"Date": 5}
+        )
+
+        assert date_hash == timestamp_hash
+
 
 class TestBuildRecordIndex:
     """记录索引构建测试"""
@@ -192,6 +218,59 @@ class TestBuildRecordIndex:
 
         hash_key = hashlib.md5("test_value".encode("utf-8")).hexdigest()
         assert hash_key in index
+
+    def test_build_record_index_date_type_matches_local_date_string(self):
+        """测试日期字段索引使用毫秒时间戳规范化匹配本地日期"""
+        converter = DataConverter(TargetType.BITABLE)
+        records = [
+            {
+                "record_id": "rec001",
+                "fields": {"Date": 1772496000000},
+            }
+        ]
+
+        index = converter.build_record_index(records, "Date", {"Date": 5})
+        local_hash = converter.get_index_value_hash(
+            pd.Series({"Date": "2026-03-03"}), "Date", {"Date": 5}
+        )
+
+        assert local_hash in index
+        assert index[local_hash]["record_id"] == "rec001"
+
+    def test_build_record_index_formula_wrapped_text_value(self):
+        """测试公式/查找引用包装的文本值可用于索引匹配"""
+        converter = DataConverter(TargetType.BITABLE)
+        records = [
+            {
+                "record_id": "rec001",
+                "fields": {
+                    "Status": {
+                        "type": 1,
+                        "value": [{"text": "整体", "type": "text"}],
+                    }
+                },
+            }
+        ]
+
+        index = converter.build_record_index(records, "Status")
+        local_hash = converter.get_index_value_hash(
+            pd.Series({"Status": "整体"}), "Status", {"Status": 1}
+        )
+
+        assert local_hash in index
+        assert index[local_hash]["record_id"] == "rec001"
+
+    def test_build_record_index_skips_empty_complex_values(self):
+        """测试空复杂字段不会进入索引，避免误匹配"""
+        converter = DataConverter(TargetType.BITABLE)
+        records = [
+            {"record_id": "rec001", "fields": {"ID": []}},
+            {"record_id": "rec002", "fields": {"ID": {"type": 1, "value": []}}},
+        ]
+
+        index = converter.build_record_index(records, "ID", {"ID": 1})
+
+        assert index == {}
 
 
 class TestTypeDetection:
@@ -577,6 +656,21 @@ class TestDfToRecords:
         assert len(records) == 5
         assert "fields" in records[0]
         assert "ID" in records[0]["fields"]
+
+    def test_df_to_records_preserves_complex_text_value(self):
+        """测试文本字段写入不会把飞书富文本结构转成 Python 字面量字符串"""
+        converter = DataConverter(TargetType.BITABLE)
+        df = pd.DataFrame(
+            {
+                "Name": [
+                    [{"text": "李宁少昊运动户外专卖店", "type": "text"}],
+                ]
+            }
+        )
+
+        records = converter.df_to_records(df, {"Name": 1})
+
+        assert records == [{"fields": {"Name": "李宁少昊运动户外专卖店"}}]
 
     def test_df_to_records_sheet_raises_error(self, sample_dataframe):
         """测试电子表格模式调用 df_to_records 抛出错误"""
