@@ -162,7 +162,7 @@ class DataConverter:
         return str(number)
 
     def _normalize_timestamp_index_value(self, value: Any) -> Optional[str]:
-        """规范化日期索引值为飞书日期字段使用的毫秒时间戳。"""
+        """规范化日期索引值，统一为按天比较的 ISO 日期字符串。"""
         if self._is_empty_value(value):
             return None
 
@@ -258,7 +258,17 @@ class DataConverter:
             if field_type == 1 or all(
                 isinstance(item, dict) and "text" in item for item in values
             ):
-                return "".join(str(item.get("text", "")) for item in values)
+                text_parts = []
+                for item in values:
+                    if isinstance(item, dict) and "text" in item:
+                        text_parts.append(str(item.get("text", "")))
+                    else:
+                        item_value = self._normalize_index_value(item)
+                        if item_value is not None:
+                            text_parts.append(item_value)
+                if not text_parts:
+                    return None
+                return "".join(text_parts)
 
             normalized_items = [
                 self._normalize_index_value(item, field_type) for item in values

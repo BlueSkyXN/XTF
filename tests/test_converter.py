@@ -169,6 +169,17 @@ class TestIndexValueHash:
 
         assert plain_hash == rich_text_hash
 
+    def test_get_index_value_hash_text_list_matches_plain_text(self):
+        """测试文本字段中 list[str] 与普通文本生成相同索引哈希"""
+        converter = DataConverter(TargetType.BITABLE)
+        plain_row = pd.Series({"ID": "AB"})
+        text_list_row = pd.Series({"ID": ["A", "B"]})
+
+        plain_hash = converter.get_index_value_hash(plain_row, "ID", {"ID": 1})
+        text_list_hash = converter.get_index_value_hash(text_list_row, "ID", {"ID": 1})
+
+        assert plain_hash == text_list_hash
+
     def test_get_index_value_hash_date_string_matches_timestamp(self):
         """测试本地日期字符串和飞书日期时间戳生成相同索引哈希"""
         converter = DataConverter(TargetType.BITABLE)
