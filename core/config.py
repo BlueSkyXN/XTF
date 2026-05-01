@@ -77,7 +77,7 @@ import sys
 from pathlib import Path
 from enum import Enum
 from dataclasses import dataclass, field
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Union
 
 import yaml  # type: ignore[import-untyped]
 
@@ -128,6 +128,9 @@ class SyncConfig:
     app_id: str
     app_secret: str
     target_type: TargetType
+
+    # Excel工作表选择
+    excel_sheet_name: Optional[Union[str, int]] = None  # 工作表名称或索引（0=第一个sheet）
 
     # 多维表格配置（target_type=bitable时使用）
     app_token: Optional[str] = None
