@@ -225,7 +225,8 @@ class DataConverter:
                 return self._normalize_index_value(value.get("value"), nested_type)
 
             if "text" in value:
-                return str(value.get("text", ""))
+                text_value = str(value.get("text", ""))
+                return text_value if text_value.strip() else None
 
             if "link_record_ids" in value:
                 return self._normalize_index_value(
@@ -261,7 +262,9 @@ class DataConverter:
                 text_parts = []
                 for item in values:
                     if isinstance(item, dict) and "text" in item:
-                        text_parts.append(str(item.get("text", "")))
+                        text_value = str(item.get("text", ""))
+                        if text_value.strip():
+                            text_parts.append(text_value)
                     else:
                         item_value = self._normalize_index_value(item)
                         if item_value is not None:
@@ -919,11 +922,11 @@ class DataConverter:
         self, field_name: str, value, field_types: Optional[Dict[str, int]] = None
     ):
         """安全的字段值转换"""
-        if pd.isnull(value):
-            return None
-
         # 多维表格模式使用复杂转换
         if self.target_type == TargetType.BITABLE:
+            if self._is_empty_value(value):
+                return None
+
             # 如果没有字段类型信息，使用智能转换
             if field_types is None or field_name not in field_types:
                 return self.smart_convert_value(value)
@@ -948,6 +951,13 @@ class DataConverter:
                 self.conversion_stats["failed"] += 1
                 return None
         else:
+            if pd.api.types.is_scalar(value):
+                try:
+                    if pd.isnull(value):
+                        return None
+                except (TypeError, ValueError):
+                    pass
+
             # 电子表格模式使用简单转换
             return self.simple_convert_value(value)
 
@@ -1249,7 +1259,7 @@ class DataConverter:
 
     def convert_to_user_field(self, value):
         """转换为人员字段格式"""
-        if pd.isnull(value) or not value:
+        if self._is_empty_value(value):
             return None
 
         # 如果已经是正确的字典格式
@@ -1280,7 +1290,7 @@ class DataConverter:
 
     def convert_to_url_field(self, value):
         """转换为超链接字段格式"""
-        if pd.isnull(value) or not value:
+        if self._is_empty_value(value):
             return None
 
         # 如果已经是正确的字典格式
@@ -1299,7 +1309,7 @@ class DataConverter:
 
     def convert_to_attachment_field(self, value):
         """转换为附件字段格式"""
-        if pd.isnull(value) or not value:
+        if self._is_empty_value(value):
             return None
 
         # 如果已经是正确的字典格式
@@ -1322,7 +1332,7 @@ class DataConverter:
 
     def convert_to_link_field(self, value):
         """转换为关联字段格式"""
-        if pd.isnull(value) or not value:
+        if self._is_empty_value(value):
             return None
 
         # 如果已经是列表格式

@@ -2128,7 +2128,10 @@ class XTFSyncEngine:
 
             for _, row in df.head(sample_size).iterrows():
                 for col_name, value in row.to_dict().items():
-                    if pd.notnull(value) and col_name in field_types:
+                    if (
+                        not self.converter._is_empty_value(value)
+                        and col_name in field_types
+                    ):
                         field_type = field_types[col_name]
                         # 简单的类型不匹配检测
                         if field_type == 2 and isinstance(

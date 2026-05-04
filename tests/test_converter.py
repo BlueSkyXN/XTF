@@ -180,6 +180,15 @@ class TestIndexValueHash:
 
         assert plain_hash == text_list_hash
 
+    def test_get_index_value_hash_empty_rich_text_is_empty(self):
+        """测试空富文本不会生成空字符串哈希"""
+        converter = DataConverter(TargetType.BITABLE)
+        rich_text_row = pd.Series({"ID": [{"text": "", "type": "text"}]})
+
+        hash_value = converter.get_index_value_hash(rich_text_row, "ID", {"ID": 1})
+
+        assert hash_value is None
+
     def test_get_index_value_hash_date_string_matches_timestamp(self):
         """测试本地日期字符串和飞书日期时间戳生成相同索引哈希"""
         converter = DataConverter(TargetType.BITABLE)
@@ -522,6 +531,32 @@ class TestConvertFieldValueSafe:
         result = converter.convert_field_value_safe("test", "123", None)
         assert result == 123  # 智能识别为数字
 
+    def test_convert_multi_segment_text_value(self):
+        """测试多段富文本写入文本字段时不会触发 pandas 空值判断异常"""
+        converter = DataConverter(TargetType.BITABLE)
+        value = [
+            {"text": "李宁少昊", "type": "text"},
+            {"text": "运动户外专卖店", "type": "text"},
+        ]
+
+        result = converter.convert_field_value_safe("Name", value, {"Name": 1})
+
+        assert result == "李宁少昊运动户外专卖店"
+
+    def test_convert_multi_value_complex_fields(self):
+        """测试多个复杂字段值写入时不会触发 pandas 空值判断异常"""
+        converter = DataConverter(TargetType.BITABLE)
+
+        assert converter.convert_field_value_safe(
+            "Users", ["ou_1", "ou_2"], {"Users": 11}
+        ) == [{"id": "ou_1"}, {"id": "ou_2"}]
+        assert converter.convert_field_value_safe(
+            "Files", ["file_1", "file_2"], {"Files": 17}
+        ) == [{"file_token": "file_1"}, {"file_token": "file_2"}]
+        assert converter.convert_field_value_safe(
+            "Links", ["rec_1", "rec_2"], {"Links": 18}
+        ) == ["rec_1", "rec_2"]
+
 
 class TestSimpleConvertValue:
     """简单值转换测试（电子表格模式）"""
@@ -675,6 +710,24 @@ class TestDfToRecords:
             {
                 "Name": [
                     [{"text": "李宁少昊运动户外专卖店", "type": "text"}],
+                ]
+            }
+        )
+
+        records = converter.df_to_records(df, {"Name": 1})
+
+        assert records == [{"fields": {"Name": "李宁少昊运动户外专卖店"}}]
+
+    def test_df_to_records_preserves_multi_segment_text_value(self):
+        """测试多段富文本写入不会被 pandas 空值判断中断"""
+        converter = DataConverter(TargetType.BITABLE)
+        df = pd.DataFrame(
+            {
+                "Name": [
+                    [
+                        {"text": "李宁少昊", "type": "text"},
+                        {"text": "运动户外专卖店", "type": "text"},
+                    ],
                 ]
             }
         )
