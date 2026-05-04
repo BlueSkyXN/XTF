@@ -78,9 +78,11 @@
 """
 
 import re
+import json
 import hashlib
 import logging
 import datetime as dt
+import numbers
 from typing import Any, Dict, List, Optional, TypedDict
 
 import pandas as pd
@@ -118,41 +120,210 @@ class DataConverter:
         """重置转换统计"""
         self.conversion_stats = {"success": 0, "failed": 0, "warnings": []}
 
+    def _is_empty_value(self, value: Any) -> bool:
+        """判断值是否为空，兼容 list/dict 等非标量对象。"""
+        if value is None:
+            return True
+
+        if isinstance(value, str):
+            return value.strip() == ""
+
+        if isinstance(value, dict):
+            if "value" in value:
+                return self._is_empty_value(value.get("value"))
+            return len(value) == 0
+
+        if isinstance(value, (list, tuple, set)):
+            return len(value) == 0 or all(self._is_empty_value(item) for item in value)
+
+        if pd.api.types.is_scalar(value):
+            try:
+                return bool(pd.isna(value))
+            except (TypeError, ValueError):
+                return False
+
+        return False
+
+    def _normalize_number_index_value(self, value: Any) -> Optional[str]:
+        """规范化数字索引值，避免 1 与 1.0 生成不同哈希。"""
+        if self._is_empty_value(value):
+            return None
+
+        if isinstance(value, bool):
+            return "1" if value else "0"
+
+        try:
+            number = float(str(value).strip().replace(",", ""))
+        except (TypeError, ValueError):
+            return str(value)
+
+        if number.is_integer():
+            return str(int(number))
+        return str(number)
+
+    def _normalize_timestamp_index_value(self, value: Any) -> Optional[str]:
+        """规范化日期索引值，统一为按天比较的 ISO 日期字符串。"""
+        if self._is_empty_value(value):
+            return None
+
+        if isinstance(value, pd.Timestamp):
+            value = value.to_pydatetime()
+
+        if isinstance(value, dt.datetime):
+            return value.date().isoformat()
+
+        if isinstance(value, dt.date):
+            return value.isoformat()
+
+        if isinstance(value, numbers.Real) and not isinstance(value, bool):
+            timestamp = int(float(value))
+            if timestamp > 2524608000:
+                seconds = timestamp / 1000
+            elif timestamp > 946684800:
+                seconds = timestamp
+            else:
+                return str(timestamp)
+            # Keep index normalization aligned with _force_to_timestamp(), which
+            # parses date strings as local wall-clock dates before writing them.
+            return dt.datetime.fromtimestamp(seconds).date().isoformat()
+
+        if isinstance(value, str):
+            str_val = value.strip()
+            if str_val.isdigit():
+                return self._normalize_timestamp_index_value(int(str_val))
+
+            for fmt in [
+                "%Y-%m-%d %H:%M:%S",
+                "%Y-%m-%d",
+                "%Y/%m/%d %H:%M:%S",
+                "%Y/%m/%d",
+                "%m/%d/%Y",
+                "%d/%m/%Y",
+                "%Y年%m月%d日",
+                "%m月%d日",
+                "%Y-%m-%d %H:%M",
+                "%Y/%m/%d %H:%M",
+            ]:
+                try:
+                    return dt.datetime.strptime(str_val, fmt).date().isoformat()
+                except ValueError:
+                    continue
+
+        timestamp = self._force_to_timestamp(value, "__index__")
+        if timestamp is None:
+            return None
+        return self._normalize_timestamp_index_value(timestamp)
+
+    def _normalize_index_value(
+        self, value: Any, field_type: Optional[int] = None
+    ) -> Optional[str]:
+        """将本地值和飞书返回值统一为可比较的索引字符串。"""
+        if self._is_empty_value(value):
+            return None
+
+        if isinstance(value, dict):
+            if "value" in value and "type" in value:
+                nested_type = value.get("type")
+                return self._normalize_index_value(value.get("value"), nested_type)
+
+            if "text" in value:
+                text_value = str(value.get("text", ""))
+                return text_value if text_value.strip() else None
+
+            if "link_record_ids" in value:
+                return self._normalize_index_value(
+                    value.get("link_record_ids"), field_type
+                )
+
+            if "id" in value:
+                return str(value.get("id"))
+
+            if "file_token" in value:
+                return str(value.get("file_token"))
+
+            normalized_dict = {
+                str(k): self._normalize_index_value(v) for k, v in value.items()
+            }
+            normalized_dict = {
+                k: v for k, v in normalized_dict.items() if v is not None
+            }
+            if not normalized_dict:
+                return None
+            return json.dumps(
+                normalized_dict,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+
+        if isinstance(value, (list, tuple, set)):
+            values = list(value)
+            if field_type == 1 or all(
+                isinstance(item, dict) and "text" in item for item in values
+            ):
+                text_parts = []
+                for item in values:
+                    if isinstance(item, dict) and "text" in item:
+                        text_value = str(item.get("text", ""))
+                        if text_value.strip():
+                            text_parts.append(text_value)
+                    else:
+                        item_value = self._normalize_index_value(item)
+                        if item_value is not None:
+                            text_parts.append(item_value)
+                if not text_parts:
+                    return None
+                return "".join(text_parts)
+
+            normalized_items = [
+                self._normalize_index_value(item, field_type) for item in values
+            ]
+            normalized_items = [item for item in normalized_items if item is not None]
+            if not normalized_items:
+                return None
+            if len(normalized_items) == 1:
+                return normalized_items[0]
+            return json.dumps(
+                normalized_items, ensure_ascii=False, separators=(",", ":")
+            )
+
+        if field_type == 2:
+            return self._normalize_number_index_value(value)
+
+        if field_type == 5:
+            return self._normalize_timestamp_index_value(value)
+
+        if field_type == 7:
+            if isinstance(value, bool):
+                return "true" if value else "false"
+            converted = self._force_to_boolean(value, "__index__")
+            return "true" if converted else "false"
+
+        return str(value)
+
     def get_index_value_hash(
-        self, row: pd.Series, index_column: Optional[str]
+        self,
+        row: pd.Series,
+        index_column: Optional[str],
+        field_types: Optional[Dict[str, int]] = None,
     ) -> Optional[str]:
         """计算索引值的哈希，空值返回 None 避免误匹配"""
         if index_column and index_column in row:
             value = row[index_column]
-            # 非标量值（如 list/ndarray）先做空值判断，再哈希
-            if not pd.api.types.is_scalar(value):
-                try:
-                    if len(value) == 0:
-                        return None
-                except TypeError:
-                    pass
-
-                try:
-                    if all(
-                        pd.isna(item) or (isinstance(item, str) and not item.strip())
-                        for item in value
-                    ):
-                        return None
-                except Exception:
-                    pass
-
-                return hashlib.md5(str(value).encode("utf-8")).hexdigest()
-
-            if pd.isna(value):
+            field_type = field_types.get(index_column) if field_types else None
+            index_value = self._normalize_index_value(value, field_type)
+            if index_value is None:
                 return None
-
-            return hashlib.md5(str(value).encode("utf-8")).hexdigest()
+            return hashlib.md5(index_value.encode("utf-8")).hexdigest()
         return None
 
     # ========== 多维表格转换方法 ==========
 
     def build_record_index(
-        self, records: List[Dict[str, Any]], index_column: Optional[str]
+        self,
+        records: List[Dict[str, Any]],
+        index_column: Optional[str],
+        field_types: Optional[Dict[str, int]] = None,
     ) -> Dict[str, Dict[str, Any]]:
         """构建多维表格记录索引"""
         index: Dict[str, Dict[str, Any]] = {}
@@ -163,18 +334,10 @@ class DataConverter:
             fields = record.get("fields", {})
             if index_column in fields:
                 raw_value = fields[index_column]
-
-                # 处理富文本格式：[{'text': '内容', 'type': 'text'}]
-                if isinstance(raw_value, list) and len(raw_value) > 0:
-                    if isinstance(raw_value[0], dict) and "text" in raw_value[0]:
-                        index_value = raw_value[0]["text"]
-                    else:
-                        index_value = str(raw_value[0])
-                elif isinstance(raw_value, dict) and "text" in raw_value:
-                    index_value = raw_value["text"]
-                else:
-                    index_value = str(raw_value)
-
+                field_type = field_types.get(index_column) if field_types else None
+                index_value = self._normalize_index_value(raw_value, field_type)
+                if index_value is None:
+                    continue
                 index_hash = hashlib.md5(index_value.encode("utf-8")).hexdigest()
                 index[index_hash] = record
 
@@ -345,8 +508,6 @@ class DataConverter:
 
     def _is_timestamp_enhanced(self, s: str) -> tuple:
         """增强的时间戳检测"""
-        from datetime import datetime
-
         if not s.isdigit():
             return False, 0.0
 
@@ -763,11 +924,11 @@ class DataConverter:
         self, field_name: str, value, field_types: Optional[Dict[str, int]] = None
     ):
         """安全的字段值转换"""
-        if pd.isnull(value):
-            return None
-
         # 多维表格模式使用复杂转换
         if self.target_type == TargetType.BITABLE:
+            if self._is_empty_value(value):
+                return None
+
             # 如果没有字段类型信息，使用智能转换
             if field_types is None or field_name not in field_types:
                 return self.smart_convert_value(value)
@@ -792,13 +953,20 @@ class DataConverter:
                 self.conversion_stats["failed"] += 1
                 return None
         else:
+            if pd.api.types.is_scalar(value):
+                try:
+                    if pd.isnull(value):
+                        return None
+                except (TypeError, ValueError):
+                    pass
+
             # 电子表格模式使用简单转换
             return self.simple_convert_value(value)
 
     def _force_convert_to_feishu_type(self, value, field_name: str, field_type: int):
         """强制转换值为指定的飞书字段类型"""
         if field_type == 1:  # 文本字段 - 所有值都可以转换为文本
-            return str(value)
+            return self._normalize_index_value(value, field_type)
         elif field_type == 2:  # 数字字段 - 强制转换为数字
             return self._force_to_number(value, field_name)
         elif field_type == 3:  # 单选字段 - 转换为单个字符串
@@ -1093,7 +1261,7 @@ class DataConverter:
 
     def convert_to_user_field(self, value):
         """转换为人员字段格式"""
-        if pd.isnull(value) or not value:
+        if self._is_empty_value(value):
             return None
 
         # 如果已经是正确的字典格式
@@ -1124,7 +1292,7 @@ class DataConverter:
 
     def convert_to_url_field(self, value):
         """转换为超链接字段格式"""
-        if pd.isnull(value) or not value:
+        if self._is_empty_value(value):
             return None
 
         # 如果已经是正确的字典格式
@@ -1143,7 +1311,7 @@ class DataConverter:
 
     def convert_to_attachment_field(self, value):
         """转换为附件字段格式"""
-        if pd.isnull(value) or not value:
+        if self._is_empty_value(value):
             return None
 
         # 如果已经是正确的字典格式
@@ -1166,7 +1334,7 @@ class DataConverter:
 
     def convert_to_link_field(self, value):
         """转换为关联字段格式"""
-        if pd.isnull(value) or not value:
+        if self._is_empty_value(value):
             return None
 
         # 如果已经是列表格式
@@ -1376,7 +1544,7 @@ class DataConverter:
         for _, row in df.iterrows():
             fields = {}
             for k, v in row.to_dict().items():
-                if pd.notnull(v):
+                if not self._is_empty_value(v):
                     converted_value = self.convert_field_value_safe(
                         str(k), v, field_types
                     )

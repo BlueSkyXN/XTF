@@ -130,7 +130,9 @@ class SyncConfig:
     target_type: TargetType
 
     # Excel工作表选择
-    excel_sheet_name: Optional[Union[str, int]] = None  # 工作表名称或索引（0=第一个sheet）
+    excel_sheet_name: Optional[Union[str, int]] = (
+        None  # 工作表名称或索引（0=第一个sheet）
+    )
 
     # 多维表格配置（target_type=bitable时使用）
     app_token: Optional[str] = None

@@ -97,11 +97,14 @@
 版本: 1.7.3+
 """
 
+import hashlib
+import os
+import time
+
 import pytest
 import pandas as pd
-import hashlib
 
-from core.config import TargetType, FieldTypeStrategy
+from core.config import TargetType
 from core.converter import DataConverter
 
 
@@ -156,6 +159,81 @@ class TestIndexValueHash:
         hash_value = converter.get_index_value_hash(row, "ID")
         assert hash_value is None
 
+    def test_get_index_value_hash_rich_text_matches_plain_text(self):
+        """测试本地普通文本和飞书富文本返回值生成相同索引哈希"""
+        converter = DataConverter(TargetType.BITABLE)
+        plain_row = pd.Series({"ID": "李宁少昊运动户外专卖店"})
+        rich_text_row = pd.Series(
+            {"ID": [{"text": "李宁少昊运动户外专卖店", "type": "text"}]}
+        )
+
+        plain_hash = converter.get_index_value_hash(plain_row, "ID", {"ID": 1})
+        rich_text_hash = converter.get_index_value_hash(rich_text_row, "ID", {"ID": 1})
+
+        assert plain_hash == rich_text_hash
+
+    def test_get_index_value_hash_text_list_matches_plain_text(self):
+        """测试文本字段中 list[str] 与普通文本生成相同索引哈希"""
+        converter = DataConverter(TargetType.BITABLE)
+        plain_row = pd.Series({"ID": "AB"})
+        text_list_row = pd.Series({"ID": ["A", "B"]})
+
+        plain_hash = converter.get_index_value_hash(plain_row, "ID", {"ID": 1})
+        text_list_hash = converter.get_index_value_hash(text_list_row, "ID", {"ID": 1})
+
+        assert plain_hash == text_list_hash
+
+    def test_get_index_value_hash_empty_rich_text_is_empty(self):
+        """测试空富文本不会生成空字符串哈希"""
+        converter = DataConverter(TargetType.BITABLE)
+        rich_text_row = pd.Series({"ID": [{"text": "", "type": "text"}]})
+
+        hash_value = converter.get_index_value_hash(rich_text_row, "ID", {"ID": 1})
+
+        assert hash_value is None
+
+    def test_get_index_value_hash_date_string_matches_timestamp(self):
+        """测试本地日期字符串和飞书日期时间戳生成相同索引哈希"""
+        converter = DataConverter(TargetType.BITABLE)
+        date_row = pd.Series({"Date": "2026-03-03"})
+        timestamp_row = pd.Series({"Date": 1772496000000})
+
+        date_hash = converter.get_index_value_hash(date_row, "Date", {"Date": 5})
+        timestamp_hash = converter.get_index_value_hash(
+            timestamp_row, "Date", {"Date": 5}
+        )
+
+        assert date_hash == timestamp_hash
+
+    def test_get_index_value_hash_date_roundtrip_uses_local_timezone(self):
+        """测试本工具写出的本地日期时间戳读回后仍能匹配索引"""
+        if not hasattr(time, "tzset"):
+            pytest.skip("当前平台不支持 time.tzset")
+
+        old_tz = os.environ.get("TZ")
+        try:
+            os.environ["TZ"] = "Asia/Shanghai"
+            time.tzset()
+
+            converter = DataConverter(TargetType.BITABLE)
+            written_timestamp = converter._force_to_timestamp("2026-03-03", "Date")
+
+            date_hash = converter.get_index_value_hash(
+                pd.Series({"Date": "2026-03-03"}), "Date", {"Date": 5}
+            )
+            timestamp_hash = converter.get_index_value_hash(
+                pd.Series({"Date": written_timestamp}), "Date", {"Date": 5}
+            )
+
+            assert written_timestamp == 1772467200000
+            assert date_hash == timestamp_hash
+        finally:
+            if old_tz is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = old_tz
+            time.tzset()
+
 
 class TestBuildRecordIndex:
     """记录索引构建测试"""
@@ -192,6 +270,59 @@ class TestBuildRecordIndex:
 
         hash_key = hashlib.md5("test_value".encode("utf-8")).hexdigest()
         assert hash_key in index
+
+    def test_build_record_index_date_type_matches_local_date_string(self):
+        """测试日期字段索引使用毫秒时间戳规范化匹配本地日期"""
+        converter = DataConverter(TargetType.BITABLE)
+        records = [
+            {
+                "record_id": "rec001",
+                "fields": {"Date": 1772496000000},
+            }
+        ]
+
+        index = converter.build_record_index(records, "Date", {"Date": 5})
+        local_hash = converter.get_index_value_hash(
+            pd.Series({"Date": "2026-03-03"}), "Date", {"Date": 5}
+        )
+
+        assert local_hash in index
+        assert index[local_hash]["record_id"] == "rec001"
+
+    def test_build_record_index_formula_wrapped_text_value(self):
+        """测试公式/查找引用包装的文本值可用于索引匹配"""
+        converter = DataConverter(TargetType.BITABLE)
+        records = [
+            {
+                "record_id": "rec001",
+                "fields": {
+                    "Status": {
+                        "type": 1,
+                        "value": [{"text": "整体", "type": "text"}],
+                    }
+                },
+            }
+        ]
+
+        index = converter.build_record_index(records, "Status")
+        local_hash = converter.get_index_value_hash(
+            pd.Series({"Status": "整体"}), "Status", {"Status": 1}
+        )
+
+        assert local_hash in index
+        assert index[local_hash]["record_id"] == "rec001"
+
+    def test_build_record_index_skips_empty_complex_values(self):
+        """测试空复杂字段不会进入索引，避免误匹配"""
+        converter = DataConverter(TargetType.BITABLE)
+        records = [
+            {"record_id": "rec001", "fields": {"ID": []}},
+            {"record_id": "rec002", "fields": {"ID": {"type": 1, "value": []}}},
+        ]
+
+        index = converter.build_record_index(records, "ID", {"ID": 1})
+
+        assert index == {}
 
 
 class TestTypeDetection:
@@ -432,6 +563,32 @@ class TestConvertFieldValueSafe:
         result = converter.convert_field_value_safe("test", "123", None)
         assert result == 123  # 智能识别为数字
 
+    def test_convert_multi_segment_text_value(self):
+        """测试多段富文本写入文本字段时不会触发 pandas 空值判断异常"""
+        converter = DataConverter(TargetType.BITABLE)
+        value = [
+            {"text": "李宁少昊", "type": "text"},
+            {"text": "运动户外专卖店", "type": "text"},
+        ]
+
+        result = converter.convert_field_value_safe("Name", value, {"Name": 1})
+
+        assert result == "李宁少昊运动户外专卖店"
+
+    def test_convert_multi_value_complex_fields(self):
+        """测试多个复杂字段值写入时不会触发 pandas 空值判断异常"""
+        converter = DataConverter(TargetType.BITABLE)
+
+        assert converter.convert_field_value_safe(
+            "Users", ["ou_1", "ou_2"], {"Users": 11}
+        ) == [{"id": "ou_1"}, {"id": "ou_2"}]
+        assert converter.convert_field_value_safe(
+            "Files", ["file_1", "file_2"], {"Files": 17}
+        ) == [{"file_token": "file_1"}, {"file_token": "file_2"}]
+        assert converter.convert_field_value_safe(
+            "Links", ["rec_1", "rec_2"], {"Links": 18}
+        ) == ["rec_1", "rec_2"]
+
 
 class TestSimpleConvertValue:
     """简单值转换测试（电子表格模式）"""
@@ -577,6 +734,39 @@ class TestDfToRecords:
         assert len(records) == 5
         assert "fields" in records[0]
         assert "ID" in records[0]["fields"]
+
+    def test_df_to_records_preserves_complex_text_value(self):
+        """测试文本字段写入不会把飞书富文本结构转成 Python 字面量字符串"""
+        converter = DataConverter(TargetType.BITABLE)
+        df = pd.DataFrame(
+            {
+                "Name": [
+                    [{"text": "李宁少昊运动户外专卖店", "type": "text"}],
+                ]
+            }
+        )
+
+        records = converter.df_to_records(df, {"Name": 1})
+
+        assert records == [{"fields": {"Name": "李宁少昊运动户外专卖店"}}]
+
+    def test_df_to_records_preserves_multi_segment_text_value(self):
+        """测试多段富文本写入不会被 pandas 空值判断中断"""
+        converter = DataConverter(TargetType.BITABLE)
+        df = pd.DataFrame(
+            {
+                "Name": [
+                    [
+                        {"text": "李宁少昊", "type": "text"},
+                        {"text": "运动户外专卖店", "type": "text"},
+                    ],
+                ]
+            }
+        )
+
+        records = converter.df_to_records(df, {"Name": 1})
+
+        assert records == [{"fields": {"Name": "李宁少昊运动户外专卖店"}}]
 
     def test_df_to_records_sheet_raises_error(self, sample_dataframe):
         """测试电子表格模式调用 df_to_records 抛出错误"""

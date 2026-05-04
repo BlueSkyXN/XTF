@@ -83,7 +83,6 @@
 """
 
 import pandas as pd
-import time
 import logging
 import sys
 from datetime import datetime
@@ -515,6 +514,9 @@ class XTFSyncEngine:
             if not self.config.spreadsheet_token:
                 self.logger.error("电子表格的 spreadsheet_token 未配置")
                 return pd.DataFrame()
+            if not self.config.sheet_id:
+                self.logger.error("电子表格的 sheet_id 未配置")
+                return pd.DataFrame()
 
             if not (end_row and end_col):
                 return pd.DataFrame()
@@ -650,8 +652,11 @@ class XTFSyncEngine:
         else:
             # 转换为二维列表用于识别
             formula_data = [formula_df.columns.tolist()] + formula_df.values.tolist()
-            formula_columns = self.api.identify_formula_columns(
-                formula_data, headers=formula_df.columns.tolist()
+            formula_columns = set(
+                str(col)
+                for col in self.api.identify_formula_columns(
+                    formula_data, headers=formula_df.columns.tolist()
+                )
             )
 
         if formula_columns:
@@ -681,17 +686,20 @@ class XTFSyncEngine:
         if formula_columns is None:
             formula_columns = set()
 
-        diff_stats = {
-            "formula_columns": {},  # 公式列差异: {列名: 差异行数}
-            "data_columns": {},  # 数据列差异: {列名: 差异行数}
-            "error_columns": {},  # 异常列: {列名: 错误信息}
+        formula_diff: Dict[str, int] = {}
+        data_diff: Dict[str, int] = {}
+        error_diff: Dict[str, str] = {}
+        diff_stats: Dict[str, Any] = {
+            "formula_columns": formula_diff,  # 公式列差异: {列名: 差异行数}
+            "data_columns": data_diff,  # 数据列差异: {列名: 差异行数}
+            "error_columns": error_diff,  # 异常列: {列名: 错误信息}
             "total_rows": len(local_df),
         }
 
         # 遍历所有列
         for col in local_df.columns:
             if col not in remote_result_df.columns:
-                diff_stats["error_columns"][col] = "云端不存在此列"
+                error_diff[str(col)] = "云端不存在此列"
                 continue
 
             try:
@@ -714,12 +722,12 @@ class XTFSyncEngine:
                 # 记录差异
                 if diff_count > 0:
                     if col in formula_columns:
-                        diff_stats["formula_columns"][col] = diff_count
+                        formula_diff[str(col)] = diff_count
                     else:
-                        diff_stats["data_columns"][col] = diff_count
+                        data_diff[str(col)] = diff_count
 
             except Exception as e:
-                diff_stats["error_columns"][col] = str(e)
+                error_diff[str(col)] = str(e)
 
         return diff_stats
 
@@ -735,7 +743,6 @@ class XTFSyncEngine:
             是否相等
         """
         import pandas as pd
-        import numpy as np
 
         # 都是空值
         if pd.isnull(val1) and pd.isnull(val2):
@@ -936,8 +943,9 @@ class XTFSyncEngine:
         existing_records = self.get_all_bitable_records(field_names=fetch_fields)
         self.logger.info(f"🔍 获取到现有记录数量: {len(existing_records)}")
 
+        field_types = self.get_field_types()
         existing_index = self.converter.build_record_index(
-            existing_records, self.config.index_column
+            existing_records, self.config.index_column, field_types
         )
         self.logger.info(f"🔍 构建索引成功，索引数量: {len(existing_index)}")
 
@@ -946,11 +954,12 @@ class XTFSyncEngine:
             for i, record in enumerate(existing_records[:3]):
                 fields = record.get("fields", {})
                 index_value = fields.get(self.config.index_column, "未找到")
-                self.logger.info(
-                    f"🔍 现有记录 {i+1} 索引列 '{self.config.index_column}' 值: '{index_value}'"
+                normalized_value = self.converter._normalize_index_value(
+                    index_value, field_types.get(self.config.index_column)
                 )
-
-        field_types = self.get_field_types()
+                self.logger.info(
+                    f"🔍 现有记录 {i + 1} 索引列 '{self.config.index_column}' 值: '{index_value}' -> 规范化: '{normalized_value}'"
+                )
 
         # 分类本地数据
         records_to_update = []
@@ -958,14 +967,14 @@ class XTFSyncEngine:
 
         for i, (_, row) in enumerate(df.iterrows()):
             index_hash = self.converter.get_index_value_hash(
-                row, self.config.index_column
+                row, self.config.index_column, field_types
             )
             index_value = row.get(self.config.index_column, "未找到")
 
             # 打印前几条记录的匹配信息用于调试
             if i < 3:
                 self.logger.info(
-                    f"🔍 新数据记录 {i+1} 索引列 '{self.config.index_column}' 值: '{index_value}' -> 哈希: {index_hash}"
+                    f"🔍 新数据记录 {i + 1} 索引列 '{self.config.index_column}' 值: '{index_value}' -> 哈希: {index_hash}"
                 )
                 self.logger.info(
                     f"🔍 哈希是否在现有索引中: {index_hash in existing_index if index_hash else False}"
@@ -974,7 +983,7 @@ class XTFSyncEngine:
             # 使用字段类型转换构建记录
             fields = {}
             for k, v in row.to_dict().items():
-                if pd.notnull(v):
+                if not self.converter._is_empty_value(v):
                     converted_value = self.converter.convert_field_value_safe(
                         str(k), v, field_types
                     )
@@ -1330,24 +1339,24 @@ class XTFSyncEngine:
         # 获取现有记录并建立索引（仅获取索引列，减少数据传输）
         fetch_fields = self._get_bitable_fetch_field_names(df, "incremental")
         existing_records = self.get_all_bitable_records(field_names=fetch_fields)
-        existing_index = self.converter.build_record_index(
-            existing_records, self.config.index_column
-        )
         field_types = self.get_field_types()
+        existing_index = self.converter.build_record_index(
+            existing_records, self.config.index_column, field_types
+        )
 
         # 筛选出需要新增的记录
         records_to_create = []
 
         for _, row in df.iterrows():
             index_hash = self.converter.get_index_value_hash(
-                row, self.config.index_column
+                row, self.config.index_column, field_types
             )
 
             if not index_hash or index_hash not in existing_index:
                 # 使用字段类型转换构建记录
                 fields = {}
                 for k, v in row.to_dict().items():
-                    if pd.notnull(v):
+                    if not self.converter._is_empty_value(v):
                         converted_value = self.converter.convert_field_value_safe(
                             str(k), v, field_types
                         )
@@ -1594,17 +1603,17 @@ class XTFSyncEngine:
         # 获取现有记录并建立索引（仅获取索引列，减少数据传输）
         fetch_fields = self._get_bitable_fetch_field_names(df, "overwrite")
         existing_records = self.get_all_bitable_records(field_names=fetch_fields)
-        existing_index = self.converter.build_record_index(
-            existing_records, self.config.index_column
-        )
         field_types = self.get_field_types()
+        existing_index = self.converter.build_record_index(
+            existing_records, self.config.index_column, field_types
+        )
 
         # 找出需要删除的记录
         record_ids_to_delete = []
 
         for _, row in df.iterrows():
             index_hash = self.converter.get_index_value_hash(
-                row, self.config.index_column
+                row, self.config.index_column, field_types
             )
             if index_hash and index_hash in existing_index:
                 existing_record = existing_index[index_hash]
@@ -2119,7 +2128,10 @@ class XTFSyncEngine:
 
             for _, row in df.head(sample_size).iterrows():
                 for col_name, value in row.to_dict().items():
-                    if pd.notnull(value) and col_name in field_types:
+                    if (
+                        not self.converter._is_empty_value(value)
+                        and col_name in field_types
+                    ):
                         field_type = field_types[col_name]
                         # 简单的类型不匹配检测
                         if field_type == 2 and isinstance(
