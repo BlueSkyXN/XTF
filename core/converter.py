@@ -183,7 +183,9 @@ class DataConverter:
                 seconds = timestamp
             else:
                 return str(timestamp)
-            return dt.datetime.utcfromtimestamp(seconds).date().isoformat()
+            # Keep index normalization aligned with _force_to_timestamp(), which
+            # parses date strings as local wall-clock dates before writing them.
+            return dt.datetime.fromtimestamp(seconds).date().isoformat()
 
         if isinstance(value, str):
             str_val = value.strip()

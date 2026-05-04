@@ -97,9 +97,12 @@
 版本: 1.7.3+
 """
 
+import hashlib
+import os
+import time
+
 import pytest
 import pandas as pd
-import hashlib
 
 from core.config import TargetType
 from core.converter import DataConverter
@@ -201,6 +204,35 @@ class TestIndexValueHash:
         )
 
         assert date_hash == timestamp_hash
+
+    def test_get_index_value_hash_date_roundtrip_uses_local_timezone(self):
+        """测试本工具写出的本地日期时间戳读回后仍能匹配索引"""
+        if not hasattr(time, "tzset"):
+            pytest.skip("当前平台不支持 time.tzset")
+
+        old_tz = os.environ.get("TZ")
+        try:
+            os.environ["TZ"] = "Asia/Shanghai"
+            time.tzset()
+
+            converter = DataConverter(TargetType.BITABLE)
+            written_timestamp = converter._force_to_timestamp("2026-03-03", "Date")
+
+            date_hash = converter.get_index_value_hash(
+                pd.Series({"Date": "2026-03-03"}), "Date", {"Date": 5}
+            )
+            timestamp_hash = converter.get_index_value_hash(
+                pd.Series({"Date": written_timestamp}), "Date", {"Date": 5}
+            )
+
+            assert written_timestamp == 1772467200000
+            assert date_hash == timestamp_hash
+        finally:
+            if old_tz is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = old_tz
+            time.tzset()
 
 
 class TestBuildRecordIndex:
