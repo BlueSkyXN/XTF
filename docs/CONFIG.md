@@ -202,7 +202,7 @@ XTF 支持四层配置来源，优先级从高到低：
 | 参数名 | 类型 | Bitable 默认 | Sheet 默认 | CLI | 说明 |
 |--------|------|-------------|------------|-----|------|
 | `batch_size` | `int` | `500` | `1000` | ✅ `--batch-size` | 批处理大小 |
-| `rate_limit_delay` | `float` | `0.5` | `0.1` | ✅ `--rate-limit-delay` | API 调用间隔（秒） |
+| `rate_limit_delay` | `float` | `0.01` | `0.1` | ✅ `--rate-limit-delay` | API 调用间隔（秒） |
 | `max_retries` | `int` | `3` | `3` | ✅ `--max-retries` | 最大重试次数 |
 
 **调优建议**：

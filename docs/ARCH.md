@@ -189,7 +189,7 @@ class SyncConfig:
 
     # 性能设置
     batch_size: int                   # 批处理大小 (bitable=500, sheet=1000)
-    rate_limit_delay: float           # API 间隔 (bitable=0.5s, sheet=0.1s)
+    rate_limit_delay: float           # API 间隔 (bitable=0.01s, sheet=0.1s)
     max_retries: int                  # 最大重试次数 (默认 3)
 
     # 高级控制
@@ -206,7 +206,7 @@ CLI 参数 (最高)  →  YAML 配置文件  →  智能推断  →  系统默�
 ```
 
 **智能推断示例**：
-- Bitable 默认 `batch_size=500`，`rate_limit_delay=0.5`
+- Bitable 默认 `batch_size=500`，`rate_limit_delay=0.01`
 - Sheet 默认 `batch_size=1000`，`rate_limit_delay=0.1`
 - `sheet_protect_formulas=True` 时自动启用 `sheet_validate_results=True`
 

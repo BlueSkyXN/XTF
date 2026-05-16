@@ -71,7 +71,7 @@ index_column: "ID"                        # 索引列名，用于记录比对
 
 # 性能设置
 batch_size: 500                           # 批处理大小
-rate_limit_delay: 0.5                     # 接口调用间隔(秒)
+rate_limit_delay: 0.01                    # 接口调用间隔(秒)
 max_retries: 3                            # 最大重试次数
 
 # 飞书官方 API 频率限制参考（应用级别）:
@@ -89,7 +89,7 @@ max_retries: 3                            # 最大重试次数
 # 当触发限流（错误码 1254290）时，程序会自动等待并重试。
 #
 # rate_limit_delay 用于传统模式下的串行请求间隔控制:
-#   - Bitable 推荐: 0.05 ~ 0.5 秒
+#   - Bitable 推荐: 0.01 ~ 0.5 秒
 #   - Sheet 推荐: 0.1 ~ 0.5 秒
 #   - 如频繁遇到限流，可适当增大
 
