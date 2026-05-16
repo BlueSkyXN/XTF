@@ -1,26 +1,29 @@
 # lite navigation card
 
 `lite/` contains legacy standalone scripts kept for compatibility and release artifacts.
-Before editing it, read `lite/README.md` and `.github/workflows/multi-platform-build.yml`.
-Keep reading this card when changing `XTF_Bitable.py`, `XTF_Sheet.py`, legacy CLI behavior, or legacy artifact names.
+Read this card before changing `XTF_Bitable.py`, `XTF_Sheet.py`, legacy CLI behavior, legacy config compatibility, or legacy artifact names.
+Key files: `XTF_Bitable.py`, `XTF_Sheet.py`, `README.md`, and `.github/workflows/multi-platform-build.yml`.
 
-## Key files
+## Local Invariants
 
-- `XTF_Bitable.py`: standalone legacy Bitable sync script.
-- `XTF_Sheet.py`: standalone legacy Sheet sync script.
-- `README.md`: legacy usage notes.
+- Preserve existing standalone execution behavior unless the user explicitly requests a breaking legacy change.
+- CI still builds `XTF-Sheet` and `XTF-Bitable`; binary names, artifact paths, and release bundle names matter.
+- Security, credential redaction, destructive-sync, and config-template fixes may need to be mirrored between mainline and both legacy scripts.
+- Legacy scripts share user-facing concepts with `XTF.py`, but new mainline features should not be introduced here first by default.
 
-## Local invariants
+## Local Rules
 
-- Preserve existing CLI flags, config fields, and standalone execution behavior unless the PR explicitly breaks compatibility.
-- CI still builds `XTF-Sheet` and `XTF-Bitable`; artifact names matter.
-- Security or destructive-sync fixes may need to be mirrored between mainline and both legacy scripts.
+- Check the build workflow before renaming files, changing CLI entrypoints, or modifying runtime dependencies.
+- Keep examples and docs consistent with legacy behavior, not only the mainline CLI.
+- Prefer syntax and smoke-level validation for legacy-only edits unless behavior changes justify broader tests.
 
-## Do not
+## Do Not
 
-- Do not add new mainline features here first.
-- Do not remove legacy scripts or change binary names without updating workflow and release notes.
+- Do not remove legacy scripts or change `XTF-Sheet` / `XTF-Bitable` artifact names without updating workflow and release notes.
+- Do not add features only to legacy scripts when the same behavior belongs in mainline.
+- Do not assume `core/` helpers are available inside standalone scripts unless the script already imports and packages them.
 
 ## Validation
 
-Use root validation commands. For focused legacy syntax checks, run `python -m py_compile lite/*.py`.
+- `python -m py_compile lite/*.py` for focused legacy syntax checks.
+- Run root CI-like quality and pytest commands if a legacy fix is mirrored into mainline modules.

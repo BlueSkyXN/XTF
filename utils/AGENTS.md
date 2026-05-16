@@ -1,26 +1,28 @@
 # utils navigation card
 
-`utils/` contains reusable helpers, currently focused on Excel engine detection and read support.
-Before editing it, read `utils/excel_reader.py`, `core/reader.py`, and `tests/test_reader.py`.
-Keep reading this card when a change affects input file formats, optional reader engines, or fallback behavior.
+`utils/` contains reusable helper code, currently focused on Excel engine detection and read support.
+Read this card before changing optional reader engines, supported file formats, engine fallback, error handling, or helper import boundaries.
+Key files: `utils/excel_reader.py`, `core/reader.py`, and `tests/test_reader.py`.
 
-## Key files
+## Local Invariants
 
-- `excel_reader.py`: Calamine/OpenPyXL helper functions and engine information.
-- `core/reader.py`: primary DataFrame reading path used by the CLI.
-- `tests/test_reader.py`: file-format and edge-case coverage.
+- Preserve Calamine-first, OpenPyXL-fallback behavior when optional dependencies are available.
+- Excel `.xlsx` and `.xls` are primary supported formats; CSV remains experimental and must not be presented as equivalent to Excel.
+- Helpers must have no Feishu, network, logging-to-remote, or sync side effects.
+- File-not-found, unsupported-format, empty-file, encoding, and engine errors should remain diagnosable to callers.
 
-## Local invariants
+## Local Rules
 
-- Preserve Calamine-first, OpenPyXL-fallback behavior when optional dependencies are present.
-- CSV remains experimental; do not present it as equivalent to Excel.
-- Helpers should have no Feishu/network side effects.
+- Keep reusable file-reading helpers independent from sync orchestration.
+- If helper behavior changes, check whether `core/reader.py`, `README.md`, `docs/CONFIG.md`, or `docs/SYNC.md` need aligned wording.
+- Prefer deterministic tests with temp files and fixtures.
 
-## Do not
+## Do Not
 
-- Do not import `api/` or `core/engine.py` into utility helpers.
-- Do not swallow file-not-found, unsupported-format, or encoding errors.
+- Do not import `api/`, `core/engine.py`, or remote sync clients into utility helpers.
+- Do not silently fall back in ways that hide unsupported formats or corrupted inputs.
 
 ## Validation
 
-Use root validation commands. For focused read-path changes, start with `pytest tests/test_reader.py -v`.
+- `pytest tests/test_reader.py -v` for focused read-path changes.
+- Run root quality checks if imports, public helper signatures, or dependency assumptions change.
