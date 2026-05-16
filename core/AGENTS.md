@@ -1,30 +1,35 @@
 # core navigation card
 
-`core/` is the configuration and sync behavior domain for XTF.
-Before editing it, read the target module plus the matching docs under `docs/`.
-Keep reading this card when a change touches sync modes, config validation, conversion, chunking, retry, or Sheet formula protection.
+`core/` owns XTF configuration semantics and sync behavior.
+Read before modifying config parsing, sync modes, conversion, reader dispatch, retry/rate-limit, selective sync, or Sheet formula protection.
+Key files: `config.py`, `engine.py`, `converter.py`, `reader.py`, `control.py`; focused tests: `test_config.py`, `test_converter.py`, `test_reader.py`, `test_control.py`.
 
-## Key files
+## Local Invariants
 
-- `config.py`: `SyncConfig`, CLI/YAML merge, target inference, validation.
-- `engine.py`: `XTFSyncEngine`, Bitable/Sheet dispatch, `full`/`incremental`/`overwrite`/`clone`.
-- `converter.py`: field type detection, conversion, index building.
-- `reader.py`: Excel/CSV read path used by the CLI.
-- `control.py`: retry and rate-limit strategies.
+- Config priority: CLI args > YAML config > target inference > defaults.
+- Keep target-specific required-field checks for Bitable and Sheet.
+- `selective_sync.enabled` is invalid with `SyncMode.CLONE`; preserve column and `max_gap_for_merge` checks.
+- `overwrite` and `clone` delete remote data; keep scope, batching, logs, and failures explicit.
+- Sheet formula protection relies on `Formula` and `FormattedValue` dual reads.
+- Field strategy behavior stays progressive: `raw`, `base`, `auto`, `intelligence`.
+- Shared engine changes must cover both `TargetType.BITABLE` and `TargetType.SHEET`.
 
-## Local invariants
+## Local Rules
 
-- Keep config priority as CLI > YAML > inference > defaults.
-- `selective_sync` remains incompatible with `clone`.
-- `overwrite` and `clone` are destructive remote-data modes; preserve clear logging, batching, and failure semantics.
-- Sheet formula protection depends on Formula and FormattedValue dual reads; do not overwrite protected formula columns.
-- Field strategies stay progressive: `raw`, `base`, `auto`, `intelligence`.
+- Keep Feishu HTTP details in `api/`; `core/engine.py` should use API client methods.
+- Keep low-level file helpers in `utils/` unless the code is sync orchestration.
+- Config key/default changes may require `config.example.yaml`, docs, tests, and root rule updates; batch/retry/rate-limit tests should mock time and requests.
 
-## Do not
+## Do Not
 
-- Do not bypass required-field validation, duplicate-column checks, range limits, retry, rate limiting, or chunk splitting.
-- Do not move Feishu HTTP details into `core/`; that belongs in `api/`.
+- Do not bypass required-field validation, duplicate checks, range limits, chunk splitting, retry, or rate-limit controls.
+- Do not downgrade destructive-mode logging or error handling.
+- Do not add Bitable-only behavior to shared paths without guarding Sheet behavior.
 
 ## Validation
 
-Use root validation commands. For focused changes, start with the matching `tests/test_config.py`, `tests/test_converter.py`, `tests/test_reader.py`, or `tests/test_control.py`.
+- `pytest tests/test_config.py -v` for config, target inference, CLI/YAML merge, and validation.
+- `pytest tests/test_converter.py -v` for field type, conversion, index, and range helpers.
+- `pytest tests/test_reader.py -v` for reader changes.
+- `pytest tests/test_control.py -v` for retry/rate-limit changes.
+- Run root CI-like pytest and quality checks for shared `engine.py` or config-default changes.

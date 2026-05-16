@@ -153,7 +153,7 @@ retry_initial_delay: 1.0    # 固定等待时间（秒）
 
 ```yaml
 rate_limit_strategy_type: "fixed_wait"
-rate_limit_delay: 0.5  # 使用通用 rate_limit_delay 参数
+rate_limit_delay: 0.01  # 使用通用 rate_limit_delay 参数
 ```
 
 ### 3.2 滑动窗口 (sliding_window)
@@ -300,7 +300,7 @@ log_level: DEBUG
 | `rate_limit_strategy_type` | `str` | `fixed_wait` | 策略类型 |
 | `rate_limit_window_size` | `float` | `1.0` | 时间窗口大小（秒） |
 | `rate_limit_max_requests` | `int` | `10` | 窗口内最大请求数 |
-| `rate_limit_delay` | `float` | `0.5` | 固定等待延迟（秒） |
+| `rate_limit_delay` | `float` | `0.01` | 固定等待延迟（秒） |
 
 ---
 

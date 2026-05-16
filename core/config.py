@@ -175,7 +175,7 @@ class SyncConfig:
 
     # 性能设置
     batch_size: int = 500  # 批处理大小
-    rate_limit_delay: float = 0.5  # 接口调用间隔
+    rate_limit_delay: float = 0.01  # 接口调用间隔
     max_retries: int = 3  # 最大重试次数
 
     # 高级控制开关
@@ -493,7 +493,7 @@ class ConfigManager:
                 "target_type": target_type.value,
                 "sync_mode": "full",
                 "batch_size": 500,
-                "rate_limit_delay": 0.5,
+                "rate_limit_delay": 0.01,
                 "max_retries": 3,
                 "create_missing_fields": True,
                 "field_type_strategy": "base",
@@ -711,7 +711,7 @@ def create_sample_config(
             "sync_mode": "full",
             "index_column": "ID",
             "batch_size": 500,
-            "rate_limit_delay": 0.5,
+            "rate_limit_delay": 0.01,
             "max_retries": 3,
             "create_missing_fields": True,
             "field_type_strategy": "base",

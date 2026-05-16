@@ -138,6 +138,7 @@ class TestSyncConfig:
         assert config.app_token == "test_app_token"
         assert config.table_id == "test_table_id"
         assert config.batch_size == 500
+        assert config.rate_limit_delay == 0.01
         assert config.create_missing_fields is True
 
     def test_sheet_config_creation(self, sample_sheet_config):
@@ -381,6 +382,7 @@ class TestCreateSampleConfig:
         assert config["target_type"] == "bitable"
         assert "app_token" in config
         assert "table_id" in config
+        assert config["rate_limit_delay"] == 0.01
 
     def test_create_sheet_sample_config(self, tmp_path):
         """测试创建电子表格示例配置"""
