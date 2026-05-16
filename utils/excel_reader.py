@@ -242,7 +242,9 @@ def print_engine_info(verbose: bool = True) -> Optional[str]:
     elif engines["openpyxl"]:
         info = "📖 Excel引擎: OpenPyXL (标准模式)"
     else:
-        info = "⚠️ 警告: 未安装 Excel 引擎，请运行: pip install python-calamine openpyxl"
+        info = (
+            "⚠️ 警告: 未安装 Excel 引擎，请运行: pip install python-calamine openpyxl"
+        )
 
     if verbose:
         print(info)
