@@ -80,9 +80,12 @@
 
 import time
 import logging
+import random
 from typing import Optional
 
 import requests  # type: ignore[import-untyped]
+
+from .sdk import FeishuResponseParser
 
 
 class RateLimiter:
@@ -115,6 +118,7 @@ class RetryableAPIClient:
         max_retries: int = 3,
         rate_limiter: Optional[RateLimiter] = None,
         use_global_controller: bool = True,
+        jitter_ratio: float = 0.1,
     ):
         """
         初始化API客户端
@@ -127,6 +131,7 @@ class RetryableAPIClient:
         self.max_retries = max_retries
         self.rate_limiter = rate_limiter or RateLimiter()
         self.use_global_controller = use_global_controller
+        self.jitter_ratio = max(0.0, jitter_ratio)
         self.logger = logging.getLogger("XTF.base")
 
         # 尝试获取全局控制器
@@ -151,7 +156,11 @@ class RetryableAPIClient:
 
     def call_api(self, method: str, url: str, **kwargs) -> requests.Response:
         """
-        调用API并处理重试
+        调用 API，并在 transport 层处理网络异常与 HTTP 429/5xx 重试。
+
+        标准模式和高级 controller 都会把重试耗尽后的最终 HTTP response
+        返回给上层 parser，以保留状态码、log_id 和服务端 pacing 信息；只有
+        始终未取得 response 的网络异常才会抛出 typed transport error。
 
         Args:
             method: HTTP方法
@@ -159,31 +168,57 @@ class RetryableAPIClient:
             **kwargs: 其他请求参数
 
         Returns:
-            响应对象
+            HTTP 响应对象，包括重试耗尽后的最终错误响应
 
         Raises:
-            Exception: 当所有重试都失败时
+            FeishuAPIError: 所有网络尝试均未取得 HTTP response 时
         """
         # 如果配置了全局控制器并且可用，使用新的统一控制系统
         if self.use_global_controller and self._controller:
+            last_response = None
+            last_failure_had_response = False
 
             def _make_request():
-                response = requests.request(method, url, timeout=60, **kwargs)
+                nonlocal last_failure_had_response, last_response
+                last_failure_had_response = False
+                try:
+                    response = requests.request(method, url, timeout=60, **kwargs)
+                except requests.exceptions.RequestException:
+                    # 最后一次尝试没有 response 时，不得返回此前缓存的 HTTP 错误。
+                    last_response = None
+                    raise
+                last_response = response
 
                 # 检查是否需要重试的响应状态
                 if response.status_code == 429:  # 频率限制
+                    last_failure_had_response = True
                     raise requests.exceptions.RequestException(
                         f"Rate limit exceeded: {response.status_code}"
                     )
 
                 if response.status_code >= 500:  # 服务器错误
+                    last_failure_had_response = True
                     raise requests.exceptions.RequestException(
                         f"Server error: {response.status_code}"
                     )
 
                 return response
 
-            return self._controller.execute_request(_make_request)
+            try:
+                return self._controller.execute_request(_make_request)
+            except requests.exceptions.RequestException as exc:
+                # 保留最终 HTTP response，供统一 parser 提取状态、log_id 和 pacing；
+                # 没有 response 的网络失败则直接转换成 typed transport error。
+                if last_failure_had_response and last_response is not None:
+                    return last_response
+                from .sdk import FeishuAPIError
+
+                raise FeishuAPIError.from_transport(str(exc), cause=exc) from exc
+            except Exception as exc:
+                # controller 自身的频控/等待失败也属于 transport 控制边界。
+                from .sdk import FeishuAPIError
+
+                raise FeishuAPIError.from_transport(str(exc), cause=exc) from exc
 
         # 否则使用传统的重试和频控机制（向后兼容）
         return self._call_api_legacy(method, url, **kwargs)
@@ -201,14 +236,14 @@ class RetryableAPIClient:
                 # 检查是否需要重试
                 if response.status_code == 429:  # 频率限制
                     if attempt < self.max_retries:
-                        wait_time = 2**attempt  # 指数退避
+                        wait_time = self._retry_delay(response, attempt)
                         self.logger.warning(f"频率限制，等待 {wait_time} 秒后重试...")
                         time.sleep(wait_time)
                         continue
 
                 if response.status_code >= 500:  # 服务器错误
                     if attempt < self.max_retries:
-                        wait_time = 2**attempt
+                        wait_time = self._retry_delay(response, attempt)
                         self.logger.warning(
                             f"服务器错误 {response.status_code}，等待 {wait_time} 秒后重试..."
                         )
@@ -223,6 +258,18 @@ class RetryableAPIClient:
                     self.logger.warning(f"请求异常 {e}，等待 {wait_time} 秒后重试...")
                     time.sleep(wait_time)
                     continue
-                raise
+                from .sdk import FeishuAPIError
+
+                raise FeishuAPIError.from_transport(str(e), cause=e) from e
 
         raise Exception(f"API调用失败，已重试 {self.max_retries} 次")
+
+    def _retry_delay(self, response: requests.Response, attempt: int) -> float:
+        """优先遵循服务端 pacing，再对本地指数退避加入少量 jitter。"""
+        retry_after = FeishuResponseParser._parse_retry_after(response)
+        if retry_after is not None:
+            return retry_after
+        base_delay = float(2**attempt)
+        if self.jitter_ratio == 0:
+            return base_delay
+        return base_delay + random.uniform(0, base_delay * self.jitter_ratio)

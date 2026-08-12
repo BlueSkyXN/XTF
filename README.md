@@ -10,7 +10,7 @@ XTF 是一个企业级数据同步工具，将本地 Excel/CSV 文件智能同�
 - **四种同步模式** — 全量 / 增量 / 覆盖 / 克隆，覆盖全场景数据同步需求
 - **智能字段类型** — Raw / Base / Auto / Intelligence 四种策略，从保守到智能逐级增强
 - **选择性列同步** — 精确列级控制，只更新指定列，其他列完全不受影响
-- **公式保护** — 双读检测云端公式，保护公式列不被覆盖
+- **公式保护** — `full` 模式双读检测云端公式，无法确认公式状态时停止写入
 - **三层上传保障** — 预分块 → 自动二分重试 → 智能频控，确保大数据稳定处理
 - **高级频控** — 3 种重试策略 × 3 种频控策略，9 种组合灵活配置
 - **高性能读取** — Calamine 引擎（Rust 实现），Excel 读取加速 4-20x
@@ -49,6 +49,23 @@ python XTF.py --target-type sheet --config config.yaml
 python XTF.py --sync-mode full --index-column "ID" --batch-size 500
 python XTF.py --field-type-strategy intelligence --log-level DEBUG
 ```
+
+### Python SDK
+
+需要在其他 Python 程序中复用 XTF 的 Feishu API 封装时，可通过兼容式统一入口共享
+认证、transport、错误、分页和批处理契约：
+
+```python
+from api import XTFFeishuClient
+
+client = XTFFeishuClient(app_id, app_secret)
+bitable = client.bitable()
+sheet = client.sheet()
+```
+
+原有 `FeishuAuth`、`BitableAPI`、`SheetAPI` 的直接构造方式继续保留；统一入口不依赖
+`lark-cli` 子进程，也没有新增运行时依赖。同步模式和远端删除仍由 `core/engine.py`
+管理，不由 SDK facade 隐式执行。
 
 ## 同步模式
 
@@ -100,6 +117,7 @@ XTF/
 ├── api/
 │   ├── auth.py               # 飞书认证
 │   ├── base.py               # 基础 HTTP 客户端（重试、频控）
+│   ├── sdk.py                # 统一 SDK client、typed error、分页与批处理契约
 │   ├── bitable.py            # 多维表格 API
 │   └── sheet.py              # 电子表格 API
 ├── utils/
@@ -135,7 +153,10 @@ XTF/
 降低 `--batch-size`（如 100-200），增大 `--max-retries`，或启用高级频控。详见 [docs/SHEET.md](docs/SHEET.md)。
 
 **Q: 频繁触发 API 限流（错误码 1254290）？**
-程序内嵌飞书官方频率限制（查询 20/s，写入 50/s）并对限流错误码自动重试。如仍频繁限流，请启用高级频控：详见 [docs/CONTROL.md](docs/CONTROL.md)。
+HTTP `429/5xx` 和网络异常由 transport 统一重试；HTTP 200 中的飞书限流业务码由 Bitable 层重试，不会叠加 HTTP 重试。如仍频繁限流，请启用高级频控：详见 [docs/CONTROL.md](docs/CONTROL.md)。
+
+**Q: 公式保护可以和哪些同步模式组合？**
+`sheet_protect_formulas: true` 仅支持 `full`，并且需要配置 `index_column`。`incremental`、`overwrite`、`clone` 会在配置加载时被拒绝，避免误以为破坏性模式也会保留公式。
 
 **Q: 字段类型推荐不准确？**
 降级到 `base` 策略确保稳定，或调整 Intelligence 策略的置信度阈值。详见 [docs/FIELD_TYPES.md](docs/FIELD_TYPES.md)。

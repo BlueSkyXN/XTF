@@ -61,6 +61,8 @@ from unittest.mock import MagicMock, patch, Mock
 import requests
 
 from api.base import RateLimiter, RetryableAPIClient
+from api.sdk import FeishuAPIError
+from core.control import FixedWaitRetry, RequestController, RetryConfig
 
 
 class TestRateLimiter:
@@ -219,6 +221,39 @@ class TestRetryableAPIClientCallAPI:
 
     @patch("time.sleep")
     @patch("requests.request")
+    def test_call_api_prefers_server_retry_after(self, mock_request, mock_sleep):
+        """服务端提供 pacing 时应优先使用，不叠加本地 jitter。"""
+        limited_response = Mock()
+        limited_response.status_code = 429
+        limited_response.headers = {"Retry-After": "3"}
+        success_response = Mock()
+        success_response.status_code = 200
+        mock_request.side_effect = [limited_response, success_response]
+
+        client = RetryableAPIClient(
+            max_retries=1,
+            rate_limiter=RateLimiter(0),
+            use_global_controller=False,
+            jitter_ratio=0,
+        )
+        client.call_api("GET", "http://example.com/api")
+
+        mock_sleep.assert_called_once_with(3.0)
+
+    def test_retry_delay_jitter_stays_within_configured_bounds(self):
+        """本地 jitter 只增加有限随机量，不会低于指数退避基线。"""
+        response = Mock()
+        response.headers = {}
+        client = RetryableAPIClient(use_global_controller=False, jitter_ratio=0.1)
+
+        with patch("api.base.random.uniform", return_value=0.4) as uniform:
+            delay = client._retry_delay(response, attempt=2)
+
+        assert delay == 4.4
+        uniform.assert_called_once_with(0, 0.4)
+
+    @patch("time.sleep")
+    @patch("requests.request")
     def test_call_api_max_retries_exceeded(self, mock_request, mock_sleep):
         """测试超过最大重试次数"""
         mock_response = Mock()
@@ -265,8 +300,84 @@ class TestRetryableAPIClientCallAPI:
 
         client = RetryableAPIClient(max_retries=2, use_global_controller=False)
 
-        with pytest.raises(requests.exceptions.ConnectionError):
+        with pytest.raises(FeishuAPIError) as exc_info:
             client.call_api("GET", "http://example.com/api")
+
+        assert exc_info.value.kind == "transport"
+        assert exc_info.value.retryable is True
+
+    @patch("time.sleep")
+    @patch("requests.request")
+    def test_global_controller_returns_final_http_response(
+        self, mock_request, mock_sleep
+    ):
+        response = Mock()
+        response.status_code = 503
+        response.headers = {"X-Tt-Logid": "log-503"}
+        mock_request.return_value = response
+        controller = RequestController(
+            FixedWaitRetry(RetryConfig(initial_delay=0, max_retries=1)), None
+        )
+        client = RetryableAPIClient(max_retries=1, use_global_controller=False)
+        client.use_global_controller = True
+        client._controller = controller
+
+        result = client.call_api("GET", "http://example.com/api")
+
+        assert result is response
+        assert mock_request.call_count == 2
+
+    @patch("time.sleep")
+    @patch("requests.request")
+    def test_global_controller_wraps_network_failure(self, mock_request, mock_sleep):
+        mock_request.side_effect = requests.exceptions.ConnectionError("offline")
+        controller = RequestController(
+            FixedWaitRetry(RetryConfig(initial_delay=0, max_retries=1)), None
+        )
+        client = RetryableAPIClient(max_retries=1, use_global_controller=False)
+        client.use_global_controller = True
+        client._controller = controller
+
+        with pytest.raises(FeishuAPIError) as exc_info:
+            client.call_api("GET", "http://example.com/api")
+
+        assert exc_info.value.kind == "transport"
+
+    @patch("time.sleep")
+    @patch("requests.request")
+    def test_global_controller_does_not_return_stale_response_after_network_failure(
+        self, mock_request, mock_sleep
+    ):
+        response = Mock()
+        response.status_code = 503
+        response.headers = {"X-Tt-Logid": "stale-log"}
+        mock_request.side_effect = [
+            response,
+            requests.exceptions.ConnectionError("offline"),
+        ]
+        controller = RequestController(
+            FixedWaitRetry(RetryConfig(initial_delay=0, max_retries=1)), None
+        )
+        client = RetryableAPIClient(max_retries=1, use_global_controller=False)
+        client.use_global_controller = True
+        client._controller = controller
+
+        with pytest.raises(FeishuAPIError) as exc_info:
+            client.call_api("GET", "http://example.com/api")
+
+        assert exc_info.value.kind == "transport"
+
+    def test_global_controller_wraps_controller_failure(self):
+        controller = Mock()
+        controller.execute_request.side_effect = RuntimeError("rate limiter failed")
+        client = RetryableAPIClient(max_retries=1, use_global_controller=False)
+        client.use_global_controller = True
+        client._controller = controller
+
+        with pytest.raises(FeishuAPIError) as exc_info:
+            client.call_api("GET", "http://example.com/api")
+
+        assert exc_info.value.kind == "transport"
 
 
 class TestRetryableAPIClientHTTPMethods:

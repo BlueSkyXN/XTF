@@ -278,9 +278,21 @@ class SyncConfig:
         # 验证逻辑同步与结果检测配置
         if self.sheet_diff_tolerance < 0:
             raise ValueError("sheet_diff_tolerance 不能为负数")
+        if self.batch_size <= 0:
+            raise ValueError("batch_size 必须为正整数")
+        if self.max_retries < 0:
+            raise ValueError("max_retries 不能为负数")
+        if self.rate_limit_delay < 0:
+            raise ValueError("rate_limit_delay 不能为负数")
         if self.sheet_protect_formulas and not self.sheet_validate_results:
             # 保护公式时必须启用结果检测（需要双读）
             self.sheet_validate_results = True
+        if self.sheet_protect_formulas and self.sync_mode != SyncMode.FULL:
+            raise ValueError("sheet_protect_formulas 仅支持 full 同步模式")
+        if self.sheet_protect_formulas and not (
+            isinstance(self.index_column, str) and self.index_column.strip()
+        ):
+            raise ValueError("sheet_protect_formulas 必须配置有效的 index_column")
 
     def _validate_selective_sync_config(self):
         """验证selective_sync配置的详细有效性"""
@@ -541,9 +553,17 @@ class ConfigManager:
 
                 # 显示从配置文件加载的参数
                 loaded_params = []
+                sensitive_keys = {
+                    "app_secret",
+                    "app_token",
+                    "spreadsheet_token",
+                    "tenant_access_token",
+                    "access_token",
+                }
                 for key, value in file_config.items():
                     if key in config_data:
-                        loaded_params.append(f"{key}={value}")
+                        shown_value = "<已配置>" if key in sensitive_keys else value
+                        loaded_params.append(f"{key}={shown_value}")
                 if loaded_params:
                     print(f"📋 配置文件参数: {', '.join(loaded_params)}")
             else:
@@ -667,6 +687,9 @@ class ConfigManager:
         """从配置创建请求控制器"""
         # 检查是否启用高级控制
         if not config.enable_advanced_control:
+            from .control import GlobalRequestController
+
+            GlobalRequestController().clear()
             return None  # 返回None表示使用传统控制方式
 
         from .control import GlobalRequestController

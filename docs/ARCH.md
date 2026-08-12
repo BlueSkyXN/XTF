@@ -26,8 +26,9 @@
 - [5. API 层](#5-api-层)
   - [5.1 认证模块](#51-认证模块)
   - [5.2 基础客户端](#52-基础客户端)
-  - [5.3 Bitable API](#53-bitable-api)
-  - [5.4 Sheet API](#54-sheet-api)
+  - [5.3 专用 SDK 契约](#53-专用-sdk-契约)
+  - [5.4 Bitable API](#54-bitable-api)
+  - [5.5 Sheet API](#55-sheet-api)
 - [6. 数据处理流水线](#6-数据处理流水线)
 - [7. 错误处理架构](#7-错误处理架构)
 - [8. 扩展指南](#8-扩展指南)
@@ -68,6 +69,7 @@ XTF (Excel To Feishu) 是一个企业级数据同步工具，将本地 Excel/CSV
 │                    API 层 (API)                           │
 │   api/auth.py    — 飞书认证 (tenant_access_token)         │
 │   api/base.py    — RetryableAPIClient 基础客户端           │
+│   api/sdk.py     — 响应、错误、分页、批处理统一契约         │
 │   api/bitable.py — BitableAPI 多维表格操作                 │
 │   api/sheet.py   — SheetAPI 电子表格操作                   │
 └─────────────────────────────────────────────────────────┘
@@ -82,11 +84,11 @@ XTF.py (入口)
   │     └─→ SyncConfig (配置数据类)
   │
   ├─→ XTFSyncEngine(config)
-  │     ├─→ FeishuAuth(app_id, app_secret)
+  │     ├─→ RetryableAPIClient (共享重试、频控)
+  │     ├─→ FeishuAuth(app_id, app_secret, api_client)
   │     │     └─→ tenant_access_token (自动缓存 & 刷新)
   │     │
-  │     ├─→ BitableAPI(auth) 或 SheetAPI(auth)
-  │     │     └─→ RetryableAPIClient (重试、频控)
+  │     ├─→ BitableAPI(auth, api_client) 或 SheetAPI(auth, api_client)
   │     │
   │     ├─→ DataConverter(strategy, config)
   │     │     └─→ 字段类型分析 → 数据转换
@@ -209,6 +211,7 @@ CLI 参数 (最高)  →  YAML 配置文件  →  智能推断  →  系统默�
 - Bitable 默认 `batch_size=500`，`rate_limit_delay=0.01`
 - Sheet 默认 `batch_size=1000`，`rate_limit_delay=0.1`
 - `sheet_protect_formulas=True` 时自动启用 `sheet_validate_results=True`
+- `sheet_protect_formulas=True` 仅支持 `full`，并在配置加载时要求有效索引列
 
 ### 3.3 配置验证
 
@@ -341,7 +344,44 @@ AdvancedController (线程安全单例)
 - **错误分类**：区分 429（限流）、5xx（服务器错误）等
 - **日志记录**：详细的请求/响应日志
 
-### 5.3 Bitable API
+`FeishuAuth` 与 Bitable/Sheet 共用同一个 `RetryableAPIClient`，认证请求不会绕过
+配置的重试和频控。HTTP 429/5xx 退避优先读取 `X-Ogw-Ratelimit-Reset` 或
+`Retry-After`，没有服务端提示时再使用带少量 jitter 的指数退避。
+transport 独占网络异常和 HTTP 429/5xx 重试；Bitable 只重试 HTTP 200 中的明确
+业务错误码，避免嵌套重试放大非幂等 POST。高级 controller 耗尽后保留最终
+HTTP response；完全没有 response 的网络失败会转为 typed transport error。
+
+### 5.3 专用 SDK 契约
+
+> 源码：[`api/sdk.py`](../api/sdk.py)
+
+`api/sdk.py` 是 XTF 的 Python SDK facade，不依赖 `lark-cli` 进程或 Go SDK：
+
+- `XTFFeishuClient`：以 additive facade 统一装配认证和 transport，并创建共享连接的
+  `BitableAPI` / `SheetAPI`；既有类和构造方式继续可用。注入自定义 `api_client`
+  时，`max_retries` / `rate_limit_delay` 由该 transport 自身负责。
+- `FeishuResponseParser`：统一处理 Bitable/Sheet 业务响应的 HTTP 状态、飞书业务码、
+  `log_id`、`retryable` 与 `retry_after`；transport 无 response 时由
+  `FeishuAPIError(kind="transport")` 保留统一异常边界。认证令牌响应暂时保留既有
+  异常文本契约。
+- `Paginator` / `Page`：显式表达 `has_more` 与 `page_token`；缺失/重复游标、
+  `data/items` 类型错误直接失败，不把不完整或畸形响应当成完整结果。
+- `run_batches` / `PartialBatchError`：批次首个失败即停止，明确报告已应用前缀；
+  不假设服务端会回滚成功批次。
+- Bitable 的 `create/update/delete` 等布尔接口保留既有 `False` 失败契约；
+  查询接口则暴露带诊断元数据的 typed exception。
+
+同步模式、字段转换、公式保护和远程删除仍归 `core/engine.py`，不会下沉到 SDK。
+现有 `BitableAPI` / `SheetAPI` 公共调用方式保持不变。
+
+Sheet 元数据不可用时可以用配置化窗口做有界诊断读取，但该读取会标记为不完整；
+`full` / `incremental` / `overwrite` 等依赖远端索引的路径会停止写入，避免把截断结果
+误判为完整远端状态。`clone` 仍要求先取得网格属性并成功清空后才写入。
+启用公式保护时只允许 `full`，且双读无法确认公式状态时停止写入；成功识别后改走
+精确列写入，不再整表回写。选择性范围只合并真正相邻的目标列，不会跨过未选择列
+填入空值。
+
+### 5.4 Bitable API
 
 > 源码：[`api/bitable.py`](../api/bitable.py)
 
@@ -361,7 +401,7 @@ AdvancedController (线程安全单例)
 - 批量操作自动按 `batch_size` 分片
 - 富文本字段自动处理 `[{"text": "...", "type": "text"}]` 格式
 
-### 5.4 Sheet API
+### 5.5 Sheet API
 
 > 源码：[`api/sheet.py`](../api/sheet.py)
 

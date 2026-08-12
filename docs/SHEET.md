@@ -108,6 +108,10 @@ DataFrame (N 行 × M 列)
 | `sheet_scan_max_rows` | `5000` | 每块最大行数 |
 | `sheet_scan_max_cols` | `100` | 每块最大列数 |
 
+`sheet_scan_max_rows/cols` 是单次读取分块上限，不是完整表的总扫描上限。若工作表
+元数据不可用，XTF 只执行该大小的有界诊断读取并将结果标记为不完整；依赖远端
+索引的 `full` / `incremental` / `overwrite` 会停止写入，而不会把截断数据当成完整表。
+
 ### 写入分块
 
 写入采用与读取类似的分块策略，但额外包含二分重试机制：
@@ -202,12 +206,14 @@ get_info(范围) → batch_update(清空) → values PUT(全部写入)
   └─ 数据列 → 正常同步
 ```
 
-当 `sheet_protect_formulas: true` 时：
+当 `sheet_protect_formulas: true` 时，仅支持 `sync_mode: full`：
 1. 自动启用 `sheet_validate_results: true`
-2. 检测公式列
-3. 从同步列表中移除公式列
-4. 数据列正常同步
-5. 公式列仅在报告中显示差异
+2. 配置加载时要求有效索引列，用于不移动行地精确匹配
+3. 双读任一步失败或无法确认公式列时停止写入
+4. 从同步列表中移除公式列，数据列使用精确列 range 写入
+5. 公式列仅在报告中显示差异，不通过整表写入回填计算结果
+
+`incremental`、`overwrite`、`clone` 不支持公式保护，配置层会拒绝这种组合。
 
 ---
 

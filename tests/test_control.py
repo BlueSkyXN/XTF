@@ -467,6 +467,13 @@ class TestGlobalRequestController:
         assert client is not None
         assert client.controller is not None
 
+    def test_clear_removes_configured_controller(self):
+        controller = GlobalRequestController.create_from_config()
+
+        controller.clear()
+
+        assert controller.get_controller() is None
+
 
 class TestRetryStrategyWait:
     """重试策略等待方法测试"""
