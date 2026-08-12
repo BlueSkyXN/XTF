@@ -42,7 +42,9 @@ jobs:
 
       - name: Install linting tools
         run: |
-          pip install ruff black mypy
+          # Ruff 0.16 enables new default rules across the existing codebase.
+          # Pin the last green baseline until a repo-wide migration is scoped.
+          pip install "ruff==0.15.13" black mypy
 
       - name: Run Ruff
         run: ruff check . --ignore E501,F401
