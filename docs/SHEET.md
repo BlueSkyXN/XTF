@@ -215,6 +215,24 @@ get_info(范围) → batch_update(清空) → values PUT(全部写入)
 
 `incremental`、`overwrite`、`clone` 不支持公式保护，配置层会拒绝这种组合。
 
+### 写后 Sheet AI 公式验证
+
+`sheet_verify_formulas: true` 是独立的写后门禁，不由 `sheet_protect_formulas` 自动开启。
+同步引擎使用 typed mutation receipt 中已成功写入的实际行区间，按
+`start_column + 当前表头宽度` 构造不带 sheet prefix 的 A1 ranges，并调用：
+
+```http
+POST /open-apis/sheet_ai/v2/spreadsheets/{token}/tools/invoke_read
+```
+
+唯一通过条件是 `status == "success"` 且 `has_more == false`。`errors_found`、`partial`、
+未知状态、非法 JSON、缺失/错误类型的 `has_more` 都会返回同步失败。append 响应缺少
+actual range 时不会猜测落点或改扫全表，而是报告验证范围未知。XTF 只验证既有公式，
+不会为新增行生成、复制或平移公式。
+
+`sheet_validate_results` 仍保持写前 `Formula` / `FormattedValue` 双读与差异报告职责，
+没有被改造成写后验证。
+
 ---
 
 ## 6. 列级差异检测报告

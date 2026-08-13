@@ -210,6 +210,50 @@ class TestSyncConfig:
                 sheet_protect_formulas=True,
             )
 
+    def test_sheet_formula_verification_defaults_are_independent(self):
+        config = SyncConfig(
+            file_path="test.xlsx",
+            app_id="test_id",
+            app_secret="test_secret",
+            target_type=TargetType.SHEET,
+            spreadsheet_token="sheet-token",
+            sheet_id="sh1",
+            index_column="ID",
+            sheet_protect_formulas=True,
+        )
+
+        assert config.sheet_verify_formulas is False
+        assert config.sheet_formula_max_locations == 20
+
+    def test_sheet_formula_verification_rejects_bitable_target(self):
+        with pytest.raises(
+            ValueError, match="sheet_verify_formulas 仅支持 target_type=sheet"
+        ):
+            SyncConfig(
+                file_path="test.xlsx",
+                app_id="test_id",
+                app_secret="test_secret",
+                target_type=TargetType.BITABLE,
+                app_token="app-token",
+                table_id="tbl1",
+                sheet_verify_formulas=True,
+            )
+
+    @pytest.mark.parametrize("max_locations", [0, -1, True, 1.5])
+    def test_sheet_formula_max_locations_must_be_positive_integer(self, max_locations):
+        with pytest.raises(
+            ValueError, match="sheet_formula_max_locations 必须为正整数"
+        ):
+            SyncConfig(
+                file_path="test.xlsx",
+                app_id="test_id",
+                app_secret="test_secret",
+                target_type=TargetType.SHEET,
+                spreadsheet_token="sheet-token",
+                sheet_id="sh1",
+                sheet_formula_max_locations=max_locations,
+            )
+
     def test_bitable_config_missing_app_token(self):
         """测试多维表格配置缺少 app_token 时的错误"""
         with pytest.raises(ValueError, match="多维表格模式需要app_token和table_id"):

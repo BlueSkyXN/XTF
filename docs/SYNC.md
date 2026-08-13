@@ -405,6 +405,21 @@ selective_sync:
 | overwrite | `PUT /values` | — | — |
 | clone | `PUT /values` | — | `POST /values_batch_update`（空值） |
 
+同步引擎的数据 mutation 使用 additive typed 方法：`write_values()`、`append_values()`、
+`batch_update_values()` 和 `clear_values()`。固定 range 会做矩阵 shape 预检查，分块失败时
+只保留成功叶子范围；append 没有 actual range 时保持 unknown，不推断行号。原有
+`write_sheet_data()` / `append_sheet_data()` / `write_selective_columns()` /
+`clear_sheet_data()` 的 `bool` 以及私有 tuple 返回契约继续兼容。
+
+append 与 Base v3 create 没有已确认幂等键，因此 transport 无响应时只发送一次并返回
+`unknown_outcome`；不会由通用 transport 盲目重放。固定 range write 和已知 range 的
+batch update 仍使用有界 transport policy。
+
+`verify_remote_writes: true` 时对可证明落点的数据 mutation 做 values 读回；mismatch、
+incomplete 或范围未知会阻止后续阶段。`sheet_verify_formulas: true` 时进一步对成功范围
+执行 Sheet AI `verify_formula`；只有 `success + has_more=false` 通过。两种验证都不是事务，
+不会回滚已经被服务端接受的前缀。
+
 > 详细算法设计：[SHEET.md](./SHEET.md)
 
 ---

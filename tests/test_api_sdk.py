@@ -200,3 +200,11 @@ def test_unified_client_rejects_implicit_or_unknown_backend(backend):
 
     with pytest.raises(ValueError, match="base_v3.*bitable_v1"):
         client.bitable_backend(backend)
+
+
+def test_public_api_exports_typed_sheet_contracts():
+    from api import A1Range, FormulaVerificationResult, SheetMetadata
+
+    assert A1Range.parse("sh1!A1:B2").text == "sh1!A1:B2"
+    assert FormulaVerificationResult("success", False).passed is True
+    assert SheetMetadata("sh1").sheet_id == "sh1"

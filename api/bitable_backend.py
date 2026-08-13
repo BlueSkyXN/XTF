@@ -117,7 +117,7 @@ class MutationReceipt:
     """Typed mutation result while retaining the applied-prefix boundary."""
 
     operation: str
-    backend: BitableBackendKind
+    backend: BitableBackendKind | str
     requested_count: int
     accepted_count: int = 0
     verified_count: int = 0

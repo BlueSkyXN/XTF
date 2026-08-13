@@ -168,6 +168,10 @@ class SyncConfig:
     # 电子表格逻辑同步与结果检测（默认全部关闭）
     sheet_validate_results: bool = False  # 是否启用结果检测
     sheet_protect_formulas: bool = False  # 是否保护云端公式列不被覆盖
+    sheet_verify_formulas: bool = (
+        False  # 是否在成功数据 mutation 后调用 Sheet AI 校验公式
+    )
+    sheet_formula_max_locations: int = 20  # 单类公式错误最多返回的位置数
     sheet_report_column_diff: bool = False  # 是否输出列级差异报告
     sheet_diff_tolerance: float = 0.001  # 数值差异容忍度（浮点数比较）
 
@@ -291,6 +295,12 @@ class SyncConfig:
         # 验证逻辑同步与结果检测配置
         if self.sheet_diff_tolerance < 0:
             raise ValueError("sheet_diff_tolerance 不能为负数")
+        if (
+            not isinstance(self.sheet_formula_max_locations, int)
+            or isinstance(self.sheet_formula_max_locations, bool)
+            or self.sheet_formula_max_locations <= 0
+        ):
+            raise ValueError("sheet_formula_max_locations 必须为正整数")
         if self.batch_size <= 0:
             raise ValueError("batch_size 必须为正整数")
         if self.max_retries < 0:
@@ -306,6 +316,8 @@ class SyncConfig:
             isinstance(self.index_column, str) and self.index_column.strip()
         ):
             raise ValueError("sheet_protect_formulas 必须配置有效的 index_column")
+        if self.sheet_verify_formulas and self.target_type != TargetType.SHEET:
+            raise ValueError("sheet_verify_formulas 仅支持 target_type=sheet")
 
     def _validate_selective_sync_config(self):
         """验证selective_sync配置的详细有效性"""
@@ -548,6 +560,8 @@ class ConfigManager:
                 "sheet_write_max_cols": 100,
                 "sheet_validate_results": False,
                 "sheet_protect_formulas": False,
+                "sheet_verify_formulas": False,
+                "sheet_formula_max_locations": 20,
                 "sheet_report_column_diff": False,
                 "sheet_diff_tolerance": 0.001,
                 "verify_remote_writes": False,
@@ -784,6 +798,8 @@ def create_sample_config(
             "sheet_write_max_cols": 100,
             "sheet_validate_results": False,
             "sheet_protect_formulas": False,
+            "sheet_verify_formulas": False,
+            "sheet_formula_max_locations": 20,
             "sheet_report_column_diff": False,
             "sheet_diff_tolerance": 0.001,
             "selective_sync": {

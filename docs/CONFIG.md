@@ -160,6 +160,8 @@ XTF 支持四层配置来源，优先级从高到低：
 |--------|------|--------|-----|------|
 | `sheet_validate_results` | `bool` | `false` | ❌ | 启用双读结果检测 |
 | `sheet_protect_formulas` | `bool` | `false` | ❌ | 仅 `full`：保护公式列不被覆盖 |
+| `sheet_verify_formulas` | `bool` | `false` | ❌ | 成功数据 mutation 后调用 Sheet AI 校验受影响范围；仅 `sheet` |
+| `sheet_formula_max_locations` | `int` | `20` | ❌ | 每类公式错误最多返回的位置数，必须为正整数 |
 | `sheet_report_column_diff` | `bool` | `false` | ❌ | 输出列级差异报告 |
 | `sheet_diff_tolerance` | `float` | `0.001` | ❌ | 数值比较容忍度 |
 
@@ -174,6 +176,11 @@ XTF 支持四层配置来源，优先级从高到低：
 > ⚠️ 启用 `sheet_protect_formulas` 时会自动启用 `sheet_validate_results`，并要求
 > `sync_mode: full` 和有效 `index_column`。其他模式在配置加载时直接拒绝，避免
 > `overwrite` / `clone` 清空或重写公式。
+
+`sheet_verify_formulas` 与 `sheet_protect_formulas` 相互独立，不会自动联动。启用后仅从
+typed receipt 的成功实际范围生成行带；append 没有服务端实际 range、mutation
+partial/unknown、`has_more=true`、`errors_found`、`partial` 或响应无法解码时均失败
+关闭，不退化为全表扫描。
 
 > 详细机制说明：[SHEET.md](./SHEET.md)
 
@@ -310,6 +317,8 @@ sheet_write_max_cols: 100
 # 逻辑同步与结果检测
 sheet_validate_results: true
 sheet_protect_formulas: true
+sheet_verify_formulas: false
+sheet_formula_max_locations: 20
 sheet_report_column_diff: true
 sheet_diff_tolerance: 0.001
 ```
