@@ -18,6 +18,8 @@ target_type: "bitable"                    # 目标类型: bitable(多维表格) 
 app_token: "your_app_token_here"          # 多维表格应用Token
 table_id: "your_table_id_here"            # 数据表ID
 create_missing_fields: true               # 是否自动创建缺失字段
+bitable_api_backend: "base_v3"            # 原生后端: base_v3（默认）或 bitable_v1；不会自动回退
+bitable_user_id_type: "open_id"           # 人员 ID 类型: open_id/union_id/user_id
 
 # 电子表格配置 (target_type: sheet)
 spreadsheet_token: "your_spreadsheet_token_here"  # 电子表格Token
@@ -68,6 +70,7 @@ sheet_diff_tolerance: 0.001               # 数值差异容忍度（浮点数比
 # 同步设置
 sync_mode: "full"                         # 同步模式: full/incremental/overwrite/clone
 index_column: "ID"                        # 索引列名，用于记录比对
+verify_remote_writes: false               # 是否对同步引擎产生的数据 mutation 做写后读回
 
 # 性能设置
 batch_size: 500                           # 批处理大小

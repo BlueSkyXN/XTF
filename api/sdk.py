@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from .base import RetryableAPIClient
     from .bitable import BitableAPI
     from .sheet import SheetAPI
+    from .bitable_backend import BitableBackend, BitableBackendKind, UserIDType
 
 T = TypeVar("T")
 R = TypeVar("R")
@@ -286,6 +287,29 @@ class XTFFeishuClient:
         from .bitable import BitableAPI
 
         return BitableAPI(self.auth, self.api_client)
+
+    def bitable_backend(
+        self,
+        backend: "BitableBackendKind | str" = "base_v3",
+        user_id_type: "UserIDType | str" = "open_id",
+    ) -> "BitableBackend":
+        """创建显式选择的 typed Bitable backend；失败时绝不切换 API family。"""
+        from .bitable_backend import BitableBackendKind, as_backend_kind
+        from .bitable_v1 import BitableV1Backend
+        from .bitable_v3 import BaseV3Backend
+
+        backend_kind = as_backend_kind(backend)
+        if backend_kind == BitableBackendKind.BASE_V3:
+            return BaseV3Backend(
+                self.auth,
+                self.api_client,
+                user_id_type=user_id_type,
+            )
+        return BitableV1Backend(
+            self.auth,
+            self.api_client,
+            user_id_type=user_id_type,
+        )
 
     def sheet(
         self,

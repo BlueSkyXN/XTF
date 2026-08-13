@@ -377,12 +377,24 @@ selective_sync:
 
 ### Bitable API 映射
 
+以下是同步引擎使用的 canonical 操作；实际 wire endpoint 由
+`bitable_api_backend` 明确选择。默认 `base_v3` 使用 offset/matrix 与 200 条 batch，
+`bitable_v1` 使用既有 page-token/client-token 契约。两者不会自动 fallback。
+
 | 模式 | 读取操作 | 更新操作 | 新增操作 | 删除操作 |
 |------|----------|----------|----------|----------|
 | full | `search_records`（优化字段） | `batch_update_records` | `batch_create_records` | — |
 | incremental | `search_records`（仅索引列） | — | `batch_create_records` | — |
 | overwrite | `search_records`（仅索引列） | — | `batch_create_records` | `batch_delete_records` |
 | clone | `search_records`（最小字段集） | — | `batch_create_records` | `batch_delete_records` |
+
+当 `verify_remote_writes: true` 时，依赖阶段按以下顺序执行：
+
+- `full`：update → verify update → create → verify create
+- `overwrite` / `clone`：delete → verify absence → create → verify create
+
+读取不完整、mutation partial/unknown、`ignored_fields` 或读回 mismatch 会立即停止后续
+阶段。已成功批次不会自动回滚；create 响应缺少可定位 record IDs 时不会用总行数差猜测。
 
 ### Sheet API 映射
 

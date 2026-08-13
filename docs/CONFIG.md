@@ -102,6 +102,8 @@ XTF 支持四层配置来源，优先级从高到低：
 | `app_token` | `str` | — | ✅ `--app-token` | 多维表格应用 Token |
 | `table_id` | `str` | — | ✅ `--table-id` | 数据表 ID |
 | `create_missing_fields` | `bool` | `true` | ✅ `--create-missing-fields true/false` | 自动创建缺失字段 |
+| `bitable_api_backend` | `str` | `base_v3` | ❌ | 明确选择 `base_v3` 或 `bitable_v1`；没有 `auto`，任何错误都不会切换 API family |
+| `bitable_user_id_type` | `str` | `open_id` | ❌ | v1 人员字段 ID 类型：`open_id` / `union_id` / `user_id`；不按前缀猜测 |
 
 **获取 Token 方式**：
 - `app_token`：多维表格 URL 中 `base/` 后的字符串
@@ -178,6 +180,13 @@ XTF 支持四层配置来源，优先级从高到低：
 ---
 
 ## 同步设置
+
+| 参数名 | 类型 | 默认值 | CLI | 说明 |
+|--------|------|--------|-----|------|
+| `verify_remote_writes` | `bool` | `false` | ❌ | 对同步引擎产生的记录/单元格 mutation 做写后读回；默认关闭 |
+
+写后读回不是事务或回滚。出现 partial、unknown outcome、incomplete read 或 mismatch 时，
+引擎停止后续依赖阶段，但此前服务端已接受的批次仍可能保留。
 
 > 源码：`core/config.py` → `SyncMode` 枚举
 

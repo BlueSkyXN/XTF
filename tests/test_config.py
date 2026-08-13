@@ -278,6 +278,59 @@ class TestSyncConfig:
         assert config.sync_mode == SyncMode.FULL
         assert config.field_type_strategy == FieldTypeStrategy.BASE
 
+    def test_bitable_backend_defaults_to_base_v3(self):
+        config = SyncConfig(
+            file_path="test.xlsx",
+            app_id="test_id",
+            app_secret="test_secret",
+            target_type=TargetType.BITABLE,
+            app_token="test_app_token",
+            table_id="test_table_id",
+        )
+
+        assert config.bitable_api_backend == "base_v3"
+        assert config.bitable_user_id_type == "open_id"
+        assert config.verify_remote_writes is False
+
+    @pytest.mark.parametrize("backend", ["auto", "v3", "unknown", ""])
+    def test_bitable_backend_must_be_explicit_supported_family(self, backend):
+        with pytest.raises(ValueError, match="bitable_api_backend"):
+            SyncConfig(
+                file_path="test.xlsx",
+                app_id="test_id",
+                app_secret="test_secret",
+                target_type=TargetType.BITABLE,
+                app_token="test_app_token",
+                table_id="test_table_id",
+                bitable_api_backend=backend,
+            )
+
+    @pytest.mark.parametrize("user_id_type", ["open_id", "union_id", "user_id"])
+    def test_bitable_user_id_type_accepts_supported_values(self, user_id_type):
+        config = SyncConfig(
+            file_path="test.xlsx",
+            app_id="test_id",
+            app_secret="test_secret",
+            target_type=TargetType.BITABLE,
+            app_token="test_app_token",
+            table_id="test_table_id",
+            bitable_user_id_type=user_id_type,
+        )
+
+        assert config.bitable_user_id_type == user_id_type
+
+    def test_bitable_user_id_type_rejects_unknown_value(self):
+        with pytest.raises(ValueError, match="bitable_user_id_type"):
+            SyncConfig(
+                file_path="test.xlsx",
+                app_id="test_id",
+                app_secret="test_secret",
+                target_type=TargetType.BITABLE,
+                app_token="test_app_token",
+                table_id="test_table_id",
+                bitable_user_id_type="tenant_key",
+            )
+
     def test_selective_sync_clone_mode_error(self):
         """测试 selective sync 与 clone 模式不兼容"""
         with pytest.raises(ValueError, match="Clone 模式不支持 selective 同步"):

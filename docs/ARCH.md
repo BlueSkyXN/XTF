@@ -357,8 +357,10 @@ HTTP response；完全没有 response 的网络失败会转为 typed transport e
 
 `api/sdk.py` 是 XTF 的 Python SDK facade，不依赖 `lark-cli` 进程或 Go SDK：
 
-- `XTFFeishuClient`：以 additive facade 统一装配认证和 transport，并创建共享连接的
-  `BitableAPI` / `SheetAPI`；既有类和构造方式继续可用。注入自定义 `api_client`
+- `XTFFeishuClient`：以 additive facade 统一装配认证和 transport。`bitable()` 继续
+  返回 Bitable v1 legacy `BitableAPI`；同步引擎改用
+  `bitable_backend(backend="base_v3" | "bitable_v1")` 的 typed backend；`sheet()`
+  保持现有 `SheetAPI`。既有类和构造方式继续可用。注入自定义 `api_client`
   时，`max_retries` / `rate_limit_delay` 由该 transport 自身负责。
 - `FeishuResponseParser`：统一处理 Bitable/Sheet 业务响应的 HTTP 状态、飞书业务码、
   `log_id`、`retryable` 与 `retry_after`；transport 无 response 时由
@@ -370,6 +372,12 @@ HTTP response；完全没有 response 的网络失败会转为 typed transport e
   不假设服务端会回滚成功批次。
 - Bitable 的 `create/update/delete` 等布尔接口保留既有 `False` 失败契约；
   查询接口则暴露带诊断元数据的 typed exception。
+
+`api/bitable_backend.py` 定义 canonical `FieldSchema` / `CanonicalRecord`、typed
+`RecordReadResult` / `MutationReceipt` 和 Protocol；`api/bitable_v1.py` 与
+`api/bitable_v3.py` 分别拥有自己的 wire schema、分页和批处理。Base v3 严格解码
+matrix，并以单批 200 条为上限；任何 auth、权限、404、429、5xx、timeout、业务码或
+schema 错误都不会回退到 v1。
 
 同步模式、字段转换、公式保护和远程删除仍归 `core/engine.py`，不会下沉到 SDK。
 现有 `BitableAPI` / `SheetAPI` 公共调用方式保持不变。
@@ -400,6 +408,8 @@ Sheet 元数据不可用时可以用配置化窗口做有界诊断读取，但�
 - 分页获取支持循环检测（防止无限翻页）
 - 批量操作自动按 `batch_size` 分片
 - 富文本字段自动处理 `[{"text": "...", "type": "text"}]` 格式
+- legacy facade 的 `bool` / `tuple` / `dict` 返回契约永久保留；typed receipt 的
+  `accepted` 只表示请求被服务端接受，只有可选读回通过才表示一致
 
 ### 5.5 Sheet API
 

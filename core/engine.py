@@ -87,11 +87,22 @@ import logging
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Dict, Any, List, Union, Tuple
+from typing import Optional, Dict, Any, List, Union, Tuple, cast
 
 from .config import SyncConfig, SyncMode, TargetType
 from .converter import DataConverter
-from api import BitableAPI, PartialBatchError, SheetAPI, XTFFeishuClient, run_batches
+from api import (
+    BitableBackend,
+    CanonicalRecord,
+    FieldSchema,
+    MutationOutcome,
+    MutationReceipt,
+    ReadbackStatus,
+    PartialBatchError,
+    SheetAPI,
+    XTFFeishuClient,
+    run_batches,
+)
 
 
 class XTFSyncEngine:
@@ -124,9 +135,12 @@ class XTFSyncEngine:
         self.auth = self.sdk.auth
 
         # 根据目标类型选择API客户端
-        self.api: Union[BitableAPI, SheetAPI]
+        self.api: Union[BitableBackend, SheetAPI]
         if config.target_type == TargetType.BITABLE:
-            self.api = self.sdk.bitable()
+            self.api = self.sdk.bitable_backend(
+                backend=config.bitable_api_backend,
+                user_id_type=config.bitable_user_id_type,
+            )
         else:  # SHEET
             self.api = self.sdk.sheet(
                 start_row=self.config.start_row,
@@ -205,25 +219,25 @@ class XTFSyncEngine:
 
     # ========== 多维表格专用方法 ==========
 
-    def get_field_types(self) -> Dict[str, int]:
+    def _bitable_backend(self) -> BitableBackend:
+        return cast(BitableBackend, self.api)
+
+    def get_field_types(self) -> Dict[str, FieldSchema]:
         """获取多维表格字段类型映射"""
         if self.config.target_type != TargetType.BITABLE:
             return {}
 
         try:
-            if not isinstance(self.api, BitableAPI):
-                return {}
             if not self.config.app_token or not self.config.table_id:
                 self.logger.error("多维表格的 app_token 或 table_id 未配置")
                 return {}
-            existing_fields = self.api.list_fields(
+            backend = self._bitable_backend()
+            existing_fields = backend.list_fields(
                 self.config.app_token, self.config.table_id
             )
             field_types = {}
             for field in existing_fields:
-                field_name = field.get("field_name", "")
-                field_type = field.get("type", 1)  # 默认为文本类型
-                field_types[field_name] = field_type
+                field_types[field.name] = field
 
             self.logger.debug(f"获取到 {len(field_types)} 个字段类型信息")
             return field_types
@@ -232,30 +246,29 @@ class XTFSyncEngine:
             self.logger.warning(f"获取字段类型失败: {e}，将使用智能类型检测")
             return {}
 
-    def ensure_fields_exist(self, df: pd.DataFrame) -> Tuple[bool, Dict[str, int]]:
+    def ensure_fields_exist(
+        self, df: pd.DataFrame
+    ) -> Tuple[bool, Dict[str, FieldSchema]]:
         """确保多维表格所需字段存在"""
         if self.config.target_type != TargetType.BITABLE:
             return True, {}
 
         try:
-            if not isinstance(self.api, BitableAPI):
-                return False, {}
             if not self.config.app_token or not self.config.table_id:
                 self.logger.error("多维表格的 app_token 或 table_id 未配置")
                 return False, {}
 
             # 获取现有字段
-            existing_fields = self.api.list_fields(
+            backend = self._bitable_backend()
+            existing_fields = backend.list_fields(
                 self.config.app_token, self.config.table_id
             )
-            existing_field_names = {field["field_name"] for field in existing_fields}
+            existing_field_names = {field.name for field in existing_fields}
 
             # 构建字段类型映射
             field_types = {}
             for field in existing_fields:
-                field_name = field.get("field_name", "")
-                field_type = field.get("type", 1)
-                field_types[field_name] = field_type
+                field_types[field.name] = field
 
             if self.config.create_missing_fields:
                 # 找出缺失的字段，保持原始列顺序
@@ -308,26 +321,22 @@ class XTFSyncEngine:
 
                     # 执行字段创建
                     for plan in creation_plan:
-                        if not isinstance(self.api, BitableAPI):
-                            continue
-                        success = self.api.create_field(
+                        receipt = backend.create_field(
                             self.config.app_token,
                             self.config.table_id,
                             plan["field_name"],
                             plan["suggested_type"],
                         )
 
-                        if not success:
+                        if receipt.outcome is not MutationOutcome.ACCEPTED:
                             self.logger.error(f"字段 '{plan['field_name']}' 创建失败")
                             return False, field_types
 
-                        # 记录新字段类型
-                        field_types[plan["field_name"]] = plan["suggested_type"]
-
-                    # 等待字段创建完成
-                    import time
-
-                    time.sleep(2)
+                    # 只使用服务端最终返回的 schema 构建 converter mapping。
+                    existing_fields = backend.list_fields(
+                        self.config.app_token, self.config.table_id
+                    )
+                    field_types = {field.name: field for field in existing_fields}
 
                 else:
                     self.logger.info("✅ 所有必需字段已存在，无需创建")
@@ -347,14 +356,20 @@ class XTFSyncEngine:
             field_names: 指定返回的字段名称列表，为None时返回全部字段。
                          用于减少不必要的数据传输，提升查询性能。
         """
-        if not isinstance(self.api, BitableAPI):
-            return []
         if not self.config.app_token or not self.config.table_id:
             self.logger.error("多维表格的 app_token 或 table_id 未配置")
             return []
-        return self.api.get_all_records(
+        result = self._bitable_backend().list_records(
             self.config.app_token, self.config.table_id, field_names=field_names
         )
+        if not result.complete:
+            raise RuntimeError("多维表格读取不完整，拒绝继续同步")
+        if result.ignored_fields:
+            raise RuntimeError("多维表格读取存在 ignored_fields，拒绝继续同步")
+        return [
+            {"record_id": record.record_id, "fields": dict(record.fields)}
+            for record in result.records
+        ]
 
     def process_in_batches(
         self, items: List[Any], batch_size: int, processor_func, *args, **kwargs
@@ -395,6 +410,162 @@ class XTFSyncEngine:
         )
         return True
 
+    def process_typed_bitable_batches(
+        self,
+        items: List[Any],
+        processor_func,
+    ) -> Tuple[bool, List[MutationReceipt]]:
+        """按 backend 上限分块，保留 receipt 并在 partial/unknown 首错停止。"""
+        max_batch_size = self._get_operation_max_batch_size(processor_func)
+        effective_batch_size = min(
+            self.config.batch_size,
+            max_batch_size or self.config.batch_size,
+        )
+        receipts: List[MutationReceipt] = []
+        for batch_index, start in enumerate(
+            range(0, len(items), effective_batch_size), start=1
+        ):
+            batch = items[start : start + effective_batch_size]
+            receipt = processor_func(
+                self.config.app_token,
+                self.config.table_id,
+                batch,
+            )
+            if not isinstance(receipt, MutationReceipt):
+                raise TypeError("typed backend mutation 必须返回 MutationReceipt")
+            receipts.append(receipt)
+            if (
+                receipt.outcome is not MutationOutcome.ACCEPTED
+                or receipt.accepted_count != len(batch)
+                or receipt.ignored_fields
+                or receipt.record_not_found
+            ):
+                self.logger.error(
+                    f"第 {batch_index} 批结果为 {receipt.outcome.value}，"
+                    "停止后续批次；已成功前缀不会回滚"
+                )
+                return False, receipts
+        return True, receipts
+
+    @staticmethod
+    def _canonical_records(records: List[Dict[str, Any]]) -> List[CanonicalRecord]:
+        return [
+            CanonicalRecord(
+                record_id=record.get("record_id"),
+                fields=dict(record.get("fields", {})),
+            )
+            for record in records
+        ]
+
+    def _verify_bitable_mutation(
+        self,
+        operation: str,
+        requested: List[CanonicalRecord] | List[str],
+        receipts: List[MutationReceipt],
+    ) -> bool:
+        if not self.config.verify_remote_writes:
+            return True
+        if not receipts:
+            return True
+
+        if operation == "delete":
+            record_ids = [str(item) for item in requested]
+            if not record_ids:
+                return True
+            if not self.config.app_token or not self.config.table_id:
+                return False
+            backend = self._bitable_backend()
+            result = backend.batch_get_records(
+                self.config.app_token,
+                self.config.table_id,
+                record_ids,
+            )
+            missing = set(result.record_not_found)
+            present = {record.record_id for record in result.records}
+            verified = result.complete and not present and missing == set(record_ids)
+            self._set_receipt_readback(
+                receipts,
+                ReadbackStatus.VERIFIED if verified else ReadbackStatus.MISMATCH,
+                len(record_ids) if verified else 0,
+            )
+            return verified
+
+        records = [item for item in requested if isinstance(item, CanonicalRecord)]
+        record_ids = [record.record_id for record in records if record.record_id]
+        if operation == "create" and not record_ids:
+            record_ids = [
+                record_id for receipt in receipts for record_id in receipt.record_ids
+            ]
+            if len(record_ids) != len(records):
+                self.logger.error("创建响应没有完整 record IDs，无法证明写后读回范围")
+                self._set_receipt_readback(receipts, ReadbackStatus.UNKNOWN, 0)
+                return False
+            records = [
+                CanonicalRecord(record_id, record.fields)
+                for record_id, record in zip(record_ids, records)
+            ]
+        if not record_ids:
+            return False
+        if not self.config.app_token or not self.config.table_id:
+            return False
+        backend = self._bitable_backend()
+        observed = backend.batch_get_records(
+            self.config.app_token,
+            self.config.table_id,
+            record_ids,
+            field_names=tuple(
+                dict.fromkeys(name for record in records for name in record.fields)
+            ),
+        )
+        if (
+            not observed.complete
+            or observed.ignored_fields
+            or observed.record_not_found
+        ):
+            self._set_receipt_readback(receipts, ReadbackStatus.INCOMPLETE, 0)
+            return False
+        schema_by_name = {field.name: field for field in observed.fields}
+        by_id = {record.record_id: record for record in observed.records}
+        for expected in records:
+            actual = by_id.get(expected.record_id)
+            if actual is None:
+                self._set_receipt_readback(receipts, ReadbackStatus.MISMATCH, 0)
+                return False
+            for name, value in expected.fields.items():
+                schema = schema_by_name.get(name)
+                actual_value = actual.fields.get(name)
+                type_code = self.converter._field_schema_type_code(schema)
+                expected_normalized = self.converter._normalize_index_value(
+                    value, type_code
+                )
+                actual_normalized = self.converter._normalize_index_value(
+                    actual_value, type_code
+                )
+                if expected_normalized != actual_normalized:
+                    self._set_receipt_readback(receipts, ReadbackStatus.MISMATCH, 0)
+                    return False
+        self._set_receipt_readback(receipts, ReadbackStatus.VERIFIED, len(records))
+        return True
+
+    @staticmethod
+    def _set_receipt_readback(
+        receipts: List[MutationReceipt],
+        status: ReadbackStatus,
+        verified_count: int,
+    ) -> None:
+        """Dataclass 保持 frozen；engine 用返回副本记录本次读回状态。"""
+        from dataclasses import replace
+
+        remaining = verified_count
+        for index, receipt in enumerate(receipts):
+            verified = min(receipt.accepted_count, remaining)
+            receipts[index] = replace(
+                receipt,
+                verified_count=verified,
+                readback=status,
+            )
+            remaining -= verified
+
     def _get_operation_type(self, processor_func) -> str:
         """根据处理函数获取操作类型"""
         func_name = getattr(processor_func, "__name__", str(processor_func))
@@ -411,11 +582,11 @@ class XTFSyncEngine:
         """根据处理函数获取批量接口上限"""
         func_name = getattr(processor_func, "__name__", str(processor_func))
         if "create" in func_name:
-            return BitableAPI.MAX_BATCH_CREATE_SIZE
+            return getattr(self.api, "max_batch_create_size", None)
         if "update" in func_name:
-            return BitableAPI.MAX_BATCH_UPDATE_SIZE
+            return getattr(self.api, "max_batch_update_size", None)
         if "delete" in func_name:
-            return BitableAPI.MAX_BATCH_DELETE_SIZE
+            return getattr(self.api, "max_batch_delete_size", None)
         return None
 
     # ========== 电子表格专用方法 ==========
@@ -948,17 +1119,13 @@ class XTFSyncEngine:
             self.logger.warning("未指定索引列，将执行纯新增操作")
             field_types = self.get_field_types()
             new_records = self.converter.df_to_records(df, field_types)
-            if (
-                isinstance(self.api, BitableAPI)
-                and self.config.app_token
-                and self.config.table_id
-            ):
-                return self.process_in_batches(
-                    new_records,
-                    self.config.batch_size,
-                    self.api.batch_create_records,
-                    self.config.app_token,
-                    self.config.table_id,
+            if self.config.app_token and self.config.table_id:
+                canonical = self._canonical_records(new_records)
+                success, receipts = self.process_typed_bitable_batches(
+                    canonical, self._bitable_backend().batch_create
+                )
+                return success and self._verify_bitable_mutation(
+                    "create", canonical, receipts
                 )
             return False
 
@@ -979,7 +1146,10 @@ class XTFSyncEngine:
                 fields = record.get("fields", {})
                 index_value = fields.get(self.config.index_column, "未找到")
                 normalized_value = self.converter._normalize_index_value(
-                    index_value, field_types.get(self.config.index_column)
+                    index_value,
+                    self.converter._field_schema_type_code(
+                        field_types.get(self.config.index_column)
+                    ),
                 )
                 self.logger.info(
                     f"🔍 现有记录 {i + 1} 索引列 '{self.config.index_column}' 值: '{index_value}' -> 规范化: '{normalized_value}'"
@@ -1031,18 +1201,13 @@ class XTFSyncEngine:
 
         # 执行更新
         update_success = True
-        if (
-            records_to_update
-            and isinstance(self.api, BitableAPI)
-            and self.config.app_token
-            and self.config.table_id
-        ):
-            update_success = self.process_in_batches(
-                records_to_update,
-                self.config.batch_size,
-                self.api.batch_update_records,
-                self.config.app_token,
-                self.config.table_id,
+        if records_to_update and self.config.app_token and self.config.table_id:
+            canonical_updates = self._canonical_records(records_to_update)
+            update_success, update_receipts = self.process_typed_bitable_batches(
+                canonical_updates, self._bitable_backend().batch_update
+            )
+            update_success = update_success and self._verify_bitable_mutation(
+                "update", canonical_updates, update_receipts
             )
             if not update_success:
                 self.logger.error("批量更新未完整成功，停止后续新增")
@@ -1050,18 +1215,13 @@ class XTFSyncEngine:
 
         # 执行新增
         create_success = True
-        if (
-            records_to_create
-            and isinstance(self.api, BitableAPI)
-            and self.config.app_token
-            and self.config.table_id
-        ):
-            create_success = self.process_in_batches(
-                records_to_create,
-                self.config.batch_size,
-                self.api.batch_create_records,
-                self.config.app_token,
-                self.config.table_id,
+        if records_to_create and self.config.app_token and self.config.table_id:
+            canonical_creates = self._canonical_records(records_to_create)
+            create_success, create_receipts = self.process_typed_bitable_batches(
+                canonical_creates, self._bitable_backend().batch_create
+            )
+            create_success = create_success and self._verify_bitable_mutation(
+                "create", canonical_creates, create_receipts
             )
 
         return update_success and create_success
@@ -1368,17 +1528,13 @@ class XTFSyncEngine:
             self.logger.warning("未指定索引列，将执行纯新增操作")
             field_types = self.get_field_types()
             new_records = self.converter.df_to_records(df, field_types)
-            if (
-                isinstance(self.api, BitableAPI)
-                and self.config.app_token
-                and self.config.table_id
-            ):
-                return self.process_in_batches(
-                    new_records,
-                    self.config.batch_size,
-                    self.api.batch_create_records,
-                    self.config.app_token,
-                    self.config.table_id,
+            if self.config.app_token and self.config.table_id:
+                canonical = self._canonical_records(new_records)
+                success, receipts = self.process_typed_bitable_batches(
+                    canonical, self._bitable_backend().batch_create
+                )
+                return success and self._verify_bitable_mutation(
+                    "create", canonical, receipts
                 )
             return False
 
@@ -1414,18 +1570,13 @@ class XTFSyncEngine:
 
         self.logger.info(f"增量同步计划: 新增 {len(records_to_create)} 条记录")
 
-        if (
-            records_to_create
-            and isinstance(self.api, BitableAPI)
-            and self.config.app_token
-            and self.config.table_id
-        ):
-            return self.process_in_batches(
-                records_to_create,
-                self.config.batch_size,
-                self.api.batch_create_records,
-                self.config.app_token,
-                self.config.table_id,
+        if records_to_create and self.config.app_token and self.config.table_id:
+            canonical = self._canonical_records(records_to_create)
+            success, receipts = self.process_typed_bitable_batches(
+                canonical, self._bitable_backend().batch_create
+            )
+            return success and self._verify_bitable_mutation(
+                "create", canonical, receipts
             )
         else:
             self.logger.info("没有新记录需要同步")
@@ -1688,18 +1839,12 @@ class XTFSyncEngine:
 
         # 删除已存在的记录
         delete_success = True
-        if (
-            record_ids_to_delete
-            and isinstance(self.api, BitableAPI)
-            and self.config.app_token
-            and self.config.table_id
-        ):
-            delete_success = self.process_in_batches(
-                record_ids_to_delete,
-                self.config.batch_size,
-                self.api.batch_delete_records,
-                self.config.app_token,
-                self.config.table_id,
+        if record_ids_to_delete and self.config.app_token and self.config.table_id:
+            delete_success, delete_receipts = self.process_typed_bitable_batches(
+                record_ids_to_delete, self._bitable_backend().batch_delete
+            )
+            delete_success = delete_success and self._verify_bitable_mutation(
+                "delete", record_ids_to_delete, delete_receipts
             )
             if not delete_success:
                 self.logger.error("覆盖同步删除未完整成功，停止后续新增")
@@ -1708,17 +1853,13 @@ class XTFSyncEngine:
         # 新增全部记录
         new_records = self.converter.df_to_records(df, field_types)
         create_success = False
-        if (
-            isinstance(self.api, BitableAPI)
-            and self.config.app_token
-            and self.config.table_id
-        ):
-            create_success = self.process_in_batches(
-                new_records,
-                self.config.batch_size,
-                self.api.batch_create_records,
-                self.config.app_token,
-                self.config.table_id,
+        if self.config.app_token and self.config.table_id:
+            canonical = self._canonical_records(new_records)
+            create_success, create_receipts = self.process_typed_bitable_batches(
+                canonical, self._bitable_backend().batch_create
+            )
+            create_success = create_success and self._verify_bitable_mutation(
+                "create", canonical, create_receipts
             )
 
         return delete_success and create_success
@@ -1906,18 +2047,12 @@ class XTFSyncEngine:
 
         # 删除所有记录
         delete_success = True
-        if (
-            existing_record_ids
-            and isinstance(self.api, BitableAPI)
-            and self.config.app_token
-            and self.config.table_id
-        ):
-            delete_success = self.process_in_batches(
-                existing_record_ids,
-                self.config.batch_size,
-                self.api.batch_delete_records,
-                self.config.app_token,
-                self.config.table_id,
+        if existing_record_ids and self.config.app_token and self.config.table_id:
+            delete_success, delete_receipts = self.process_typed_bitable_batches(
+                existing_record_ids, self._bitable_backend().batch_delete
+            )
+            delete_success = delete_success and self._verify_bitable_mutation(
+                "delete", existing_record_ids, delete_receipts
             )
             if not delete_success:
                 self.logger.error("克隆同步删除未完整成功，停止后续新增")
@@ -1927,17 +2062,13 @@ class XTFSyncEngine:
         field_types = self.get_field_types()
         new_records = self.converter.df_to_records(df, field_types)
         create_success = False
-        if (
-            isinstance(self.api, BitableAPI)
-            and self.config.app_token
-            and self.config.table_id
-        ):
-            create_success = self.process_in_batches(
-                new_records,
-                self.config.batch_size,
-                self.api.batch_create_records,
-                self.config.app_token,
-                self.config.table_id,
+        if self.config.app_token and self.config.table_id:
+            canonical = self._canonical_records(new_records)
+            create_success, create_receipts = self.process_typed_bitable_batches(
+                canonical, self._bitable_backend().batch_create
+            )
+            create_success = create_success and self._verify_bitable_mutation(
+                "create", canonical, create_receipts
             )
 
         return delete_success and create_success
@@ -2203,7 +2334,9 @@ class XTFSyncEngine:
                         not self.converter._is_empty_value(value)
                         and col_name in field_types
                     ):
-                        field_type = field_types[col_name]
+                        field_type = self.converter._field_schema_type_code(
+                            field_types[col_name]
+                        )
                         # 简单的类型不匹配检测
                         if field_type == 2 and isinstance(
                             value, str
@@ -2257,7 +2390,7 @@ class XTFSyncEngine:
         return sync_result
 
     def _show_field_analysis_summary(
-        self, df: pd.DataFrame, field_types: Dict[str, int]
+        self, df: pd.DataFrame, field_types: Dict[str, FieldSchema]
     ):
         """显示字段分析摘要"""
         self.logger.info("\n📋 字段类型映射摘要:")
@@ -2265,9 +2398,11 @@ class XTFSyncEngine:
 
         for col_name in df.columns:
             if col_name in field_types:
-                field_type = field_types[col_name]
-                type_name = self.converter.get_field_type_name(field_type)
-                self.logger.info(f"  {col_name} → {type_name} (类型码: {field_type})")
+                schema = field_types[col_name]
+                self.logger.info(
+                    f"  {col_name} → {schema.kind.value} "
+                    f"(后端类型: {schema.raw_type}, writable={schema.writable})"
+                )
             else:
                 self.logger.warning(f"  {col_name} → 未知字段类型")
 

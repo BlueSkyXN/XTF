@@ -6,7 +6,13 @@ from unittest.mock import Mock, patch
 
 import pandas as pd
 
-from api.bitable import BitableAPI
+from api.bitable_backend import (
+    BitableBackend,
+    BitableBackendKind,
+    CanonicalRecord,
+    MutationOutcome,
+    MutationReceipt,
+)
 from api.sheet import SheetAPI
 from core.config import SelectiveSyncConfig, SyncConfig, SyncMode, TargetType
 from core.converter import DataConverter
@@ -56,7 +62,7 @@ def test_engine_uses_unified_sdk_client(
     sample_bitable_config,
 ):
     sdk = mock_sdk_class.return_value
-    api = sdk.bitable.return_value
+    api = sdk.bitable_backend.return_value
 
     engine = XTFSyncEngine(sample_bitable_config)
 
@@ -70,6 +76,9 @@ def test_engine_uses_unified_sdk_client(
     assert engine.api_client is sdk.api_client
     assert engine.auth is sdk.auth
     assert engine.api is api
+    sdk.bitable_backend.assert_called_once_with(
+        backend="base_v3", user_id_type="open_id"
+    )
 
 
 def test_process_in_batches_stops_after_failure():
@@ -89,6 +98,130 @@ def test_process_in_batches_stops_after_failure():
     assert calls == [[1, 2], [3, 4]]
 
 
+def test_typed_bitable_batches_use_backend_limit_and_stop_on_partial():
+    engine = XTFSyncEngine.__new__(XTFSyncEngine)
+    engine.config = Mock(
+        target_type=TargetType.BITABLE,
+        batch_size=500,
+        app_token="app",
+        table_id="table",
+    )
+    engine.logger = Mock()
+    engine.converter = DataConverter(TargetType.BITABLE)
+    engine.api = Mock(spec=BitableBackend)
+    engine.api.max_batch_create_size = 200
+    calls = []
+
+    def processor(app, table, batch):
+        calls.append(list(batch))
+        outcome = (
+            MutationOutcome.ACCEPTED if len(calls) == 1 else MutationOutcome.PARTIAL
+        )
+        return MutationReceipt(
+            operation="batch_create",
+            backend=BitableBackendKind.BASE_V3,
+            requested_count=len(batch),
+            accepted_count=len(batch) if outcome is MutationOutcome.ACCEPTED else 0,
+            outcome=outcome,
+        )
+
+    processor.__name__ = "batch_create"
+    success, receipts = engine.process_typed_bitable_batches(
+        list(range(450)), processor
+    )
+
+    assert success is False
+    assert [len(batch) for batch in calls] == [200, 200]
+    assert len(receipts) == 2
+
+
+def test_typed_bitable_update_readback_mismatch_blocks_next_phase():
+    engine = XTFSyncEngine.__new__(XTFSyncEngine)
+    engine.config = Mock(
+        verify_remote_writes=True,
+        app_token="app",
+        table_id="table",
+    )
+    engine.logger = Mock()
+    engine.converter = DataConverter(TargetType.BITABLE)
+    engine.api = Mock(spec=BitableBackend)
+    requested = [CanonicalRecord("rec1", {"Name": "expected"})]
+    engine.api.batch_get_records.return_value = Mock(
+        complete=True,
+        ignored_fields=(),
+        record_not_found=(),
+        fields=(),
+        records=(CanonicalRecord("rec1", {"Name": "actual"}),),
+    )
+
+    assert engine._verify_bitable_mutation("update", requested, []) is True
+
+    receipt = MutationReceipt(
+        operation="batch_update",
+        backend=BitableBackendKind.BASE_V3,
+        requested_count=1,
+        accepted_count=1,
+    )
+    assert engine._verify_bitable_mutation("update", requested, [receipt]) is False
+
+
+def test_typed_bitable_readback_updates_receipt_status():
+    engine = XTFSyncEngine.__new__(XTFSyncEngine)
+    engine.config = Mock(
+        verify_remote_writes=True,
+        app_token="app",
+        table_id="table",
+    )
+    engine.logger = Mock()
+    engine.converter = DataConverter(TargetType.BITABLE)
+    engine.api = Mock(spec=BitableBackend)
+    requested = [CanonicalRecord("rec1", {"Name": "expected"})]
+    engine.api.batch_get_records.return_value = Mock(
+        complete=True,
+        ignored_fields=(),
+        record_not_found=(),
+        fields=(),
+        records=(CanonicalRecord("rec1", {"Name": "expected"}),),
+    )
+    receipts = [
+        MutationReceipt(
+            operation="batch_update",
+            backend=BitableBackendKind.BASE_V3,
+            requested_count=1,
+            accepted_count=1,
+        )
+    ]
+
+    assert engine._verify_bitable_mutation("update", requested, receipts) is True
+    assert receipts[0].readback.value == "verified"
+    assert receipts[0].verified_count == 1
+
+
+def test_typed_bitable_delete_readback_requires_explicit_absence():
+    engine = XTFSyncEngine.__new__(XTFSyncEngine)
+    engine.config = Mock(
+        verify_remote_writes=True,
+        app_token="app",
+        table_id="table",
+    )
+    engine.logger = Mock()
+    engine.api = Mock(spec=BitableBackend)
+    engine.api.batch_get_records.return_value = Mock(
+        complete=True,
+        ignored_fields=(),
+        record_not_found=("rec1",),
+        records=(),
+    )
+    receipt = MutationReceipt(
+        operation="batch_delete",
+        backend=BitableBackendKind.BASE_V3,
+        requested_count=1,
+        accepted_count=1,
+    )
+
+    assert engine._verify_bitable_mutation("delete", ["rec1"], [receipt]) is True
+
+
 def test_full_bitable_stops_before_create_when_update_fails():
     engine = XTFSyncEngine.__new__(XTFSyncEngine)
     engine.config = Mock(
@@ -98,7 +231,7 @@ def test_full_bitable_stops_before_create_when_update_fails():
         table_id="table",
     )
     engine.logger = Mock()
-    engine.api = Mock(spec=BitableAPI)
+    engine.api = Mock(spec=BitableBackend)
     engine.converter = Mock()
     engine.get_all_bitable_records = Mock(
         return_value=[{"record_id": "rec1", "fields": {"ID": 1}}]
@@ -111,14 +244,26 @@ def test_full_bitable_stops_before_create_when_update_fails():
     engine.converter._is_empty_value.return_value = False
     engine.converter.convert_field_value_safe.side_effect = lambda _, value, __: value
     engine.converter._normalize_index_value.side_effect = lambda value, _: value
-    engine.process_in_batches = Mock(side_effect=[False, True])
+    engine.process_typed_bitable_batches = Mock(
+        return_value=(
+            False,
+            [
+                MutationReceipt(
+                    operation="batch_update",
+                    backend=BitableBackendKind.BASE_V3,
+                    requested_count=1,
+                    outcome=MutationOutcome.PARTIAL,
+                )
+            ],
+        )
+    )
 
     result = engine._sync_full_bitable(
         pd.DataFrame({"ID": [1, 2], "Name": ["updated", "new"]})
     )
 
     assert result is False
-    engine.process_in_batches.assert_called_once()
+    engine.process_typed_bitable_batches.assert_called_once()
 
 
 def test_clone_bitable_stops_before_create_when_delete_fails():
@@ -130,16 +275,16 @@ def test_clone_bitable_stops_before_create_when_delete_fails():
         table_id="table",
     )
     engine.logger = Mock()
-    engine.api = Mock(spec=BitableAPI)
+    engine.api = Mock(spec=BitableBackend)
     engine.converter = Mock()
     engine.get_all_bitable_records = Mock(return_value=[{"record_id": "rec1"}])
     engine.get_field_types = Mock(return_value={})
-    engine.process_in_batches = Mock(side_effect=[False, True])
+    engine.process_typed_bitable_batches = Mock(return_value=(False, []))
 
     result = engine._sync_clone_bitable(pd.DataFrame({"ID": [1]}))
 
     assert result is False
-    engine.process_in_batches.assert_called_once()
+    engine.process_typed_bitable_batches.assert_called_once()
     engine.converter.df_to_records.assert_not_called()
 
 
@@ -152,7 +297,7 @@ def test_overwrite_bitable_stops_before_create_when_delete_fails():
         table_id="table",
     )
     engine.logger = Mock()
-    engine.api = Mock(spec=BitableAPI)
+    engine.api = Mock(spec=BitableBackend)
     engine.converter = Mock()
     engine.get_all_bitable_records = Mock(
         return_value=[{"record_id": "rec1", "fields": {"ID": 1}}]
@@ -162,12 +307,12 @@ def test_overwrite_bitable_stops_before_create_when_delete_fails():
         "existing": {"record_id": "rec1"}
     }
     engine.converter.get_index_value_hash.return_value = "existing"
-    engine.process_in_batches = Mock(side_effect=[False, True])
+    engine.process_typed_bitable_batches = Mock(return_value=(False, []))
 
     result = engine._sync_overwrite_bitable(pd.DataFrame({"ID": [1]}))
 
     assert result is False
-    engine.process_in_batches.assert_called_once()
+    engine.process_typed_bitable_batches.assert_called_once()
     engine.converter.df_to_records.assert_not_called()
 
 

@@ -61,10 +61,15 @@ from api import XTFFeishuClient
 client = XTFFeishuClient(app_id, app_secret)
 bitable = client.bitable()
 sheet = client.sheet()
+
+# 新 typed 后端必须显式选择；默认推荐 Base v3
+base = client.bitable_backend(backend="base_v3", user_id_type="open_id")
 ```
 
 原有 `FeishuAuth`、`BitableAPI`、`SheetAPI` 的直接构造方式继续保留；统一入口不依赖
-`lark-cli` 子进程，也没有新增运行时依赖。同步模式和远端删除仍由 `core/engine.py`
+`lark-cli` subprocess、MCP 或 Go SDK。主同步引擎默认使用原生 `base_v3` typed backend，
+可在 YAML 中显式切换为 `bitable_v1`，不会自动 fallback。`lite/` 仍是 legacy standalone，
+不包含本轮 typed backend 改造，也没有新增运行时依赖。同步模式和远端删除仍由 `core/engine.py`
 管理，不由 SDK facade 隐式执行。
 
 ## 同步模式

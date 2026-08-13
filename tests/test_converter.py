@@ -774,3 +774,46 @@ class TestDfToRecords:
 
         with pytest.raises(ValueError, match="只支持多维表格模式"):
             converter.df_to_records(sample_dataframe)
+
+    def test_df_to_records_accepts_canonical_field_schema(self):
+        from api.bitable_backend import FieldKind, FieldSchema
+
+        converter = DataConverter(TargetType.BITABLE)
+        schemas = {
+            "Name": FieldSchema("fld1", "Name", FieldKind.TEXT, raw_type="text"),
+            "Tags": FieldSchema(
+                "fld2",
+                "Tags",
+                FieldKind.SELECT,
+                multiple=True,
+                raw_type="select",
+            ),
+        }
+
+        records = converter.df_to_records(
+            pd.DataFrame({"Name": ["A"], "Tags": ["one,two"]}), schemas
+        )
+
+        assert records == [{"fields": {"Name": "A", "Tags": ["one", "two"]}}]
+
+    @pytest.mark.parametrize(
+        "kind",
+        ["FORMULA", "LOOKUP", "ATTACHMENT", "UNSUPPORTED"],
+    )
+    def test_df_to_records_rejects_non_writable_canonical_fields(self, kind):
+        from api.bitable_backend import FieldKind, FieldSchema
+
+        converter = DataConverter(TargetType.BITABLE)
+        field_kind = FieldKind[kind]
+        schema = FieldSchema(
+            "fld1",
+            "Protected",
+            field_kind,
+            writable=kind not in {"FORMULA", "LOOKUP", "UNSUPPORTED"},
+            raw_type=field_kind.value,
+        )
+
+        with pytest.raises(ValueError, match="不可写|附件"):
+            converter.df_to_records(
+                pd.DataFrame({"Protected": ["value"]}), {"Protected": schema}
+            )
