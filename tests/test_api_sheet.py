@@ -28,6 +28,26 @@ def test_get_sheet_data_uses_single_network_read():
     client.call_api.assert_called_once()
 
 
+def test_get_sheet_data_encodes_token_and_a1_path_suffix():
+    auth = Mock()
+    auth.get_auth_headers.return_value = {"Authorization": "Bearer fake"}
+    client = Mock()
+    response = Mock()
+    response.status_code = 200
+    response.headers = {}
+    response.json.return_value = {
+        "code": 0,
+        "data": {"valueRange": {"values": [[1]]}},
+    }
+    client.call_api.return_value = response
+    api = SheetAPI(auth, client)
+
+    assert api.get_sheet_data("tok/../x", "数据!A1:A1") == [[1]]
+
+    url = client.call_api.call_args.args[1]
+    assert "/spreadsheets/tok%2F..%2Fx/values/%E6%95%B0%E6%8D%AE!A1%3AA1" in url
+
+
 def test_get_sheet_data_passes_render_options():
     auth = Mock()
     auth.get_auth_headers.return_value = {"Authorization": "Bearer fake"}

@@ -104,6 +104,7 @@ from typing import Dict, Any, List, Optional, Tuple, Union
 from .auth import FeishuAuth
 from .base import RetryableAPIClient
 from .sdk import FeishuAPIError, FeishuResponseParser
+from .url import encode_a1_range, encode_path_segment
 
 
 class SheetAPI:
@@ -194,7 +195,8 @@ class SheetAPI:
         Raises:
             Exception: 当API调用失败时
         """
-        url = f"https://open.feishu.cn/open-apis/sheets/v3/spreadsheets/{spreadsheet_token}"
+        token = encode_path_segment(spreadsheet_token)
+        url = f"https://open.feishu.cn/open-apis/sheets/v3/spreadsheets/{token}"
         headers = self.auth.get_auth_headers()
 
         params = {}
@@ -220,7 +222,9 @@ class SheetAPI:
         Returns:
             工作表信息字典
         """
-        url = f"https://open.feishu.cn/open-apis/sheets/v3/spreadsheets/{spreadsheet_token}/sheets/{sheet_id}"
+        token = encode_path_segment(spreadsheet_token)
+        sheet = encode_path_segment(sheet_id)
+        url = f"https://open.feishu.cn/open-apis/sheets/v3/spreadsheets/{token}/sheets/{sheet}"
         headers = self.auth.get_auth_headers()
 
         response = self.api_client.call_api("GET", url, headers=headers)
@@ -274,7 +278,9 @@ class SheetAPI:
         if not is_valid:
             raise Exception(f"读取数据范围验证失败: {error_msg}")
 
-        url = f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/values/{range_str}"
+        token = encode_path_segment(spreadsheet_token)
+        encoded_range = encode_a1_range(range_str)
+        url = f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{token}/values/{encoded_range}"
         headers = self.auth.get_auth_headers()
         params = {}
         if self.value_render_option:
@@ -557,7 +563,8 @@ class SheetAPI:
         Returns:
             元组 (是否成功, 错误码)
         """
-        url = f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/values"
+        token = encode_path_segment(spreadsheet_token)
+        url = f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{token}/values"
         headers = self.auth.get_auth_headers()
 
         data = {"valueRange": {"range": range_str, "values": values}}
@@ -647,7 +654,8 @@ class SheetAPI:
         Returns:
             元组 (是否成功, 错误码)
         """
-        url = f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/values_append"
+        token = encode_path_segment(spreadsheet_token)
+        url = f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{token}/values_append"
         headers = self.auth.get_auth_headers()
 
         data = {"valueRange": {"range": range_str, "values": values}}
@@ -1063,7 +1071,8 @@ class SheetAPI:
         """
         设置单个批次的下拉列表
         """
-        url = f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/dataValidation"
+        token = encode_path_segment(spreadsheet_token)
+        url = f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{token}/dataValidation"
         headers = self.auth.get_auth_headers()
 
         # 构建请求数据
@@ -1172,7 +1181,7 @@ class SheetAPI:
             # 这是一个轻量级的测试，不会实际获取大量数据
             test_response = self.api_client.call_api(
                 "GET",
-                f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/values/{range_str}",
+                f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{encode_path_segment(spreadsheet_token)}/values/{encode_a1_range(range_str)}",
                 headers=self.auth.get_auth_headers(),
             )
 
@@ -1417,7 +1426,8 @@ class SheetAPI:
         """
         设置单个批次的样式
         """
-        url = f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/styles_batch_update"
+        token = encode_path_segment(spreadsheet_token)
+        url = f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{token}/styles_batch_update"
         headers = self.auth.get_auth_headers()
 
         # 构建请求数据
@@ -1697,7 +1707,8 @@ class SheetAPI:
         Returns:
             元组 (是否成功, 错误码)
         """
-        url = f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/values_batch_update"
+        token = encode_path_segment(spreadsheet_token)
+        url = f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{token}/values_batch_update"
         headers = self.auth.get_auth_headers()
 
         data = {"valueRanges": value_ranges}
