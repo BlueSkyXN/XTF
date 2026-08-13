@@ -91,7 +91,7 @@ from typing import Optional, Dict, Any, List, Union, Tuple
 
 from .config import SyncConfig, SyncMode, TargetType
 from .converter import DataConverter
-from api import FeishuAuth, RetryableAPIClient, BitableAPI, SheetAPI, RateLimiter
+from api import BitableAPI, PartialBatchError, SheetAPI, XTFFeishuClient, run_batches
 
 
 class XTFSyncEngine:
@@ -113,21 +113,22 @@ class XTFSyncEngine:
         # 初始化全局请求控制器（如果配置了高级重试和频控策略）
         self._init_global_controller()
 
-        # 初始化API组件
-        self.auth = FeishuAuth(config.app_id, config.app_secret)
-        self.api_client = RetryableAPIClient(
+        # 通过兼容式 SDK client 装配认证和目标 API；原 API 类保持不变。
+        self.sdk = XTFFeishuClient(
+            config.app_id,
+            config.app_secret,
             max_retries=config.max_retries,
-            rate_limiter=RateLimiter(config.rate_limit_delay),
+            rate_limit_delay=config.rate_limit_delay,
         )
+        self.api_client = self.sdk.api_client
+        self.auth = self.sdk.auth
 
         # 根据目标类型选择API客户端
         self.api: Union[BitableAPI, SheetAPI]
         if config.target_type == TargetType.BITABLE:
-            self.api = BitableAPI(self.auth, self.api_client)
+            self.api = self.sdk.bitable()
         else:  # SHEET
-            self.api = SheetAPI(
-                self.auth,
-                self.api_client,
+            self.api = self.sdk.sheet(
                 start_row=self.config.start_row,
                 start_column=self.config.start_column,
                 scan_max_rows=self.config.sheet_scan_max_rows,
@@ -142,6 +143,7 @@ class XTFSyncEngine:
         # 缓存工作表网格属性，避免重复请求
         self._sheet_grid_cache: Optional[Tuple[int, int]] = None
         self._sheet_grid_cache_key: Optional[Tuple[str, str]] = None
+        self._sheet_read_complete = True
 
     def _init_global_controller(self):
         """初始化全局请求控制器"""
@@ -370,44 +372,28 @@ class XTFSyncEngine:
             )
             effective_batch_size = max_batch_size
 
-        total_batches = (len(items) + effective_batch_size - 1) // effective_batch_size
-        success_count = 0
-
         # 获取操作类型用于日志显示
         operation_type = self._get_operation_type(processor_func)
+        total_batches = (len(items) + effective_batch_size - 1) // effective_batch_size
 
-        for i in range(0, len(items), effective_batch_size):
-            batch = items[i : i + effective_batch_size]
-            batch_num = i // effective_batch_size + 1
-            start_row = i + 1  # Excel行号从1开始
-            end_row = min(i + len(batch), len(items))
+        def process(batch):
+            return processor_func(*args, batch, **kwargs)
 
-            try:
-                # 修复参数传递顺序：先传递固定参数，再传递批次数据
-                if processor_func(*args, batch, **kwargs):
-                    success_count += 1
-                    # 显示具体的行范围信息
-                    range_info = (
-                        f"第{start_row}-{end_row}行"
-                        if start_row != end_row
-                        else f"第{start_row}行"
-                    )
-                    self.logger.info(
-                        f"✅ {operation_type}成功: 批次{batch_num}/{total_batches}, {len(batch)}条记录 ({range_info})"
-                    )
-                else:
-                    self.logger.error(
-                        f"❌ {operation_type}失败: 批次{batch_num}/{total_batches}"
-                    )
-            except Exception as e:
-                self.logger.error(
-                    f"❌ {operation_type}异常: 批次{batch_num}/{total_batches}, 错误: {e}"
-                )
+        try:
+            results = run_batches(
+                operation_type,
+                items,
+                effective_batch_size,
+                process,
+            )
+        except PartialBatchError as error:
+            self.logger.error(f"❌ {error}")
+            return False
 
         self.logger.info(
-            f"🎉 {operation_type}完成: {success_count}/{total_batches} 个批次成功"
+            f"🎉 {operation_type}完成: {len(results)}/{total_batches} 个批次成功"
         )
-        return success_count == total_batches
+        return True
 
     def _get_operation_type(self, processor_func) -> str:
         """根据处理函数获取操作类型"""
@@ -471,6 +457,7 @@ class XTFSyncEngine:
 
     def get_current_sheet_data(self) -> pd.DataFrame:
         """获取当前电子表格数据"""
+        self._sheet_read_complete = True
         if self.config.target_type != TargetType.SHEET:
             return pd.DataFrame()
 
@@ -500,25 +487,40 @@ class XTFSyncEngine:
                 f"{self.config.start_column}{self.config.start_row}:{end_col}{end_row}"
             )
         else:
-            # 兜底：使用历史默认范围（注意：可能较大）
-            end_row = 500000
-            end_col = "ZZ"
+            # 元数据不可用时使用配置化读取窗口，避免硬编码超大范围。
+            if not isinstance(self.api, SheetAPI):
+                self._sheet_read_complete = False
+                return pd.DataFrame()
+            self._sheet_read_complete = False
+            end_row = self.config.start_row + self.config.sheet_scan_max_rows - 1
+            start_col_num = self.api.column_letter_to_number(self.config.start_column)
+            end_col = self.api.column_number_to_letter(
+                start_col_num + self.config.sheet_scan_max_cols - 1
+            )
             read_range = f"{self.config.sheet_id}!{start_cell}:{end_col}{end_row}"
-            self.logger.warning("无法获取工作表网格属性，退回默认读取范围，可能较大")
+            self.logger.warning(
+                "无法获取工作表网格属性，使用配置化读取窗口: "
+                f"{self.config.sheet_scan_max_rows} 行 × "
+                f"{self.config.sheet_scan_max_cols} 列"
+            )
 
         self.logger.info(f"尝试从范围读取数据: {read_range}")
 
         try:
             if not isinstance(self.api, SheetAPI):
+                self._sheet_read_complete = False
                 return pd.DataFrame()
             if not self.config.spreadsheet_token:
                 self.logger.error("电子表格的 spreadsheet_token 未配置")
+                self._sheet_read_complete = False
                 return pd.DataFrame()
             if not self.config.sheet_id:
                 self.logger.error("电子表格的 sheet_id 未配置")
+                self._sheet_read_complete = False
                 return pd.DataFrame()
 
             if not (end_row and end_col):
+                self._sheet_read_complete = False
                 return pd.DataFrame()
 
             values = self.api.get_sheet_data_chunked(
@@ -550,9 +552,19 @@ class XTFSyncEngine:
             return pd.DataFrame()
 
         except Exception as e:
+            self._sheet_read_complete = False
             self.logger.warning(f"尝试从范围 {read_range} 读取数据失败: {e}")
-            self.logger.warning("无法获取电子表格数据，将使用覆盖模式")
+            self.logger.warning("无法完整获取电子表格数据；依赖远端现状的同步将停止")
             return pd.DataFrame()
+
+    def _require_complete_sheet_read(self, operation: str) -> bool:
+        """阻止基于截断或失败读取继续做行匹配和远端写入。"""
+        if getattr(self, "_sheet_read_complete", True):
+            return True
+        self.logger.error(
+            f"{operation}需要完整读取远端电子表格；当前读取窗口不完整或读取失败，已停止写入"
+        )
+        return False
 
     def get_sheet_data_with_validation(
         self,
@@ -596,14 +608,16 @@ class XTFSyncEngine:
 
         # 第一次读取：公式模式
         self.logger.info("  📖 读取公式数据...")
+        original_value_option = self.config.sheet_value_render_option
+        original_datetime_option = self.config.sheet_datetime_render_option
+        original_api_value_option = self.api.value_render_option
+        original_api_datetime_option = self.api.datetime_render_option
         try:
-            # 临时设置读取选项为 Formula
-            original_value_option = self.config.sheet_value_render_option
-            original_datetime_option = self.config.sheet_datetime_render_option
-
             # 强制使用 Formula 模式读取
             self.config.sheet_value_render_option = "Formula"
             self.config.sheet_datetime_render_option = None
+            self.api.value_render_option = "Formula"
+            self.api.datetime_render_option = None
 
             formula_values = self.api.get_sheet_data_chunked(
                 self.config.spreadsheet_token,
@@ -615,22 +629,27 @@ class XTFSyncEngine:
             )
             formula_df = self.converter.values_to_df(formula_values)
 
-            # 恢复原有配置
-            self.config.sheet_value_render_option = original_value_option
-            self.config.sheet_datetime_render_option = original_datetime_option
-
         except Exception as e:
             self.logger.warning(f"读取公式数据失败: {e}")
             return self.get_current_sheet_data(), None, None
+        finally:
+            self.config.sheet_value_render_option = original_value_option
+            self.config.sheet_datetime_render_option = original_datetime_option
+            self.api.value_render_option = original_api_value_option
+            self.api.datetime_render_option = original_api_datetime_option
 
         # 第二次读取：结果模式
         self.logger.info("  📊 读取计算结果数据...")
         try:
             # 使用配置的读取选项（或 FormattedValue 作为默认）
-            if not self.config.sheet_value_render_option:
-                self.config.sheet_value_render_option = "FormattedValue"
-            if not self.config.sheet_datetime_render_option:
-                self.config.sheet_datetime_render_option = "FormattedString"
+            self.config.sheet_value_render_option = (
+                original_value_option or "FormattedValue"
+            )
+            self.config.sheet_datetime_render_option = (
+                original_datetime_option or "FormattedString"
+            )
+            self.api.value_render_option = self.config.sheet_value_render_option
+            self.api.datetime_render_option = self.config.sheet_datetime_render_option
 
             result_values = self.api.get_sheet_data_chunked(
                 self.config.spreadsheet_token,
@@ -645,6 +664,11 @@ class XTFSyncEngine:
         except Exception as e:
             self.logger.warning(f"读取结果数据失败: {e}")
             return self.get_current_sheet_data(), None, None
+        finally:
+            self.config.sheet_value_render_option = original_value_option
+            self.config.sheet_datetime_render_option = original_datetime_option
+            self.api.value_render_option = original_api_value_option
+            self.api.datetime_render_option = original_api_datetime_option
 
         # 识别公式列
         if formula_df.empty:
@@ -1020,6 +1044,9 @@ class XTFSyncEngine:
                 self.config.app_token,
                 self.config.table_id,
             )
+            if not update_success:
+                self.logger.error("批量更新未完整成功，停止后续新增")
+                return False
 
         # 执行新增
         create_success = True
@@ -1042,22 +1069,28 @@ class XTFSyncEngine:
     def _sync_full_sheet(self, df: pd.DataFrame) -> bool:
         """电子表格全量同步"""
         if not self.config.index_column:
+            if self.config.sheet_protect_formulas:
+                self.logger.error("启用公式保护时全量同步需要索引列，已停止写入")
+                return False
             self.logger.warning("未指定索引列，将执行完全覆盖操作")
             return self.sync_clone(df)
 
         # 获取现有数据（支持双读和差异检测）
         current_df, formula_df, formula_columns = self.get_sheet_data_with_validation()
 
+        if not self._require_complete_sheet_read("全量同步"):
+            return False
+
+        if self.config.sheet_protect_formulas and formula_columns is None:
+            self.logger.error("无法确认远端公式列，公式保护已停止全量写入")
+            return False
+
         if current_df.empty:
+            if self.config.sheet_protect_formulas:
+                self.logger.error("启用公式保护时无法确认远端公式状态，已停止克隆写入")
+                return False
             self.logger.info("电子表格为空，执行新增操作")
             return self.sync_clone(df)
-
-        # ⭐ 关键修改：检查是否启用选择性同步，使用精确列级控制
-        if self.config.selective_sync.enabled and self.config.selective_sync.columns:
-            self.logger.info(
-                f"🎯 启用精确列级控制同步: {self.config.selective_sync.columns}"
-            )
-            return self._sync_selective_columns_sheet(df, current_df)
 
         # 差异检测与报告
         if self.config.sheet_validate_results and formula_columns is not None:
@@ -1066,9 +1099,31 @@ class XTFSyncEngine:
             )
             self.print_column_diff_report(diff_stats)
 
+        # 选择性同步仍需经过差异检测和公式保护。
+        if self.config.selective_sync.enabled and self.config.selective_sync.columns:
+            selective_columns = self._get_effective_selective_columns(df)
+            if self.config.sheet_protect_formulas and formula_columns:
+                if self.config.index_column in formula_columns:
+                    self.logger.error(
+                        "索引列是公式列，无法在保护公式的同时执行选择性同步"
+                    )
+                    return False
+                selective_columns = [
+                    col for col in selective_columns if col not in formula_columns
+                ]
+            if not selective_columns:
+                self.logger.info("选择性同步列均为受保护公式列，无需同步")
+                return True
+            selective_df = df[selective_columns].copy()
+            self.logger.info(f"🎯 启用精确列控制同步: {selective_columns}")
+            return self._sync_selective_columns_sheet(selective_df, current_df)
+
         # 公式保护：过滤掉公式列
         sync_df = df
         if self.config.sheet_protect_formulas and formula_columns:
+            if self.config.index_column in formula_columns:
+                self.logger.error("索引列是公式列，无法在保护公式时完成行匹配")
+                return False
             # 只同步非公式列
             non_formula_cols = [col for col in df.columns if col not in formula_columns]
             if not non_formula_cols:
@@ -1078,6 +1133,8 @@ class XTFSyncEngine:
             self.logger.info(
                 f"🔒 公式保护已启用，仅同步 {len(non_formula_cols)} 个数据列"
             )
+            # 必须使用精确列写入；整表回写会把 Formula 读取的计算结果覆盖回公式列。
+            return self._sync_selective_columns_sheet(sync_df, current_df)
 
         # 原有的完整表格同步逻辑
         current_index = self.converter.build_data_index(
@@ -1204,22 +1261,11 @@ class XTFSyncEngine:
 
         # 追加新行（如果有）
         if new_rows and success:
-            new_df = pd.DataFrame(new_rows)
-            new_values = self.converter.df_to_values(new_df, include_headers=False)
-
-            if (
-                isinstance(self.api, SheetAPI)
-                and self.config.spreadsheet_token
-                and self.config.sheet_id
-            ):
-                self.logger.info(f"开始追加 {len(new_values)} 行新数据")
-                success = self.api.append_sheet_data(
-                    self.config.spreadsheet_token,
-                    self.config.sheet_id,
-                    new_values,
-                    self.config.batch_size,
-                    self.config.rate_limit_delay,
-                )
+            success = self._append_selective_columns(
+                pd.DataFrame(new_rows),
+                columns=columns,
+                current_df=current_df,
+            )
 
         return success
 
@@ -1422,6 +1468,9 @@ class XTFSyncEngine:
         # 获取现有数据
         current_df = self.get_current_sheet_data()
 
+        if not self._require_complete_sheet_read("增量同步"):
+            return False
+
         if current_df.empty:
             self.logger.info("电子表格为空，新增全部数据")
             # ⭐ 检查选择性同步
@@ -1481,9 +1530,14 @@ class XTFSyncEngine:
             self.logger.info("没有新记录需要同步")
             return True
 
-    def _append_selective_columns(self, df: pd.DataFrame) -> bool:
+    def _append_selective_columns(
+        self,
+        df: pd.DataFrame,
+        columns: Optional[List[str]] = None,
+        current_df: Optional[pd.DataFrame] = None,
+    ) -> bool:
         """选择性列的追加操作"""
-        if (
+        if columns is None and (
             not self.config.selective_sync.enabled
             or not self.config.selective_sync.columns
         ):
@@ -1503,10 +1557,19 @@ class XTFSyncEngine:
                 )
             return False
 
-        # 获取当前表格数据以确定正确的列位置
-        current_df = self.get_current_sheet_data()
+        # 获取当前表格数据以确定正确的列位置。调用方已有完整快照时直接复用，
+        # 避免更新后的重复读取，也避免把公式列降级成普通值。
+        if current_df is None:
+            current_df = self.get_current_sheet_data()
 
-        effective_columns = self._get_effective_selective_columns(df)
+        if current_df is None or not self._require_complete_sheet_read("选择性列追加"):
+            return False
+
+        effective_columns = (
+            [column for column in columns if column in df.columns]
+            if columns is not None
+            else self._get_effective_selective_columns(df)
+        )
         if not effective_columns:
             self.logger.warning("选择性列追加无可用列，已跳过")
             return False
@@ -1638,6 +1701,9 @@ class XTFSyncEngine:
                 self.config.app_token,
                 self.config.table_id,
             )
+            if not delete_success:
+                self.logger.error("覆盖同步删除未完整成功，停止后续新增")
+                return False
 
         # 新增全部记录
         new_records = self.converter.df_to_records(df, field_types)
@@ -1662,6 +1728,9 @@ class XTFSyncEngine:
         # 获取现有数据
         current_df = self.get_current_sheet_data()
 
+        if not self._require_complete_sheet_read("覆盖同步"):
+            return False
+
         if current_df.empty:
             self.logger.info("电子表格为空，执行新增操作")
             return self.sync_clone(df)
@@ -1673,9 +1742,18 @@ class XTFSyncEngine:
             )
             return self._sync_overwrite_selective_columns_sheet(df, current_df)
 
-        # 原有的完整表格覆盖逻辑
+        # 原有的完整表格覆盖逻辑。预先构建新数据索引，避免逐行嵌套扫描。
         new_df_rows = []
         deleted_count = 0
+        new_index_hashes = {
+            index_hash
+            for _, new_row in df.iterrows()
+            if (
+                index_hash := self.converter.get_index_value_hash(
+                    new_row, self.config.index_column
+                )
+            )
+        }
 
         # 保留不在新数据中的现有记录
         for _, row in current_df.iterrows():
@@ -1683,17 +1761,7 @@ class XTFSyncEngine:
                 row, self.config.index_column
             )
             if index_hash:
-                # 检查是否在新数据中
-                found_in_new = False
-                for _, new_row in df.iterrows():
-                    new_index_hash = self.converter.get_index_value_hash(
-                        new_row, self.config.index_column
-                    )
-                    if new_index_hash == index_hash:
-                        found_in_new = True
-                        break
-
-                if not found_in_new:
+                if index_hash not in new_index_hashes:
                     new_df_rows.append(row)
                 else:
                     deleted_count += 1
@@ -1851,6 +1919,9 @@ class XTFSyncEngine:
                 self.config.app_token,
                 self.config.table_id,
             )
+            if not delete_success:
+                self.logger.error("克隆同步删除未完整成功，停止后续新增")
+                return False
 
         # 新增全部记录
         field_types = self.get_field_types()

@@ -100,12 +100,19 @@ API 端点（基础路径：https://open.feishu.cn/open-apis/bitable/v1）：
 更新日期: 2026-01-24
 """
 
-import uuid
 import logging
+import uuid
 from typing import Dict, Any, List, Optional, Tuple, Union
 
 from .auth import FeishuAuth
 from .base import RetryableAPIClient
+from .sdk import (
+    FeishuAPIError,
+    FeishuResponseParser,
+    Page,
+    PaginationError,
+    Paginator,
+)
 
 
 class BitableAPI:
@@ -131,22 +138,7 @@ class BitableAPI:
     }
 
     # 需要重试的飞书业务错误码（瞬态错误，重试可能恢复）
-    RETRYABLE_BIZ_CODES = {
-        1254290,  # TooManyRequest: 请求过快
-        1254607,  # Data not ready: 前置操作未完成或数据过大
-        1254002,  # Fail: 通用失败（并发/超时等）
-        1254001,  # InternalError: 服务器内部错误
-        1254006,  # Timeout: 超时
-    }
-
-    # 明确不重试的飞书业务错误码（永久性错误，重试无意义）
-    NON_RETRYABLE_BIZ_CODES = {
-        1254000,  # InvalidParameter: 参数错误
-        1254003,  # PermissionDenied: 权限不足
-        1254004,  # NotFound: 资源不存在
-        1254005,  # DuplicateRecord: 记录重复
-        1254040,  # FieldNotFound: 字段不存在
-    }
+    RETRYABLE_BIZ_CODES = FeishuResponseParser.RETRYABLE_BIZ_CODES
 
     def __init__(
         self, auth: FeishuAuth, api_client: Optional[RetryableAPIClient] = None
@@ -162,29 +154,22 @@ class BitableAPI:
         self.api_client = api_client or auth.api_client
         self.logger = logging.getLogger("XTF.bitable")
 
-    def _is_retryable_biz_code(self, code: int) -> bool:
-        """判断飞书业务错误码是否可重试"""
-        if code in self.RETRYABLE_BIZ_CODES:
-            return True
-        if code != 0 and code not in self.NON_RETRYABLE_BIZ_CODES:
-            self.logger.warning(
-                f"未知的飞书业务错误码 {code}，不进行重试。如该错误可恢复，请反馈以更新重试列表。"
-            )
-        return False
-
     def _call_api_with_biz_retry(
-        self, method: str, url: str, max_retries: int = 3, **kwargs
+        self, method: str, url: str, max_retries: Optional[int] = None, **kwargs
     ):
         """
         调用API并处理飞书业务错误码重试。
 
         飞书部分限流错误以 HTTP 200 + 业务错误码返回（如 1254290 TooManyRequest），
-        HTTP层面的重试机制无法捕获这类错误，需要在应用层检查并重试。
+        HTTP 层面的重试机制无法捕获这类错误，需要在应用层检查并重试。
+        网络异常和 HTTP 429/5xx 只由共享 transport 负责，这里不会再次重试，
+        避免对非幂等 POST 形成嵌套请求。未显式传入 max_retries 时，复用
+        transport 的重试预算；传入 0 可关闭业务码重试。
 
         Args:
             method: HTTP方法
             url: 请求URL
-            max_retries: 最大重试次数
+            max_retries: 业务码最大重试次数；None 表示使用 transport 的预算
             **kwargs: 传递给 call_api 的参数
 
         Returns:
@@ -192,29 +177,82 @@ class BitableAPI:
         """
         import time as _time
 
-        for attempt in range(max_retries + 1):
-            response = self.api_client.call_api(method, url, **kwargs)
-            try:
-                result = response.json()
-            except ValueError:
-                return response, None
+        # transport 独占网络异常和 HTTP 429/5xx 重试；这里仅处理
+        # HTTP 200 中的明确飞书业务错误码，避免嵌套循环放大请求次数。
+        configured_retries = getattr(self.api_client, "max_retries", 3)
+        if not isinstance(configured_retries, int):
+            configured_retries = 3
+        effective_max_retries = (
+            configured_retries if max_retries is None else max_retries
+        )
+        effective_max_retries = max(0, effective_max_retries)
 
-            code = result.get("code", 0)
-            if code == 0 or not self._is_retryable_biz_code(code):
+        for attempt in range(effective_max_retries + 1):
+            response = self.api_client.call_api(method, url, **kwargs)
+            error: Optional[FeishuAPIError] = None
+            try:
+                result = FeishuResponseParser.parse(response)
                 return response, result
+            except FeishuAPIError as caught_error:
+                error = caught_error
+                is_retryable = (
+                    caught_error.http_status is not None
+                    and caught_error.http_status < 400
+                    and caught_error.code in FeishuResponseParser.RETRYABLE_BIZ_CODES
+                )
+                if not is_retryable or attempt >= effective_max_retries:
+                    raise
 
             # 可重试的业务错误
-            if attempt < max_retries:
-                wait_time = 2**attempt
-                error_msg = result.get("msg", "未知错误")
+            if error is not None and attempt < effective_max_retries:
+                wait_time = (
+                    error.retry_after
+                    if error.retry_after is not None
+                    else float(2**attempt)
+                )
                 self.logger.warning(
-                    f"飞书业务错误码 {code}（{error_msg}），等待 {wait_time}s 后第 {attempt + 1} 次重试..."
+                    f"飞书业务错误码 {error.code}（{error.message}），等待 {wait_time}s 后第 {attempt + 1} 次重试..."
                 )
                 _time.sleep(wait_time)
-            else:
-                return response, result
 
-        return response, result
+        raise RuntimeError("飞书业务错误重试循环异常退出")
+
+    @staticmethod
+    def _parse_page_data(result: Dict[str, Any]) -> Dict[str, Any]:
+        """校验分页 envelope，避免 null/错误类型被误当成完整数据。"""
+        data = result.get("data")
+        if not isinstance(data, dict):
+            raise FeishuAPIError(
+                -1,
+                "分页响应 data 必须是对象",
+                response_data=result,
+                kind="invalid_response",
+            )
+        items = data.get("items", [])
+        if not isinstance(items, list):
+            raise FeishuAPIError(
+                -1,
+                "分页响应 items 必须是列表",
+                response_data=result,
+                kind="invalid_response",
+            )
+        has_more = data.get("has_more", False)
+        if not isinstance(has_more, bool):
+            raise FeishuAPIError(
+                -1,
+                "分页响应 has_more 必须是布尔值",
+                response_data=result,
+                kind="invalid_response",
+            )
+        page_token = data.get("page_token")
+        if page_token is not None and not isinstance(page_token, str):
+            raise FeishuAPIError(
+                -1,
+                "分页响应 page_token 必须是字符串或 null",
+                response_data=result,
+                kind="invalid_response",
+            )
+        return data
 
     def list_fields(self, app_token: str, table_id: str) -> List[Dict[str, Any]]:
         """
@@ -233,37 +271,24 @@ class BitableAPI:
         url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/fields"
         headers = self.auth.get_auth_headers()
 
-        all_fields = []
-        page_token = None
-
-        while True:
-            params = {"page_size": 100}
+        def fetch_page(page_token: Optional[str]) -> Page[Dict[str, Any]]:
+            params: Dict[str, Union[int, str]] = {"page_size": 100}
             if page_token:
                 params["page_token"] = page_token
 
-            response, result = self._call_api_with_biz_retry(
+            _, result = self._call_api_with_biz_retry(
                 "GET", url, headers=headers, params=params
             )
 
-            if result is None:
-                raise Exception(
-                    f"获取字段列表响应解析失败, HTTP状态码: {response.status_code}"
-                )
+            data = self._parse_page_data(result)
+            return Page(
+                items=data.get("items", []),
+                next_page_token=data.get("page_token"),
+                has_more=bool(data.get("has_more")),
+                raw=data,
+            )
 
-            if result.get("code") != 0:
-                error_msg = result.get("msg", "未知错误")
-                raise Exception(
-                    f"获取字段列表失败: 错误码 {result.get('code')}, 错误信息: {error_msg}"
-                )
-
-            data = result.get("data", {})
-            all_fields.extend(data.get("items", []))
-
-            if not data.get("has_more"):
-                break
-            page_token = data.get("page_token")
-
-        return all_fields
+        return Paginator[Dict[str, Any]]().collect(fetch_page)
 
     def create_field(
         self, app_token: str, table_id: str, field_name: str, field_type: int = 1
@@ -284,21 +309,10 @@ class BitableAPI:
         headers = self.auth.get_auth_headers()
         data = {"field_name": field_name, "type": field_type}
 
-        response, result = self._call_api_with_biz_retry(
-            "POST", url, headers=headers, json=data
-        )
-
-        if result is None:
-            self.logger.error(
-                f"创建字段 '{field_name}' 响应解析失败, HTTP状态码: {response.status_code}"
-            )
-            return False
-
-        if result.get("code") != 0:
-            error_msg = result.get("msg", "未知错误")
-            self.logger.error(
-                f"创建字段 '{field_name}' 失败: 错误码 {result.get('code')}, 错误信息: {error_msg}"
-            )
+        try:
+            self._call_api_with_biz_retry("POST", url, headers=headers, json=data)
+        except FeishuAPIError as error:
+            self._log_boolean_operation_error(f"创建字段 '{field_name}'", error)
             return False
 
         # 获取字段类型信息用于日志显示
@@ -333,6 +347,26 @@ class BitableAPI:
         Raises:
             Exception: 当API调用失败时
         """
+        page = self._search_records_page(
+            app_token,
+            table_id,
+            page_token=page_token,
+            page_size=page_size,
+            field_names=field_names,
+        )
+        if page.has_more and not page.next_page_token:
+            raise PaginationError("has_more=true 但响应未提供 page_token")
+        return page.items, page.next_page_token if page.has_more else None
+
+    def _search_records_page(
+        self,
+        app_token: str,
+        table_id: str,
+        page_token: Optional[str] = None,
+        page_size: int = 100,
+        field_names: Optional[List[str]] = None,
+    ) -> Page[Dict[str, Any]]:
+        """读取单页并保留服务端 has_more，供完整分页校验使用。"""
         url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/search"
         headers = self.auth.get_auth_headers()
 
@@ -358,26 +392,18 @@ class BitableAPI:
         if field_names is not None:
             data["field_names"] = field_names
 
-        response, result = self._call_api_with_biz_retry(
+        _, result = self._call_api_with_biz_retry(
             "POST", url, headers=headers, params=params, json=data
         )
 
-        if result is None:
-            raise Exception(f"搜索记录响应解析失败, HTTP状态码: {response.status_code}")
-
-        if result.get("code") != 0:
-            error_msg = result.get("msg", "未知错误")
-            raise Exception(
-                f"搜索记录失败: 错误码 {result.get('code')}, 错误信息: {error_msg}"
-            )
-
-        result_data = result.get("data", {})
+        result_data = self._parse_page_data(result)
         records = result_data.get("items", [])
-        next_page_token = (
-            result_data.get("page_token") if result_data.get("has_more") else None
+        return Page(
+            items=records,
+            next_page_token=result_data.get("page_token"),
+            has_more=bool(result_data.get("has_more")),
+            raw=result_data,
         )
-
-        return records, next_page_token
 
     def get_all_records(
         self, app_token: str, table_id: str, field_names: Optional[List[str]] = None
@@ -393,10 +419,7 @@ class BitableAPI:
         Returns:
             所有记录的列表
         """
-        all_records = []
-        page_token = None
         page_num = 0
-        seen_page_tokens = set()
 
         if field_names is None:
             field_hint = "（全部字段）"
@@ -406,30 +429,19 @@ class BitableAPI:
             field_hint = f"（指定字段: {field_names}）"
         self.logger.info(f"开始拉取全部记录...{field_hint}")
 
-        while True:
-            records, next_page_token = self.search_records(
-                app_token, table_id, page_token, field_names=field_names
+        def fetch_page(page_token: Optional[str]) -> Page[Dict[str, Any]]:
+            nonlocal page_num
+            page = self._search_records_page(
+                app_token,
+                table_id,
+                page_token=page_token,
+                field_names=field_names,
             )
-            all_records.extend(records)
             page_num += 1
+            return page
 
-            if page_num == 1 or page_num % 5 == 0 or not next_page_token:
-                self.logger.info(
-                    f"已拉取 {len(all_records)} 条记录（第 {page_num} 页）"
-                )
-
-            if next_page_token:
-                if next_page_token in seen_page_tokens:
-                    raise Exception(
-                        "检测到重复 page_token，可能导致死循环，请检查接口响应"
-                    )
-                seen_page_tokens.add(next_page_token)
-
-            page_token = next_page_token
-
-            if not page_token:
-                break
-
+        all_records = Paginator[Dict[str, Any]]().collect(fetch_page)
+        self.logger.info(f"已拉取 {len(all_records)} 条记录（共 {page_num} 页）")
         return all_records
 
     def batch_create_records(
@@ -455,7 +467,8 @@ class BitableAPI:
         url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/batch_create"
         headers = self.auth.get_auth_headers()
 
-        # 生成唯一的client_token，并添加性能优化参数
+        # 每次逻辑调用生成一个全局唯一 token；业务错误重试复用同一 params，
+        # 避免进程内外 token 碰撞或一次重试重复创建。
         client_token = str(uuid.uuid4())
         params = {
             "client_token": client_token,
@@ -465,24 +478,12 @@ class BitableAPI:
 
         data = {"records": records}
 
-        response, result = self._call_api_with_biz_retry(
-            "POST", url, headers=headers, params=params, json=data
-        )
-
-        if result is None:
-            self.logger.error(
-                f"批量创建记录响应解析失败, HTTP状态码: {response.status_code}"
+        try:
+            self._call_api_with_biz_retry(
+                "POST", url, headers=headers, params=params, json=data
             )
-            self.logger.debug(f"响应内容: {response.text[:500]}")
-            return False
-
-        if result.get("code") != 0:
-            error_msg = result.get("msg", "未知错误")
-            self.logger.error(
-                f"批量创建记录失败: 错误码 {result.get('code')}, 错误信息: {error_msg}"
-            )
-            self.logger.debug(f"创建失败的记录数量: {len(records)}")
-            self.logger.debug(f"API响应: {result}")
+        except FeishuAPIError as error:
+            self._log_boolean_operation_error("批量创建记录", error)
             return False
 
         # 简化日志，详细信息由process_in_batches显示
@@ -520,24 +521,12 @@ class BitableAPI:
 
         data = {"records": records}
 
-        response, result = self._call_api_with_biz_retry(
-            "POST", url, headers=headers, params=params, json=data
-        )
-
-        if result is None:
-            self.logger.error(
-                f"批量更新记录响应解析失败, HTTP状态码: {response.status_code}"
+        try:
+            self._call_api_with_biz_retry(
+                "POST", url, headers=headers, params=params, json=data
             )
-            self.logger.debug(f"响应内容: {response.text[:500]}")
-            return False
-
-        if result.get("code") != 0:
-            error_msg = result.get("msg", "未知错误")
-            self.logger.error(
-                f"批量更新记录失败: 错误码 {result.get('code')}, 错误信息: {error_msg}"
-            )
-            self.logger.debug(f"更新失败的记录数量: {len(records)}")
-            self.logger.debug(f"API响应: {result}")
+        except FeishuAPIError as error:
+            self._log_boolean_operation_error("批量更新记录", error)
             return False
 
         # 简化日志，详细信息由process_in_batches显示
@@ -568,29 +557,24 @@ class BitableAPI:
         headers = self.auth.get_auth_headers()
         data = {"records": record_ids}
 
-        response, result = self._call_api_with_biz_retry(
-            "POST", url, headers=headers, json=data
-        )
-
-        if result is None:
-            self.logger.error(
-                f"批量删除记录响应解析失败, HTTP状态码: {response.status_code}"
-            )
-            self.logger.debug(f"响应内容: {response.text[:500]}")
-            return False
-
-        if result.get("code") != 0:
-            error_msg = result.get("msg", "未知错误")
-            self.logger.error(
-                f"批量删除记录失败: 错误码 {result.get('code')}, 错误信息: {error_msg}"
-            )
-            self.logger.debug(f"删除失败的记录数量: {len(record_ids)}")
-            self.logger.debug(f"API响应: {result}")
+        try:
+            self._call_api_with_biz_retry("POST", url, headers=headers, json=data)
+        except FeishuAPIError as error:
+            self._log_boolean_operation_error("批量删除记录", error)
             return False
 
         # 简化日志，详细信息由process_in_batches显示
         self.logger.debug(f"成功删除 {len(record_ids)} 条记录")
         return True
+
+    def _log_boolean_operation_error(
+        self, operation: str, error: FeishuAPIError
+    ) -> None:
+        """在 bool 公共方法边界保留旧的失败返回契约。"""
+        details = f"错误码 {error.code}, 错误信息: {error.message}"
+        if error.log_id:
+            details += f", log_id: {error.log_id}"
+        self.logger.error(f"{operation}失败: {details}")
 
     def _get_field_type_display_name(self, field_type: int) -> str:
         """获取字段类型的显示名称"""

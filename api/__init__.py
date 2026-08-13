@@ -12,6 +12,7 @@
     ├── __init__.py     - 包初始化，导出公共接口
     ├── auth.py         - 飞书认证管理（FeishuAuth）
     ├── base.py         - 基础网络层（RateLimiter, RetryableAPIClient）
+    ├── sdk.py          - 响应、错误、分页与批处理契约
     ├── bitable.py      - 多维表格 API（BitableAPI）
     └── sheet.py        - 电子表格 API（SheetAPI）
 
@@ -23,6 +24,12 @@
         - RateLimiter: 接口频率限制器
         - RetryableAPIClient: 可重试的 API 客户端
 
+    SDK 契约：
+        - XTFFeishuClient: 统一装配共享认证和 transport 的目标客户端
+        - FeishuAPIError: 带 HTTP/业务码、log_id 和重试元数据的错误
+        - Paginator: 带游标完整性保护的分页器
+        - run_batches: 首错停止并报告已应用前缀的批处理器
+
     业务 API：
         - BitableAPI: 多维表格 API 客户端
         - SheetAPI: 电子表格 API 客户端
@@ -33,18 +40,13 @@ API 调用流程：
     3. BitableAPI/SheetAPI 封装具体业务操作
 
 使用示例：
-    >>> from api import FeishuAuth, BitableAPI, RateLimiter, RetryableAPIClient
+    >>> from api import XTFFeishuClient
     >>>
-    >>> # 初始化认证
-    >>> auth = FeishuAuth(app_id, app_secret)
-    >>>
-    >>> # 初始化 API 客户端
-    >>> rate_limiter = RateLimiter(delay=0.5)
-    >>> api_client = RetryableAPIClient(max_retries=3, rate_limiter=rate_limiter)
-    >>>
-    >>> # 初始化多维表格 API
-    >>> bitable_api = BitableAPI(auth, api_client)
+    >>> client = XTFFeishuClient(app_id, app_secret)
+    >>> bitable_api = client.bitable()
     >>> records = bitable_api.get_all_records(app_token, table_id)
+
+    既有 FeishuAuth + BitableAPI/SheetAPI 直接构造方式继续兼容。
 
 设计原则：
     - 关注点分离：认证、网络、业务逻辑分层
@@ -59,5 +61,29 @@ from .auth import FeishuAuth
 from .base import RateLimiter, RetryableAPIClient
 from .bitable import BitableAPI
 from .sheet import SheetAPI
+from .sdk import (
+    FeishuAPIError,
+    FeishuResponseParser,
+    Page,
+    PaginationError,
+    Paginator,
+    PartialBatchError,
+    XTFFeishuClient,
+    run_batches,
+)
 
-__all__ = ["FeishuAuth", "RateLimiter", "RetryableAPIClient", "BitableAPI", "SheetAPI"]
+__all__ = [
+    "FeishuAuth",
+    "RateLimiter",
+    "RetryableAPIClient",
+    "BitableAPI",
+    "SheetAPI",
+    "FeishuAPIError",
+    "FeishuResponseParser",
+    "Page",
+    "PaginationError",
+    "Paginator",
+    "PartialBatchError",
+    "XTFFeishuClient",
+    "run_batches",
+]

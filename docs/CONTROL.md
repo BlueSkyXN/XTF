@@ -353,6 +353,8 @@ INFO  - 批量操作完成: 500/500 条记录, 重试 2 次
 | `1254002` | Fail（通用失败，常见于并发/超时） | ✅ 自动重试 |
 | `1254001` | InternalError（服务器内部错误） | ✅ 自动重试 |
 | `1254006` | Timeout（超时） | ✅ 自动重试 |
+| `1254291` | WriteConflict（同表写冲突） | ✅ 串行等待后重试 |
+| `99991400` | 通用请求频率限制 | ✅ 自动重试 |
 | `1254000` | InvalidParameter（参数错误） | ❌ 不重试 |
 | `1254003` | PermissionDenied（权限不足） | ❌ 不重试 |
 | `1254004` | NotFound（资源不存在） | ❌ 不重试 |
@@ -361,21 +363,24 @@ INFO  - 批量操作完成: 500/500 条记录, 重试 2 次
 
 > 注意：上述错误码以 HTTP 200 返回，HTTP 层面的重试无法捕获。
 > 程序在 `BitableAPI._call_api_with_biz_retry()` 中实现应用层重试。
-> 遇到未知错误码时，程序不会重试但会打印 WARNING 日志，便于后续维护。
+> 未列入可重试集合的业务错误会立即抛出 `FeishuAPIError`，由查询调用方处理；
+> Bitable 的既有布尔写接口会记录错误并继续返回 `False`，不会盲目重试。
 
-**两层重试架构**：
+**按错误类型分工的两层重试架构**：
 
 ```
 请求流程：
   频控策略（控制发送速率）
     → HTTP 请求
-      → 第一层：HTTP 重试（429/5xx/网络异常）    [api/base.py]
-        → 第二层：业务重试（飞书业务错误码）       [api/bitable.py]
+      → transport：网络异常、HTTP 429/5xx          [api/base.py]
+        → Bitable：仅 HTTP 200 的可恢复业务错误码   [api/bitable.py]
 ```
 
 - **标准模式**：固定间隔 + HTTP 重试 + 业务重试
 - **高级模式**：高级频控策略 + 高级重试策略 + 业务重试
-- 业务重试始终在最内层工作，与标准/高级模式无关
+- 同一个 HTTP 失败只由 transport 重试，不会在 Bitable 层再次形成嵌套循环
+- standard/advanced transport 耗尽后都保留最终 response，或抛 typed transport error
+- 禁用高级控制会清除进程级 controller，避免后续普通 client 继承旧配置
 
 > 详细分析：`local/retry-mechanism-analysis.md`
 

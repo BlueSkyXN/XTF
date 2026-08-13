@@ -477,6 +477,11 @@ class GlobalRequestController:
         with GlobalRequestController._lock:
             self._controller = controller
 
+    def clear(self):
+        """清除进程级 controller，防止普通 client 继承旧配置。"""
+        with GlobalRequestController._lock:
+            self._controller = None
+
     def get_controller(self) -> Optional[RequestController]:
         """获取全局控制器实例"""
         with GlobalRequestController._lock:

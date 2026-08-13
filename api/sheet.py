@@ -103,15 +103,7 @@ from typing import Dict, Any, List, Optional, Tuple, Union
 
 from .auth import FeishuAuth
 from .base import RetryableAPIClient
-
-
-class FeishuAPIError(Exception):
-    """飞书API错误（包含错误码）"""
-
-    def __init__(self, code: int, msg: str):
-        self.code = code
-        self.msg = msg
-        super().__init__(f"Feishu API error {code}: {msg}")
+from .sdk import FeishuAPIError, FeishuResponseParser
 
 
 class SheetAPI:
@@ -164,6 +156,31 @@ class SheetAPI:
         self.value_render_option = value_render_option
         self.datetime_render_option = datetime_render_option
 
+    def _parse_boolean_response(
+        self, response, operation: str
+    ) -> Tuple[Optional[Dict[str, Any]], Optional[int]]:
+        """统一解析 bool 写接口，同时保留原有 False/错误码契约。"""
+        try:
+            return FeishuResponseParser.parse(response), 0
+        except FeishuAPIError as error:
+            details = f"错误码 {error.code}, 错误信息: {error.message}"
+            if error.log_id:
+                details += f", log_id: {error.log_id}"
+            self.logger.error(f"{operation}失败: {details}")
+            # 历史 tuple 契约以 None 表示响应无法解析；HTTP 状态不是飞书业务错误码。
+            error_code = None if error.kind == "invalid_response" else error.code
+            return None, error_code
+
+    def _call_boolean_api(self, method: str, url: str, operation: str, **kwargs):
+        """调用 bool 写接口，并把 transport failure 收敛到旧的失败 tuple。"""
+        try:
+            response = self.api_client.call_api(method, url, **kwargs)
+        except FeishuAPIError as error:
+            details = f"错误码 {error.code}, 错误信息: {error.message}"
+            self.logger.error(f"{operation}失败: {details}")
+            return None, None
+        return self._parse_boolean_response(response, operation)
+
     def get_sheet_info(self, spreadsheet_token: str) -> Dict[str, Any]:
         """
         获取电子表格信息
@@ -188,18 +205,7 @@ class SheetAPI:
 
         response = self.api_client.call_api("GET", url, headers=headers, params=params)
 
-        try:
-            result = response.json()
-        except ValueError as e:
-            raise Exception(
-                f"获取电子表格信息响应解析失败: {e}, HTTP状态码: {response.status_code}"
-            )
-
-        if result.get("code") != 0:
-            error_msg = result.get("msg", "未知错误")
-            raise Exception(
-                f"获取电子表格信息失败: 错误码 {result.get('code')}, 错误信息: {error_msg}"
-            )
+        result = FeishuResponseParser.parse(response)
 
         return result.get("data", {})
 
@@ -219,18 +225,7 @@ class SheetAPI:
 
         response = self.api_client.call_api("GET", url, headers=headers)
 
-        try:
-            result = response.json()
-        except ValueError as e:
-            raise Exception(
-                f"获取工作表信息响应解析失败: {e}, HTTP状态码: {response.status_code}"
-            )
-
-        if result.get("code") != 0:
-            error_msg = result.get("msg", "未知错误")
-            raise Exception(
-                f"获取工作表信息失败: 错误码 {result.get('code')}, 错误信息: {error_msg}"
-            )
+        result = FeishuResponseParser.parse(response)
 
         return result.get("data", {}).get("sheet", {})
 
@@ -273,26 +268,23 @@ class SheetAPI:
         Raises:
             Exception: 当API调用失败时
         """
-        # 验证范围有效性
-        is_valid, error_msg = self._validate_range(spreadsheet_token, range_str)
+        # 实际读取会由服务端校验网格范围；这里只做纯本地 A1 校验，
+        # 避免每个读取块先探测再读取，产生双倍 GET。
+        is_valid, error_msg = self._validate_range_format(range_str)
         if not is_valid:
             raise Exception(f"读取数据范围验证失败: {error_msg}")
 
         url = f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/values/{range_str}"
         headers = self.auth.get_auth_headers()
+        params = {}
+        if self.value_render_option:
+            params["valueRenderOption"] = self.value_render_option
+        if self.datetime_render_option:
+            params["dateTimeRenderOption"] = self.datetime_render_option
 
-        response = self.api_client.call_api("GET", url, headers=headers)
+        response = self.api_client.call_api("GET", url, headers=headers, params=params)
 
-        try:
-            result = response.json()
-        except ValueError as e:
-            raise Exception(
-                f"读取电子表格数据响应解析失败: {e}, HTTP状态码: {response.status_code}"
-            )
-
-        if result.get("code") != 0:
-            error_msg = result.get("msg", "未知错误")
-            raise FeishuAPIError(int(result.get("code")), error_msg)
+        result = FeishuResponseParser.parse(response)
 
         data = result.get("data", {})
         value_range = data.get("valueRange", {})
@@ -570,25 +562,11 @@ class SheetAPI:
 
         data = {"valueRange": {"range": range_str, "values": values}}
 
-        response = self.api_client.call_api("PUT", url, headers=headers, json=data)
-
-        try:
-            result = response.json()
-        except ValueError as e:
-            self.logger.error(
-                f"写入电子表格数据响应解析失败: {e}, HTTP状态码: {response.status_code}"
-            )
-            self.logger.debug(f"响应内容: {response.text[:500]}")
-            return False, None
-
-        code = result.get("code")
-        if code != 0:
-            error_msg = result.get("msg", "未知错误")
-            self.logger.error(
-                f"写入电子表格数据失败: 错误码 {code}, 错误信息: {error_msg}"
-            )
-            self.logger.debug(f"API响应: {result}")
-            return False, code
+        result, error_code = self._call_boolean_api(
+            "PUT", url, "写入电子表格数据", headers=headers, json=data
+        )
+        if result is None:
+            return False, error_code
 
         self.logger.debug(f"成功写入 {len(values)} 行数据")
         return True, 0
@@ -674,25 +652,11 @@ class SheetAPI:
 
         data = {"valueRange": {"range": range_str, "values": values}}
 
-        response = self.api_client.call_api("POST", url, headers=headers, json=data)
-
-        try:
-            result = response.json()
-        except ValueError as e:
-            self.logger.error(
-                f"追加电子表格数据响应解析失败: {e}, HTTP状态码: {response.status_code}"
-            )
-            self.logger.debug(f"响应内容: {response.text[:500]}")
-            return False, None
-
-        code = result.get("code")
-        if code != 0:
-            error_msg = result.get("msg", "未知错误")
-            self.logger.error(
-                f"追加电子表格数据失败: 错误码 {code}, 错误信息: {error_msg}"
-            )
-            self.logger.debug(f"API响应: {result}")
-            return False, code
+        result, error_code = self._call_boolean_api(
+            "POST", url, "追加电子表格数据", headers=headers, json=data
+        )
+        if result is None:
+            return False, error_code
 
         self.logger.debug(f"成功追加 {len(values)} 行数据")
         return True, 0
@@ -737,6 +701,10 @@ class SheetAPI:
         value_ranges = []
         for range_info in ranges_data:
             range_str = f"{sheet_id}!{range_info['range']}"
+            is_valid, error_msg = self._validate_range_format(range_str)
+            if not is_valid:
+                self.logger.error(f"选择性写入范围无效: {error_msg}")
+                return False
             value_ranges.append({"range": range_str, "values": range_info["values"]})
 
         # 使用批量更新API
@@ -782,13 +750,13 @@ class SheetAPI:
             range_start = i
             range_end = i
 
-            # 查找可以合并的连续列
+            # 只合并真正相邻的目标列。跨非目标列合并会要求为中间列提供值，
+            # 使用空值占位会清空未选择列，因此这里不做跨列合并。
             while range_end + 1 < len(sorted_columns):
                 current_pos = column_positions[sorted_columns[range_end]]
                 next_pos = column_positions[sorted_columns[range_end + 1]]
 
-                # 如果间隔小于等于max_gap，则合并
-                if next_pos - current_pos <= max_gap:
+                if max_gap > 0 and next_pos - current_pos == 1:
                     range_end += 1
                 else:
                     break
@@ -828,8 +796,8 @@ class SheetAPI:
                         else:
                             row_data.append("")
                     else:
-                        # 空列（用于填充间隔）
-                        row_data.append("")
+                        # 连续范围内不应出现非目标列；防御性失败，避免清空数据。
+                        raise ValueError(f"选择性范围包含未提供数据的列位置: {col_idx}")
 
                 range_values.append(row_data)
 
@@ -1117,29 +1085,10 @@ class SheetAPI:
             "dataValidation": data_validation,
         }
 
-        response = self.api_client.call_api(
-            "POST", url, headers=headers, json=request_data
+        result, _ = self._call_boolean_api(
+            "POST", url, "设置下拉列表", headers=headers, json=request_data
         )
-
-        try:
-            result = response.json()
-        except ValueError as e:
-            self.logger.error(
-                f"设置下拉列表响应解析失败: {e}, HTTP状态码: {response.status_code}"
-            )
-            self.logger.debug(f"响应内容: {response.text[:500]}")
-            return False
-
-        if result.get("code") != 0:
-            error_msg = result.get("msg", "未知错误")
-            self.logger.error(
-                f"设置下拉列表失败: 错误码 {result.get('code')}, 错误信息: {error_msg}"
-            )
-            self.logger.debug(f"请求数据: {request_data}")
-            self.logger.debug(f"API响应: {result}")
-            return False
-
-        return True
+        return result is not None
 
     def _validate_range(
         self, spreadsheet_token: str, range_str: str
@@ -1154,7 +1103,17 @@ class SheetAPI:
         Returns:
             (是否有效, 错误信息)
         """
-        # 1. 基本格式验证
+        is_valid, error_msg = self._validate_range_format(range_str)
+        if not is_valid:
+            return is_valid, error_msg
+
+        # 写入、清空、样式等路径保留服务端网格探测。
+        if not self._validate_range_size(spreadsheet_token, range_str):
+            return False, f"范围超出电子表格网格限制: {range_str}"
+        return True, ""
+
+    def _validate_range_format(self, range_str: str) -> Tuple[bool, str]:
+        """纯本地验证完整 A1 范围，不发起网络请求。"""
         import re
 
         if not re.match(r"^[^!]+![A-Z]+\d+:[A-Z]+\d+$", range_str):
@@ -1192,10 +1151,6 @@ class SheetAPI:
             if start_col_num > end_col_num:
                 return False, f"起始列({start_col})不能大于结束列({end_col})"
 
-            # 5. 网格限制验证
-            if not self._validate_range_size(spreadsheet_token, range_str):
-                return False, f"范围超出电子表格网格限制: {range_str}"
-
             return True, ""
 
         except Exception as e:
@@ -1221,17 +1176,14 @@ class SheetAPI:
                 headers=self.auth.get_auth_headers(),
             )
 
-            result = test_response.json()
-
-            # 如果返回错误码90202，说明范围超出网格限制
-            if result.get("code") == 90202:
-                self.logger.debug(f"范围 {range_str} 超出网格限制")
-                return False
-
+            FeishuResponseParser.parse(test_response)
             return True
 
-        except Exception as e:
-            self.logger.debug(f"范围验证失败: {e}")
+        except FeishuAPIError as error:
+            if error.code == 90202:
+                self.logger.debug(f"范围 {range_str} 超出网格限制")
+            else:
+                self.logger.debug(f"范围验证失败: {error}")
             # 验证失败时保守返回False，避免后续API调用失败
             return False
 
@@ -1471,29 +1423,10 @@ class SheetAPI:
         # 构建请求数据
         request_data = {"data": [{"ranges": ranges, "style": style}]}
 
-        response = self.api_client.call_api(
-            "PUT", url, headers=headers, json=request_data
+        result, _ = self._call_boolean_api(
+            "PUT", url, "设置单元格样式", headers=headers, json=request_data
         )
-
-        try:
-            result = response.json()
-        except ValueError as e:
-            self.logger.error(
-                f"设置单元格样式响应解析失败: {e}, HTTP状态码: {response.status_code}"
-            )
-            self.logger.debug(f"响应内容: {response.text[:500]}")
-            return False
-
-        if result.get("code") != 0:
-            error_msg = result.get("msg", "未知错误")
-            self.logger.error(
-                f"设置单元格样式失败: 错误码 {result.get('code')}, 错误信息: {error_msg}"
-            )
-            self.logger.debug(f"请求数据: {request_data}")
-            self.logger.debug(f"API响应: {result}")
-            return False
-
-        return True
+        return result is not None
 
     def set_date_format(
         self, spreadsheet_token: str, ranges: List[str], date_format: str = "yyyy/MM/dd"
@@ -1769,29 +1702,17 @@ class SheetAPI:
 
         data = {"valueRanges": value_ranges}
 
-        response = self.api_client.call_api("POST", url, headers=headers, json=data)
-
-        try:
-            result = response.json()
-        except ValueError as e:
-            self.logger.error(
-                f"批量写入响应解析失败: {e}, HTTP状态码: {response.status_code}"
-            )
-            return False, None
-
-        code = result.get("code")
-        if code != 0:
+        result, error_code = self._call_boolean_api(
+            "POST", url, "批量写入", headers=headers, json=data
+        )
+        if result is None:
             # 清空操作时，允许某些“错误”，比如清空一个已经为空的区域
-            if is_clear and code in [90202]:  # 90202: The range is invalid
+            if is_clear and error_code == 90202:  # The range is invalid
                 self.logger.warning(
-                    f"清空操作时遇到可忽略的错误 (错误码 {code}), 视为成功。"
+                    f"清空操作时遇到可忽略的错误 (错误码 {error_code}), 视为成功。"
                 )
                 return True, 0
-
-            error_msg = result.get("msg", "未知错误")
-            self.logger.error(f"批量写入失败: 错误码 {code}, 错误信息: {error_msg}")
-            self.logger.debug(f"API响应: {result}")
-            return False, code
+            return False, error_code
 
         # 记录详细的写入结果
         responses = result.get("data", {}).get("responses", [])

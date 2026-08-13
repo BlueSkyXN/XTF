@@ -43,14 +43,14 @@ sheet_write_max_cols: 100                 # 写入/清空分块最大列数
 
 # 逻辑同步与结果检测（默认全部关闭，不影响现有同步流程）
 sheet_validate_results: false             # 是否启用结果检测（会双读云端数据）
-sheet_protect_formulas: false             # 是否保护云端公式列不被覆盖
+sheet_protect_formulas: false             # 仅 full 模式：保护云端公式列不被覆盖
 sheet_report_column_diff: false           # 是否输出列级差异报告
 sheet_diff_tolerance: 0.001               # 数值差异容忍度（浮点数比较）
 
 # 逻辑同步与结果检测说明:
 # - sheet_validate_results: 启用后会双读云端（Formula + FormattedValue），检测差异
-# - sheet_protect_formulas: 启用后公式列只检测不覆盖，数据列正常同步
-#   注意：启用此项会自动启用 sheet_validate_results
+# - sheet_protect_formulas: 仅支持 full；启用后公式列只检测不覆盖，数据列正常同步
+#   注意：会自动启用 sheet_validate_results，且必须配置 index_column
 # - sheet_report_column_diff: 启用后在日志中输出列级差异统计
 # - sheet_diff_tolerance: 数值比较时的容忍度，避免浮点数精度问题
 #
@@ -86,7 +86,8 @@ max_retries: 3                            # 最大重试次数
 #   新增字段 (create_field): 10 次/秒
 #
 # 程序直接使用官方限制作为内嵌上限。
-# 当触发限流（错误码 1254290）时，程序会自动等待并重试。
+# HTTP 429/5xx 由 transport 重试；HTTP 200 的飞书业务限流码由 Bitable 层重试。
+# 两层按错误类型分工，不会对同一个 HTTP 失败嵌套放大请求次数。
 #
 # rate_limit_delay 用于传统模式下的串行请求间隔控制:
 #   - Bitable 推荐: 0.01 ~ 0.5 秒
@@ -144,7 +145,7 @@ selective_sync:
   columns: ["column1", "column2", "column3"]  # 指定要同步的列名列表
   auto_include_index: true                # 自动包含索引列用于匹配
   optimize_ranges: true                   # 优化合并相邻列范围 (仅电子表格)
-  max_gap_for_merge: 2                   # 最大允许合并的间隔列数 (仅电子表格)
+  max_gap_for_merge: 2                   # 兼容参数；0 禁用合并，正数仅合并相邻目标列
   preserve_column_order: true            # 保持原始列顺序
 
 # 选择性同步说明:
@@ -152,7 +153,7 @@ selective_sync:
 # - 与现有同步模式兼容: full+selective, incremental+selective, overwrite+selective
 # - 不支持clone模式 (逻辑冲突)
 # - 自动包含索引列: 确保匹配逻辑正常工作，但可选择是否更新
-# - 智能范围优化: 电子表格模式下自动将相邻列合并为连续范围，减少API调用
+# - 安全范围优化: 仅合并相邻目标列，不跨未选择列，避免覆盖中间列
 # - 高效批量操作: 利用飞书API的精确控制能力，支持不连续列的高效处理
 # 
 # 多维表格模式 - 字段级精确控制:

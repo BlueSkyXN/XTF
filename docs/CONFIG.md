@@ -157,7 +157,7 @@ XTF 支持四层配置来源，优先级从高到低：
 | 参数名 | 类型 | 默认值 | CLI | 说明 |
 |--------|------|--------|-----|------|
 | `sheet_validate_results` | `bool` | `false` | ❌ | 启用双读结果检测 |
-| `sheet_protect_formulas` | `bool` | `false` | ❌ | 保护公式列不被覆盖 |
+| `sheet_protect_formulas` | `bool` | `false` | ❌ | 仅 `full`：保护公式列不被覆盖 |
 | `sheet_report_column_diff` | `bool` | `false` | ❌ | 输出列级差异报告 |
 | `sheet_diff_tolerance` | `float` | `0.001` | ❌ | 数值比较容忍度 |
 
@@ -169,7 +169,9 @@ XTF 支持四层配置来源，优先级从高到低：
 | 保护公式 + 检测差异 | `validate_results=true`, `protect_formulas=true` | 公式列只检测不覆盖，数据列正常同步 |
 | 完整差异报告 | 以上 + `report_column_diff=true` | 额外输出列级差异统计 |
 
-> ⚠️ 启用 `sheet_protect_formulas` 时会自动启用 `sheet_validate_results`
+> ⚠️ 启用 `sheet_protect_formulas` 时会自动启用 `sheet_validate_results`，并要求
+> `sync_mode: full` 和有效 `index_column`。其他模式在配置加载时直接拒绝，避免
+> `overwrite` / `clone` 清空或重写公式。
 
 > 详细机制说明：[SHEET.md](./SHEET.md)
 
@@ -248,7 +250,7 @@ XTF 支持四层配置来源，优先级从高到低：
 | `selective_sync.columns` | `list` | `[]` | ❌ | 要同步的列名列表 |
 | `selective_sync.auto_include_index` | `bool` | `true` | ❌ | 自动包含索引列 |
 | `selective_sync.optimize_ranges` | `bool` | `true` | ❌ | 优化合并相邻列范围（仅 Sheet） |
-| `selective_sync.max_gap_for_merge` | `int` | `2` | ❌ | 最大合并间隔列数（仅 Sheet，0-50） |
+| `selective_sync.max_gap_for_merge` | `int` | `2` | ❌ | 兼容参数；`0` 禁用合并，正数仅启用相邻目标列合并（仅 Sheet） |
 | `selective_sync.preserve_column_order` | `bool` | `true` | ❌ | 保持原始列顺序 |
 
 **配置示例**：
@@ -266,7 +268,8 @@ selective_sync:
 **约束**：
 - ❌ 不支持 `clone` 模式（逻辑冲突：克隆需要完整数据）
 - `columns` 不能包含空字符串或重复列名
-- `max_gap_for_merge` 范围 0-50（性能考虑）
+- `max_gap_for_merge` 范围 0-50；`0` 禁用合并，正数启用安全的相邻列合并
+- 非相邻目标列始终使用独立 range，避免写空中间列并覆盖未选择数据
 
 > 详细说明：[SYNC.md](./SYNC.md#选择性列同步)
 

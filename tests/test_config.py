@@ -58,6 +58,8 @@
 """
 
 from pathlib import Path
+from argparse import Namespace
+from unittest.mock import patch
 
 import pytest
 import yaml
@@ -72,6 +74,7 @@ from core.config import (
     create_sample_config,
     get_target_description,
 )
+from core.control import GlobalRequestController
 
 
 class TestEnums:
@@ -150,6 +153,62 @@ class TestSyncConfig:
         assert config.start_row == 1
         assert config.start_column == "A"
         assert config.batch_size == 1000
+
+    @pytest.mark.parametrize(
+        ("field_name", "value", "message"),
+        [
+            ("batch_size", 0, "batch_size 必须为正整数"),
+            ("max_retries", -1, "max_retries 不能为负数"),
+            ("rate_limit_delay", -0.1, "rate_limit_delay 不能为负数"),
+        ],
+    )
+    def test_invalid_control_values(self, field_name, value, message):
+        kwargs = {
+            "file_path": "test.xlsx",
+            "app_id": "test_id",
+            "app_secret": "test_secret",
+            "target_type": TargetType.BITABLE,
+            "app_token": "test_app_token",
+            "table_id": "test_table_id",
+            field_name: value,
+        }
+
+        with pytest.raises(ValueError, match=message):
+            SyncConfig(**kwargs)
+
+    @pytest.mark.parametrize(
+        "sync_mode", [SyncMode.INCREMENTAL, SyncMode.OVERWRITE, SyncMode.CLONE]
+    )
+    def test_formula_protection_rejects_non_full_modes(self, sync_mode):
+        with pytest.raises(
+            ValueError, match="sheet_protect_formulas 仅支持 full 同步模式"
+        ):
+            SyncConfig(
+                file_path="test.xlsx",
+                app_id="test_id",
+                app_secret="test_secret",
+                target_type=TargetType.SHEET,
+                spreadsheet_token="sheet-token",
+                sheet_id="sh1",
+                sync_mode=sync_mode,
+                sheet_protect_formulas=True,
+            )
+
+    def test_formula_protection_requires_index_column(self):
+        with pytest.raises(
+            ValueError, match="sheet_protect_formulas 必须配置有效的 index_column"
+        ):
+            SyncConfig(
+                file_path="test.xlsx",
+                app_id="test_id",
+                app_secret="test_secret",
+                target_type=TargetType.SHEET,
+                spreadsheet_token="sheet-token",
+                sheet_id="sh1",
+                sync_mode=SyncMode.FULL,
+                index_column=" ",
+                sheet_protect_formulas=True,
+            )
 
     def test_bitable_config_missing_app_token(self):
         """测试多维表格配置缺少 app_token 时的错误"""
@@ -363,6 +422,73 @@ class TestConfigManager:
 
         assert loaded["file_path"] == sample_config_dict["file_path"]
         assert loaded["app_id"] == sample_config_dict["app_id"]
+
+    def test_create_config_redacts_secrets_from_loaded_parameter_output(
+        self, tmp_path, capsys
+    ):
+        secret_values = {
+            "app_secret": "secret-value",
+            "app_token": "app-token-value",
+        }
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            yaml.safe_dump(
+                {
+                    "file_path": "test.xlsx",
+                    "app_id": "cli_test",
+                    "table_id": "tbl_test",
+                    **secret_values,
+                }
+            ),
+            encoding="utf-8",
+        )
+        args = Namespace(
+            config=str(config_path),
+            file_path=None,
+            app_id=None,
+            app_secret=None,
+            target_type=None,
+            excel_sheet=None,
+            app_token=None,
+            table_id=None,
+            create_missing_fields=None,
+            no_create_fields=False,
+            field_type_strategy=None,
+            spreadsheet_token=None,
+            sheet_id=None,
+            start_row=None,
+            start_column=None,
+            sync_mode=None,
+            index_column=None,
+            batch_size=None,
+            rate_limit_delay=None,
+            max_retries=None,
+            log_level=None,
+        )
+
+        with patch.object(
+            ConfigManager, "parse_target_type", return_value=TargetType.BITABLE
+        ), patch.object(ConfigManager, "parse_args", return_value=args):
+            config = ConfigManager.create_config()
+
+        assert config.app_secret == secret_values["app_secret"]
+        assert config.app_token == secret_values["app_token"]
+        output = capsys.readouterr().out
+        for secret in secret_values.values():
+            assert secret not in output
+        assert output.count("<已配置>") >= len(secret_values)
+
+    def test_disabling_advanced_control_clears_previous_global_controller(
+        self, sample_bitable_config
+    ):
+        global_controller = GlobalRequestController.create_from_config()
+        assert global_controller.get_controller() is not None
+        sample_bitable_config.enable_advanced_control = False
+
+        result = ConfigManager.create_request_controller(sample_bitable_config)
+
+        assert result is None
+        assert global_controller.get_controller() is None
 
 
 class TestCreateSampleConfig:

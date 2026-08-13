@@ -276,6 +276,9 @@ python XTF.py --sync-mode clone  # 不需要索引列
 | 公式保护支持 | ✅ | ❌ | ❌ | ❌ |
 | 智能字段配置 | ❌ | ❌ | ❌ | ✅ |
 
+`sheet_protect_formulas: true` 仅允许与 `full` 组合；配置层会拒绝其他模式。
+`full` 双读失败、公式列状态不明、缺少索引列时均停止写入，不会退化成 clone。
+
 ---
 
 ## 7. 索引列机制
@@ -321,7 +324,7 @@ selective_sync:
   columns: ["salary", "department", "last_updated"]
   auto_include_index: true         # 自动包含索引列
   optimize_ranges: true            # 合并相邻列范围（仅 Sheet）
-  max_gap_for_merge: 2             # 最大合并间隔（仅 Sheet，0-50）
+  max_gap_for_merge: 2             # 0 禁用；正数仅合并相邻目标列（仅 Sheet）
   preserve_column_order: true      # 保持原始列顺序
 ```
 
@@ -350,14 +353,14 @@ selective_sync:
 ```
 原始指定列：B, D, E, F, H
               ↓ max_gap_for_merge=2
-合并后范围：B:F (B 和 D 间隔 1，合并), H
-API 调用数：2 次（而非 5 次）
+合并后范围：B, D:F, H
+批量请求包含：3 个 value range（而非 5 个）
 ```
 
 **`max_gap_for_merge` 说明**：
-- 值为 0：不合并，每列独立请求
-- 值为 2（默认）：允许跳过 2 列的间隔进行合并
-- 值越大：合并越激进，API 调用越少，但可能包含不需要的列
+- 值为 0：不合并，每列保持独立 range
+- 正数（默认 2）：启用相邻目标列合并；为兼容现有配置，允许范围仍为 1-50
+- 非相邻目标列不会跨列合并，避免空值覆盖未选择的中间列
 
 ### 验证规则
 
@@ -416,7 +419,8 @@ Bitable 模式下的远程记录获取支持 `field_names` 参数优化，仅返
 | 查询记录 | 20 次/秒 |
 | 新增/更新/删除 | 50 次/秒 |
 
-当触发限流（飞书错误码 `1254290`）时，程序会自动等待并重试。
+网络异常和 HTTP `429/5xx` 由 transport 重试；HTTP 200 中的可恢复业务码（如
+`1254290`）由 Bitable 层重试。同一个 HTTP 失败不会被两层重复放大。
 
 > 详细频控配置：[CONTROL.md](./CONTROL.md)
 
