@@ -1,32 +1,32 @@
 # api navigation card
 
-`api/` owns Feishu authentication and HTTP wrappers for Bitable and Sheet.
-Read this card before modifying token handling, auth headers, pagination, retryable errors, rate limits, batch writes/deletes, Sheet ranges, styles, validations, or chunked upload.
-Key files: `auth.py`, `base.py`, `bitable.py`, `sheet.py`; focused coverage currently starts in `tests/test_api_base.py`.
+`api/` owns public Feishu SDK contracts, auth/transport, and Bitable/Sheet wrappers.
+Read before changing exports, constructors, tokens, retries, pagination/batching, mutations, or Sheet ranges/styles/chunks.
+Key files: `__init__.py`, `sdk.py`, `auth.py`, `base.py`, `bitable.py`, `sheet.py`; tests: `tests/test_api_*.py`.
 
-## Local Invariants
+## Local invariants
 
-- Logs must redact secrets and tokens; never log full `Authorization`, `app_secret`, `app_token`, `spreadsheet_token`, or tenant tokens.
-- `FeishuAuth` owns tenant access token retrieval and refresh. Keep auth concerns out of `core/`.
-- `RetryableAPIClient` must preserve predictable behavior for HTTP 429, 5xx, request exceptions, and retry counts.
-- Bitable pagination must honor `page_token` and guard repeated tokens or loops.
-- Bitable batch create should keep idempotency via `client_token`.
-- Sheet read/write/append/clear/style/validation methods validate ranges before remote calls.
-- Chunked Sheet upload and append must preserve auto-splitting behavior for oversized responses or writes.
+- Never log full `Authorization`, `app_secret`, `app_token`, `spreadsheet_token`, or tenant tokens.
+- `api.__all__`, `XTFFeishuClient`, typed errors, and direct target-client construction are compatibility surfaces.
+- `FeishuAuth` owns tenant access token retrieval, caching, and refresh; clients created by one `XTFFeishuClient` share its auth and transport.
+- Transport owns request exceptions and HTTP 429/5xx retry; Bitable owns retryable business codes. Do not multiply budgets.
+- Typed errors preserve HTTP status, business code/message, `log_id`, retryability, and pacing metadata.
+- Pagination must honor `page_token` and reject missing/repeated cursors; batch helpers stop at first failure and report the already-applied prefix.
+- Bitable create uses one unique `client_token` per logical batch and reuses it across that batch's retries.
+- Sheet methods that accept A1 ranges validate them before calls; oversized reads/writes preserve splitting.
 
-## Local Rules
+## Local rules
 
-- Keep endpoint construction and Feishu response parsing inside `api/`.
-- Use mocked `requests` responses in unit tests. Real Feishu integration belongs outside the default unit test path and must be explicitly marked.
-- If a Feishu OpenAPI behavior is uncertain, check `docs/feishu-openapi-doc/` or official docs before encoding assumptions.
+- Keep endpoints/parsing in `api/`; reuse shared parser, paginator, and batch contracts.
+- Unit tests use mocked `requests` responses. Real Feishu integration is outside the default unit path and must be explicitly marked.
 
-## Do Not
+## Do not
 
 - Do not test unit behavior against real Feishu APIs.
-- Do not hide delete, clear, or overwrite calls behind no-log helper paths.
-- Do not swallow Feishu business error codes that callers need for retry, fallback, or user-visible diagnostics.
+- Do not hide mutations, flatten typed errors, return truncated pages, or continue batches after failure.
+- Do not change boolean/tuple return contracts used by `core/engine.py` without updating callers and compatibility tests.
 
 ## Validation
 
-- `pytest tests/test_api_base.py -v` for base HTTP client, retry, and rate limiter changes.
-- Run root CI-like pytest and quality checks when changing auth, Bitable, Sheet, pagination, delete, or chunk behavior because callers in `core/engine.py` may be affected.
+- Run matching `pytest tests/test_api_<module>.py -v`: `sdk` for contracts, `base` for transport, and target files for wrappers.
+- Run `pytest tests/test_engine.py -v` plus root CI-like checks when a contract used by sync orchestration changes.
