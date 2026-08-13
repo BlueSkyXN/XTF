@@ -398,3 +398,4 @@ def test_v3_unknown_code_and_transport_failure_never_fallback():
     receipt = api.batch_create("base", "table", [CanonicalRecord(None, {"Name": "A"})])
     assert receipt.outcome is MutationOutcome.UNKNOWN_OUTCOME
     transport.call_api.assert_called_once()
+    assert transport.call_api.call_args.kwargs["retry_transport"] is False

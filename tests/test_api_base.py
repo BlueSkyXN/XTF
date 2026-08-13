@@ -306,6 +306,42 @@ class TestRetryableAPIClientCallAPI:
         assert exc_info.value.kind == "transport"
         assert exc_info.value.retryable is True
 
+    @patch("requests.request")
+    def test_call_api_can_disable_transport_replay_for_non_idempotent_mutation(
+        self, mock_request
+    ):
+        mock_request.side_effect = requests.exceptions.ConnectionError("offline")
+        client = RetryableAPIClient(max_retries=3, use_global_controller=False)
+
+        with pytest.raises(FeishuAPIError) as exc_info:
+            client.call_api(
+                "POST",
+                "http://example.com/api",
+                retry_transport=False,
+                json={"create": True},
+            )
+
+        assert exc_info.value.kind == "transport"
+        assert exc_info.value.response_data == {"request_started": True}
+        mock_request.assert_called_once()
+
+    def test_call_api_once_marks_pre_send_controller_failure(self):
+        rate_limit = Mock()
+        rate_limit.wait_if_needed.return_value = False
+        controller = Mock(rate_limit_strategy=rate_limit)
+        client = RetryableAPIClient(use_global_controller=False)
+        client.use_global_controller = True
+        client._controller = controller
+
+        with pytest.raises(FeishuAPIError) as exc_info:
+            client.call_api(
+                "POST",
+                "http://example.com/api",
+                retry_transport=False,
+            )
+
+        assert exc_info.value.response_data == {"request_started": False}
+
     @patch("time.sleep")
     @patch("requests.request")
     def test_global_controller_returns_final_http_response(

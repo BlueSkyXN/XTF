@@ -42,6 +42,10 @@ API 端点（基础路径：https://open.feishu.cn/open-apis/sheets）：
         GET  /v2/spreadsheets/{token}/values/{range} - 读取数据
         PUT  /v2/spreadsheets/{token}/values - 写入数据
         POST /v2/spreadsheets/{token}/values_batch_update - 批量更新
+        POST /v2/spreadsheets/{token}/values_append - 追加数据
+    元数据与公式：
+        GET  /sheets/v3/spreadsheets/{token}/sheets/query - 查询工作表元数据
+        POST /sheet_ai/v2/spreadsheets/{token}/tools/invoke_read - 校验公式
     行列：
         POST /v2/spreadsheets/{token}/insert_dimension_range - 插入行/列
         DELETE /v2/spreadsheets/{token}/dimension_range - 删除行/列
@@ -76,7 +80,7 @@ API 端点（基础路径：https://open.feishu.cn/open-apis/sheets）：
     - 自动分块：大数据按 row_batch_size 和 col_batch_size 分块
     - 二分重试：请求过大时自动减半批次大小
     - 范围优化：相邻列合并为连续范围减少 API 调用
-    - 并行写入：支持配置写入间隔控制并发
+    - 串行写入：按成功前缀首错停止，保留范围与错误语义
 
 依赖关系：
     内部模块：
@@ -97,14 +101,120 @@ API 端点（基础路径：https://open.feishu.cn/open-apis/sheets）：
 更新日期: 2026-01-24
 """
 
+import json
 import logging
+import re
 import time
-from typing import Dict, Any, List, Optional, Tuple, Union
+from dataclasses import dataclass, field
+from typing import Dict, Any, List, Mapping, Optional, Sequence, Tuple, Union
 
 from .auth import FeishuAuth
 from .base import RetryableAPIClient
+from .bitable_backend import MutationOutcome, MutationReceipt, ReadbackStatus
 from .sdk import FeishuAPIError, FeishuResponseParser
 from .url import encode_a1_range, encode_path_segment
+
+
+@dataclass(frozen=True)
+class A1Range:
+    """Validated rectangular A1 range used by typed Sheet operations."""
+
+    sheet_id: str
+    start_row: int
+    end_row: int
+    start_col: int
+    end_col: int
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.sheet_id, str)
+            or not self.sheet_id
+            or "!" in self.sheet_id
+        ):
+            raise ValueError("A1 sheet_id must be a non-empty path segment")
+        bounds = (self.start_row, self.end_row, self.start_col, self.end_col)
+        if any(
+            not isinstance(value, int) or isinstance(value, bool) or value < 1
+            for value in bounds
+        ):
+            raise ValueError("A1 row and column bounds must be positive integers")
+        if self.end_row < self.start_row or self.end_col < self.start_col:
+            raise ValueError("A1 end bounds must not precede start bounds")
+
+    @property
+    def row_count(self) -> int:
+        return self.end_row - self.start_row + 1
+
+    @property
+    def col_count(self) -> int:
+        return self.end_col - self.start_col + 1
+
+    @property
+    def text(self) -> str:
+        return (
+            f"{self.sheet_id}!{SheetAPI.column_number_to_letter_static(self.start_col)}"
+            f"{self.start_row}:{SheetAPI.column_number_to_letter_static(self.end_col)}"
+            f"{self.end_row}"
+        )
+
+    @classmethod
+    def parse(cls, range_str: str) -> "A1Range":
+        if not isinstance(range_str, str):
+            raise ValueError("A1 range must be a string")
+        match = re.fullmatch(r"([^!]+)!([A-Za-z]+)(\d+):([A-Za-z]+)(\d+)", range_str)
+        if not match:
+            raise ValueError(f"invalid A1 range: {range_str}")
+        sheet_id, start_col, start_row, end_col, end_row = match.groups()
+        start_col, end_col = start_col.upper(), end_col.upper()
+        start_row_i, end_row_i = int(start_row), int(end_row)
+        start_col_i = cls._column_number(start_col)
+        end_col_i = cls._column_number(end_col)
+        if start_row_i < 1 or end_row_i < start_row_i:
+            raise ValueError(f"invalid A1 row bounds: {range_str}")
+        if start_col_i < 1 or end_col_i < start_col_i:
+            raise ValueError(f"invalid A1 column bounds: {range_str}")
+        return cls(sheet_id, start_row_i, end_row_i, start_col_i, end_col_i)
+
+    @staticmethod
+    def _column_number(value: str) -> int:
+        result = 0
+        for char in value:
+            result = result * 26 + ord(char) - ord("A") + 1
+        return result
+
+
+@dataclass(frozen=True)
+class SheetMetadata:
+    """Typed projection of the Sheets v3 ``sheets/query`` response."""
+
+    sheet_id: str
+    title: Optional[str] = None
+    hidden: Optional[bool] = None
+    grid_properties: Mapping[str, Any] = field(default_factory=dict)
+    raw: Mapping[str, Any] = field(default_factory=dict, compare=False)
+
+
+@dataclass(frozen=True)
+class FormulaVerificationResult:
+    """Typed Sheet AI formula verification result.
+
+    ``passed`` is deliberately strict: a result is clean only when the AI
+    reports ``success`` and explicitly says that no more pages remain.
+    """
+
+    status: str
+    has_more: Optional[bool]
+    total_errors: Optional[int] = None
+    extensions: Mapping[str, Any] = field(default_factory=dict)
+    raw: Mapping[str, Any] = field(default_factory=dict, compare=False)
+    error: Optional[str] = None
+
+    @property
+    def passed(self) -> bool:
+        return self.status == "success" and self.has_more is False
+
+
+_SHEET_BACKEND = "sheet_v2"
 
 
 class SheetAPI:
@@ -156,6 +266,621 @@ class SheetAPI:
         # 读取渲染选项（可配置）
         self.value_render_option = value_render_option
         self.datetime_render_option = datetime_render_option
+
+    @staticmethod
+    def column_number_to_letter_static(col_num: int) -> str:
+        result = ""
+        while col_num > 0:
+            col_num -= 1
+            result = chr(65 + col_num % 26) + result
+            col_num //= 26
+        return result or "A"
+
+    @staticmethod
+    def _typed_matrix(values: Sequence[Sequence[Any]]) -> List[List[Any]]:
+        """Validate and copy a non-empty rectangular matrix before mutation."""
+        if not isinstance(values, (list, tuple)) or not values:
+            raise ValueError("typed Sheet values must be a non-empty matrix")
+        if any(not isinstance(row, (list, tuple)) or not row for row in values):
+            raise ValueError("typed Sheet values must have non-empty rows")
+        width = len(values[0])
+        if any(len(row) != width for row in values):
+            raise ValueError("typed Sheet values must be rectangular")
+        return [list(row) for row in values]
+
+    @staticmethod
+    def _typed_shape(a1: A1Range, values: Sequence[Sequence[Any]]) -> None:
+        if len(values) != a1.row_count or len(values[0]) != a1.col_count:
+            raise ValueError(
+                "typed Sheet matrix shape does not match A1 range "
+                f"{a1.text}: expected {a1.row_count}x{a1.col_count}"
+            )
+
+    def _typed_range_limits(self, a1: A1Range) -> None:
+        if a1.row_count > self.write_max_rows or a1.col_count > self.write_max_cols:
+            raise ValueError(
+                "typed Sheet range exceeds configured write limits: "
+                f"{a1.row_count}x{a1.col_count} > "
+                f"{self.write_max_rows}x{self.write_max_cols}"
+            )
+
+    @staticmethod
+    def _typed_failure_receipt(
+        operation: str,
+        requested: int,
+        accepted: int,
+        actual_ranges: Sequence[A1Range],
+        error: FeishuAPIError,
+        *,
+        failed_batch_index: int,
+        raw_responses: Sequence[Mapping[str, Any]],
+    ) -> MutationReceipt:
+        unknown = error.kind == "transport"
+        return MutationReceipt(
+            operation=operation,
+            backend=_SHEET_BACKEND,
+            requested_count=requested,
+            accepted_count=accepted,
+            actual_ranges=tuple(actual_ranges),
+            failed_batch_index=failed_batch_index,
+            outcome=(
+                MutationOutcome.UNKNOWN_OUTCOME
+                if unknown
+                else MutationOutcome.PARTIAL if accepted else MutationOutcome.REJECTED
+            ),
+            readback=(
+                ReadbackStatus.UNKNOWN if unknown else ReadbackStatus.NOT_REQUESTED
+            ),
+            raw_metadata={"error": str(error), "responses": tuple(raw_responses)},
+        )
+
+    @staticmethod
+    def _typed_range_from_value(value: Any) -> Optional[A1Range]:
+        if not isinstance(value, str):
+            return None
+        try:
+            return A1Range.parse(value)
+        except ValueError:
+            return None
+
+    def _typed_actual_ranges(
+        self,
+        result: Mapping[str, Any],
+        fallback: Sequence[str],
+        *,
+        allow_fallback: bool,
+    ) -> Tuple[Tuple[A1Range, ...], bool]:
+        """Extract server ranges; fixed writes may fall back to requested ranges."""
+        found: List[A1Range] = []
+        accepted_keys = {
+            "range",
+            "updatedRange",
+            "updated_range",
+            "actualRange",
+            "actual_range",
+        }
+
+        def visit(value: Any) -> None:
+            if isinstance(value, Mapping):
+                for key, item in value.items():
+                    if key in accepted_keys:
+                        parsed = self._typed_range_from_value(item)
+                        if parsed is not None and parsed not in found:
+                            found.append(parsed)
+                    visit(item)
+            elif isinstance(value, list):
+                for item in value:
+                    visit(item)
+
+        visit(result)
+        if found:
+            return tuple(found), False
+        if allow_fallback:
+            ranges = tuple(
+                parsed
+                for item in fallback
+                if (parsed := self._typed_range_from_value(item)) is not None
+            )
+            return ranges, False
+        return (), True
+
+    def _typed_values_call(
+        self,
+        method: str,
+        spreadsheet_token: str,
+        endpoint: str,
+        body: Mapping[str, Any],
+        *,
+        retry_transport: bool = True,
+    ) -> Mapping[str, Any]:
+        token = encode_path_segment(spreadsheet_token)
+        url = f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{token}/{endpoint}"
+        response = self.api_client.call_api(
+            method,
+            url,
+            headers=self.auth.get_auth_headers(),
+            json=dict(body),
+            retry_transport=retry_transport,
+        )
+        result = FeishuResponseParser.parse(response)
+        if not isinstance(result, dict):
+            raise FeishuAPIError(
+                -1, "typed Sheet response must be an object", kind="invalid_response"
+            )
+        return result
+
+    def _typed_sheet_receipt(
+        self,
+        operation: str,
+        requested: int,
+        actual_ranges: Sequence[A1Range],
+        result: Mapping[str, Any],
+        *,
+        unknown_scope: bool = False,
+        failed_batch_index: Optional[int] = None,
+        outcome: MutationOutcome = MutationOutcome.ACCEPTED,
+    ) -> MutationReceipt:
+        data = result.get("data", {})
+        responses = data.get("responses", []) if isinstance(data, Mapping) else []
+        if not isinstance(responses, list):
+            responses = []
+
+        def collect_metric(value: Any, key: str) -> int:
+            if isinstance(value, Mapping):
+                own = value.get(key)
+                total = (
+                    int(own)
+                    if isinstance(own, (int, float)) and not isinstance(own, bool)
+                    else 0
+                )
+                return total + sum(
+                    collect_metric(item, key)
+                    for name, item in value.items()
+                    if name != key
+                )
+            if isinstance(value, list):
+                return sum(collect_metric(item, key) for item in value)
+            return 0
+
+        updated_rows = collect_metric(responses, "updatedRows")
+        updated_columns = collect_metric(responses, "updatedColumns")
+        updated_cells = collect_metric(responses, "updatedCells")
+        return MutationReceipt(
+            operation=operation,
+            backend=_SHEET_BACKEND,
+            requested_count=requested,
+            accepted_count=(requested if outcome is MutationOutcome.ACCEPTED else 0),
+            actual_ranges=tuple(actual_ranges),
+            updated_rows=updated_rows or None,
+            updated_columns=updated_columns or None,
+            updated_cells=updated_cells or None,
+            failed_batch_index=failed_batch_index,
+            outcome=outcome,
+            readback=(
+                ReadbackStatus.UNKNOWN
+                if unknown_scope
+                else ReadbackStatus.NOT_REQUESTED
+            ),
+            raw_metadata={"response": result, "unknown_scope": unknown_scope},
+        )
+
+    def _typed_chunks(
+        self, a1: A1Range, values: List[List[Any]]
+    ) -> List[Tuple[A1Range, List[List[Any]]]]:
+        chunks: List[Tuple[A1Range, List[List[Any]]]] = []
+        for col_start in range(a1.start_col, a1.end_col + 1, self.write_max_cols):
+            col_end = min(col_start + self.write_max_cols - 1, a1.end_col)
+            for row_start in range(a1.start_row, a1.end_row + 1, self.write_max_rows):
+                row_end = min(row_start + self.write_max_rows - 1, a1.end_row)
+                rows = [
+                    row[col_start - a1.start_col : col_end - a1.start_col + 1]
+                    for row in values[
+                        row_start - a1.start_row : row_end - a1.start_row + 1
+                    ]
+                ]
+                chunks.append(
+                    (A1Range(a1.sheet_id, row_start, row_end, col_start, col_end), rows)
+                )
+        return chunks
+
+    def write_values(
+        self, spreadsheet_token: str, a1_range: str, values: Sequence[Sequence[Any]]
+    ) -> MutationReceipt:
+        matrix = self._typed_matrix(values)
+        a1 = A1Range.parse(a1_range)
+        self._typed_shape(a1, matrix)
+        applied: List[A1Range] = []
+        responses: List[Mapping[str, Any]] = []
+        chunks = self._typed_chunks(a1, matrix)
+        successful_requests = 0
+        failed_request_index = 0
+        for chunk_range, chunk_values in chunks:
+            pending = [(chunk_range, chunk_values)]
+            while pending:
+                current_range, current_values = pending.pop(0)
+                failed_request_index += 1
+                try:
+                    result = self._typed_values_call(
+                        "PUT",
+                        spreadsheet_token,
+                        "values",
+                        {
+                            "valueRange": {
+                                "range": current_range.text,
+                                "values": current_values,
+                            }
+                        },
+                    )
+                except FeishuAPIError as error:
+                    if (
+                        error.code == self.ERROR_CODE_REQUEST_TOO_LARGE
+                        and current_range.row_count > 1
+                    ):
+                        midpoint = (
+                            current_range.start_row + current_range.row_count // 2 - 1
+                        )
+                        split = [
+                            A1Range(
+                                current_range.sheet_id,
+                                current_range.start_row,
+                                midpoint,
+                                current_range.start_col,
+                                current_range.end_col,
+                            ),
+                            A1Range(
+                                current_range.sheet_id,
+                                midpoint + 1,
+                                current_range.end_row,
+                                current_range.start_col,
+                                current_range.end_col,
+                            ),
+                        ]
+                        offset = midpoint - current_range.start_row + 1
+                        pending[0:0] = [
+                            (split[0], current_values[:offset]),
+                            (split[1], current_values[offset:]),
+                        ]
+                        continue
+                    return self._typed_failure_receipt(
+                        "write",
+                        len(chunks),
+                        successful_requests,
+                        applied,
+                        error,
+                        failed_batch_index=failed_request_index,
+                        raw_responses=responses,
+                    )
+                ranges, _ = self._typed_actual_ranges(
+                    result, [current_range.text], allow_fallback=True
+                )
+                applied.extend(ranges or (current_range,))
+                responses.append(result)
+                successful_requests += 1
+        return self._typed_sheet_receipt(
+            "write", len(chunks), applied, {"data": {"responses": responses}}
+        )
+
+    def append_values(
+        self, spreadsheet_token: str, a1_range: str, values: Sequence[Sequence[Any]]
+    ) -> MutationReceipt:
+        matrix = self._typed_matrix(values)
+        a1 = A1Range.parse(a1_range)
+        self._typed_shape(a1, matrix)
+        pending: List[Tuple[A1Range, List[List[Any]]]] = []
+        for row_offset in range(0, len(matrix), self.write_max_rows):
+            current_values = matrix[row_offset : row_offset + self.write_max_rows]
+            pending.append(
+                (
+                    A1Range(
+                        a1.sheet_id,
+                        a1.start_row + row_offset,
+                        a1.start_row + row_offset + len(current_values) - 1,
+                        a1.start_col,
+                        a1.end_col,
+                    ),
+                    current_values,
+                )
+            )
+        applied: List[A1Range] = []
+        responses: List[Mapping[str, Any]] = []
+        successful_rows = 0
+        request_index = 0
+        while pending:
+            current_range, current = pending.pop(0)
+            request_index += 1
+            try:
+                result = self._typed_values_call(
+                    "POST",
+                    spreadsheet_token,
+                    "values_append",
+                    {
+                        "valueRange": {
+                            "range": current_range.text,
+                            "values": current,
+                        }
+                    },
+                    retry_transport=False,
+                )
+            except FeishuAPIError as error:
+                if error.code == self.ERROR_CODE_REQUEST_TOO_LARGE and len(current) > 1:
+                    midpoint = len(current) // 2
+                    first = current[:midpoint]
+                    second = current[midpoint:]
+                    pending[0:0] = [
+                        (
+                            A1Range(
+                                current_range.sheet_id,
+                                current_range.start_row,
+                                current_range.start_row + len(first) - 1,
+                                current_range.start_col,
+                                current_range.end_col,
+                            ),
+                            first,
+                        ),
+                        (
+                            A1Range(
+                                current_range.sheet_id,
+                                current_range.start_row + len(first),
+                                current_range.end_row,
+                                current_range.start_col,
+                                current_range.end_col,
+                            ),
+                            second,
+                        ),
+                    ]
+                    continue
+                return self._typed_failure_receipt(
+                    "append",
+                    len(matrix),
+                    successful_rows,
+                    applied,
+                    error,
+                    failed_batch_index=request_index,
+                    raw_responses=responses,
+                )
+            ranges, unknown = self._typed_actual_ranges(
+                result, (), allow_fallback=False
+            )
+            applied.extend(ranges)
+            responses.append(result)
+            successful_rows += len(current)
+        return self._typed_sheet_receipt(
+            "append",
+            len(matrix),
+            applied,
+            {"data": {"responses": responses}},
+            unknown_scope=not applied,
+        )
+
+    def batch_update_values(
+        self, spreadsheet_token: str, value_ranges: Sequence[Mapping[str, Any]]
+    ) -> MutationReceipt:
+        if not isinstance(value_ranges, (list, tuple)) or not value_ranges:
+            raise ValueError("typed batch update requires non-empty value_ranges")
+        normalized: List[Dict[str, Any]] = []
+        for item in value_ranges:
+            if (
+                not isinstance(item, Mapping)
+                or "range" not in item
+                or "values" not in item
+            ):
+                raise ValueError("each typed value range requires range and values")
+            a1 = A1Range.parse(item["range"])
+            matrix = self._typed_matrix(item["values"])
+            self._typed_shape(a1, matrix)
+            self._typed_range_limits(a1)
+            normalized.append({"range": a1.text, "values": matrix})
+        try:
+            result = self._typed_values_call(
+                "POST",
+                spreadsheet_token,
+                "values_batch_update",
+                {"valueRanges": normalized},
+            )
+        except FeishuAPIError as error:
+            return self._typed_failure_receipt(
+                "batch_update",
+                len(normalized),
+                0,
+                (),
+                error,
+                failed_batch_index=1,
+                raw_responses=(),
+            )
+        ranges, unknown = self._typed_actual_ranges(
+            result, [item["range"] for item in normalized], allow_fallback=True
+        )
+        return self._typed_sheet_receipt(
+            "batch_update", len(normalized), ranges, result, unknown_scope=unknown
+        )
+
+    def clear_values(self, spreadsheet_token: str, a1_range: str) -> MutationReceipt:
+        a1 = A1Range.parse(a1_range)
+        empty_values = [[""] * a1.col_count for _ in range(a1.row_count)]
+        return self.batch_update_values(
+            spreadsheet_token,
+            [{"range": a1.text, "values": empty_values}],
+        )
+
+    def query_sheets(self, spreadsheet_token: str) -> Tuple[SheetMetadata, ...]:
+        token = encode_path_segment(spreadsheet_token)
+        url = f"https://open.feishu.cn/open-apis/sheets/v3/spreadsheets/{token}/sheets/query"
+        response = self.api_client.call_api(
+            "GET", url, headers=self.auth.get_auth_headers()
+        )
+        result = FeishuResponseParser.parse(response)
+        data = result.get("data")
+        if not isinstance(data, Mapping):
+            raise FeishuAPIError(
+                -1,
+                "sheets/query response missing data object",
+                kind="invalid_response",
+                response_data=result,
+            )
+        sheets = data.get("sheets")
+        if not isinstance(sheets, list):
+            raise FeishuAPIError(
+                -1,
+                "sheets/query response missing data.sheets",
+                kind="invalid_response",
+                response_data=result,
+            )
+        metadata: List[SheetMetadata] = []
+        for item in sheets:
+            if (
+                not isinstance(item, Mapping)
+                or not isinstance(item.get("sheet_id"), str)
+                or not item["sheet_id"]
+            ):
+                raise FeishuAPIError(
+                    -1,
+                    "sheets/query item missing sheet_id",
+                    kind="invalid_response",
+                    response_data=result,
+                )
+            grid = item.get("grid_properties")
+            title = item.get("title")
+            hidden = item.get("hidden")
+            if title is not None and not isinstance(title, str):
+                raise FeishuAPIError(
+                    -1,
+                    "sheets/query title must be a string",
+                    kind="invalid_response",
+                    response_data=result,
+                )
+            if hidden is not None and not isinstance(hidden, bool):
+                raise FeishuAPIError(
+                    -1,
+                    "sheets/query hidden must be boolean",
+                    kind="invalid_response",
+                    response_data=result,
+                )
+            if grid is not None and not isinstance(grid, Mapping):
+                raise FeishuAPIError(
+                    -1,
+                    "sheets/query grid_properties must be an object",
+                    kind="invalid_response",
+                    response_data=result,
+                )
+            metadata.append(
+                SheetMetadata(
+                    item["sheet_id"],
+                    title,
+                    hidden,
+                    grid or {},
+                    item,
+                )
+            )
+        return tuple(metadata)
+
+    def verify_formulas(
+        self,
+        spreadsheet_token: str,
+        sheet_ids: Sequence[str],
+        ranges: Sequence[str],
+        max_locations_per_error: int = 20,
+    ) -> FormulaVerificationResult:
+        if (
+            not isinstance(sheet_ids, (list, tuple))
+            or not sheet_ids
+            or not all(isinstance(item, str) and item for item in sheet_ids)
+        ):
+            raise ValueError("sheet_ids must be a non-empty sequence of strings")
+        if (
+            not isinstance(ranges, (list, tuple))
+            or not ranges
+            or not all(isinstance(item, str) and item for item in ranges)
+        ):
+            raise ValueError("ranges must be a non-empty sequence of strings")
+        if any("!" in item for item in ranges):
+            raise ValueError(
+                "formula verification ranges must not include sheet prefix"
+            )
+        if (
+            not isinstance(max_locations_per_error, int)
+            or isinstance(max_locations_per_error, bool)
+            or max_locations_per_error <= 0
+        ):
+            raise ValueError("max_locations_per_error must be positive")
+        token = encode_path_segment(spreadsheet_token)
+        url = f"https://open.feishu.cn/open-apis/sheet_ai/v2/spreadsheets/{token}/tools/invoke_read"
+        payload = {
+            "tool_name": "verify_formula",
+            "input": json.dumps(
+                {
+                    "excel_id": spreadsheet_token,
+                    "sheet_ids": list(sheet_ids),
+                    "ranges": list(ranges),
+                    "max_locations_per_error": max_locations_per_error,
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+        }
+        response = self.api_client.call_api(
+            "POST", url, headers=self.auth.get_auth_headers(), json=payload
+        )
+        result = FeishuResponseParser.parse(response)
+        data = result.get("data")
+        output = data.get("output") if isinstance(data, Mapping) else None
+        if not isinstance(output, str):
+            return FormulaVerificationResult(
+                "invalid_response",
+                None,
+                raw=result,
+                error="data.output must be JSON string",
+            )
+        try:
+            decoded = json.loads(output)
+        except (TypeError, ValueError):
+            return FormulaVerificationResult(
+                "invalid_response",
+                None,
+                raw=result,
+                error="data.output is invalid JSON",
+            )
+        if not isinstance(decoded, Mapping):
+            return FormulaVerificationResult(
+                "invalid_response",
+                None,
+                raw=result,
+                error="formula output must be object",
+            )
+        status = decoded.get("status")
+        has_more = decoded.get("has_more")
+        if status not in {"success", "errors_found", "partial"} or not isinstance(
+            has_more, bool
+        ):
+            return FormulaVerificationResult(
+                "invalid_response",
+                has_more if isinstance(has_more, bool) else None,
+                raw=decoded,
+                error="invalid status or has_more",
+            )
+        total_errors = decoded.get("total_errors")
+        if total_errors is not None and (
+            isinstance(total_errors, bool) or not isinstance(total_errors, int)
+        ):
+            return FormulaVerificationResult(
+                "invalid_response",
+                has_more,
+                raw=decoded,
+                error="total_errors must be integer",
+            )
+        extensions = {
+            key: decoded[key]
+            for key in (
+                "error_summary",
+                "compile_errors",
+                "warning_message",
+                "total_formulas",
+                "scanned_cells",
+            )
+            if key in decoded
+        }
+        return FormulaVerificationResult(
+            status, has_more, total_errors, extensions, decoded
+        )
 
     def _parse_boolean_response(
         self, response, operation: str

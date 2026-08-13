@@ -163,6 +163,10 @@ HTTP `429/5xx` 和网络异常由 transport 统一重试；HTTP 200 中的飞书
 **Q: 公式保护可以和哪些同步模式组合？**
 `sheet_protect_formulas: true` 仅支持 `full`，并且需要配置 `index_column`。`incremental`、`overwrite`、`clone` 会在配置加载时被拒绝，避免误以为破坏性模式也会保留公式。
 
+写后公式验证使用独立的 `sheet_verify_formulas: true`，只校验 typed receipt 能证明的
+成功写入范围；它不会由公式保护自动开启，也不会为新增行生成或复制公式。append 缺少
+实际落点、Sheet AI 返回 partial/errors 或仍有更多结果时，同步失败关闭。
+
 **Q: 字段类型推荐不准确？**
 降级到 `base` 策略确保稳定，或调整 Intelligence 策略的置信度阈值。详见 [docs/FIELD_TYPES.md](docs/FIELD_TYPES.md)。
 

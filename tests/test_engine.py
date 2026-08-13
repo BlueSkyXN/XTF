@@ -12,8 +12,9 @@ from api.bitable_backend import (
     CanonicalRecord,
     MutationOutcome,
     MutationReceipt,
+    ReadbackStatus,
 )
-from api.sheet import SheetAPI
+from api.sheet import A1Range, FormulaVerificationResult, SheetAPI
 from core.config import SelectiveSyncConfig, SyncConfig, SyncMode, TargetType
 from core.converter import DataConverter
 from core.engine import XTFSyncEngine
@@ -222,6 +223,176 @@ def test_typed_bitable_delete_readback_requires_explicit_absence():
     assert engine._verify_bitable_mutation("delete", ["rec1"], [receipt]) is True
 
 
+def test_sheet_formula_ranges_merge_adjacent_rows_and_use_managed_width():
+    ranges = XTFSyncEngine._merge_sheet_formula_ranges(
+        [
+            A1Range.parse("sh1!D2:E3"),
+            A1Range.parse("sh1!F3:G4"),
+            A1Range.parse("sh1!D7:E7"),
+        ],
+        start_col=3,
+        header_width=4,
+    )
+
+    assert ranges == ["C2:F4", "C7:F7"]
+
+
+def test_sheet_formula_verification_stops_on_partial_result():
+    engine = make_sheet_engine(sheet_verify_formulas=True)
+    engine.api.verify_formulas = Mock(
+        return_value=FormulaVerificationResult("partial", False)
+    )
+    receipt = MutationReceipt(
+        operation="write",
+        backend="sheet_v2",
+        requested_count=1,
+        accepted_count=1,
+        actual_ranges=(A1Range.parse("sh1!A2:B3"),),
+    )
+
+    assert engine._finalize_sheet_mutation(receipt, header_width=2) is False
+    engine.api.verify_formulas.assert_called_once_with(
+        "sheet-token",
+        ["sh1"],
+        ["A2:B3"],
+        max_locations_per_error=20,
+    )
+
+
+def test_sheet_formula_verification_excludes_header_row_from_full_write():
+    engine = make_sheet_engine(sheet_verify_formulas=True)
+    engine.api.verify_formulas = Mock(
+        return_value=FormulaVerificationResult("success", False)
+    )
+    receipt = MutationReceipt(
+        operation="write",
+        backend="sheet_v2",
+        requested_count=1,
+        accepted_count=1,
+        actual_ranges=(A1Range.parse("sh1!A1:B3"),),
+    )
+
+    assert (
+        engine._finalize_sheet_mutation(receipt, header_width=2, skip_header_row=True)
+        is True
+    )
+    engine.api.verify_formulas.assert_called_once_with(
+        "sheet-token",
+        ["sh1"],
+        ["A2:B3"],
+        max_locations_per_error=20,
+    )
+
+
+def test_sheet_formula_verification_rejects_unknown_append_scope():
+    engine = make_sheet_engine(sheet_verify_formulas=True)
+    engine.api.verify_formulas = Mock()
+    receipt = MutationReceipt(
+        operation="append",
+        backend="sheet_v2",
+        requested_count=2,
+        accepted_count=2,
+        readback=ReadbackStatus.UNKNOWN,
+    )
+
+    assert engine._finalize_sheet_mutation(receipt, header_width=2) is False
+    engine.api.verify_formulas.assert_not_called()
+
+
+def test_sheet_formula_verification_does_not_run_for_header_only_write():
+    engine = make_sheet_engine(sheet_verify_formulas=True)
+    engine.api.verify_formulas = Mock()
+    receipt = MutationReceipt(
+        operation="write",
+        backend="sheet_v2",
+        requested_count=1,
+        accepted_count=1,
+        actual_ranges=(A1Range.parse("sh1!A1:B1"),),
+    )
+
+    assert (
+        engine._finalize_sheet_mutation(receipt, header_width=2, skip_header_row=True)
+        is True
+    )
+    engine.api.verify_formulas.assert_not_called()
+
+
+def test_sheet_write_readback_mismatch_blocks_completion():
+    engine = make_sheet_engine(verify_remote_writes=True)
+    engine.api.get_sheet_data = Mock(return_value=[["different"]])
+    receipt = MutationReceipt(
+        operation="write",
+        backend="sheet_v2",
+        requested_count=1,
+        accepted_count=1,
+        actual_ranges=(A1Range.parse("sh1!A1:A1"),),
+    )
+    assert (
+        engine._finalize_sheet_mutation(
+            receipt,
+            expected_ranges={"sh1!A1:A1": [["expected"]]},
+            header_width=1,
+        )
+        is False
+    )
+
+
+def test_sheet_append_readback_covers_each_server_actual_chunk():
+    engine = make_sheet_engine(verify_remote_writes=True)
+    engine.api.append_values = Mock(
+        return_value=MutationReceipt(
+            operation="append",
+            backend="sheet_v2",
+            requested_count=3,
+            accepted_count=3,
+            actual_ranges=(
+                A1Range.parse("sh1!A10:B11"),
+                A1Range.parse("sh1!A12:B12"),
+            ),
+        )
+    )
+    engine.api.get_sheet_data = Mock(side_effect=[[[1, 2], [3, 4]], [[5, 6]]])
+
+    assert engine._typed_sheet_append([[1, 2], [3, 4], [5, 6]], header_width=2)
+    assert [call.args[1] for call in engine.api.get_sheet_data.call_args_list] == [
+        "sh1!A10:B11",
+        "sh1!A12:B12",
+    ]
+
+
+def test_sheet_unknown_outcome_blocks_formula_verification():
+    engine = make_sheet_engine(sheet_verify_formulas=True)
+    engine.api.verify_formulas = Mock()
+    receipt = MutationReceipt(
+        operation="append",
+        backend="sheet_v2",
+        requested_count=1,
+        outcome=MutationOutcome.UNKNOWN_OUTCOME,
+        readback=ReadbackStatus.UNKNOWN,
+    )
+
+    assert engine._finalize_sheet_mutation(receipt, header_width=1) is False
+    engine.api.verify_formulas.assert_not_called()
+
+
+def test_sheet_selective_write_stops_after_first_failed_chunk():
+    engine = make_sheet_engine()
+    engine.api.write_max_rows = 1
+    engine._typed_sheet_batch_update = Mock(side_effect=[True, False, True])
+
+    assert (
+        engine._typed_sheet_selective_write(
+            {"ID": [1, 2, 3]},
+            {"ID": 1},
+            start_row=2,
+            max_gap=0,
+            header_width=1,
+        )
+        is False
+    )
+    assert engine._typed_sheet_batch_update.call_count == 2
+
+
 def test_full_bitable_stops_before_create_when_update_fails():
     engine = XTFSyncEngine.__new__(XTFSyncEngine)
     engine.config = Mock(
@@ -319,13 +490,13 @@ def test_overwrite_bitable_stops_before_create_when_delete_fails():
 def test_clone_sheet_stops_before_write_when_clear_fails():
     engine = make_sheet_engine(sync_mode=SyncMode.CLONE)
     engine._build_sheet_full_range = Mock(return_value="A1:C10")
-    engine.api.clear_sheet_data = Mock(return_value=False)
-    engine.api.write_sheet_data = Mock(return_value=True)
+    engine._typed_sheet_clear = Mock(return_value=False)
+    engine._typed_sheet_write = Mock(return_value=True)
 
     result = engine._sync_clone_sheet(pd.DataFrame({"ID": [1]}))
 
     assert result is False
-    engine.api.write_sheet_data.assert_not_called()
+    engine._typed_sheet_write.assert_not_called()
 
 
 def test_get_current_sheet_data_uses_configured_window_when_metadata_fails():
@@ -427,15 +598,13 @@ def test_full_selective_sync_appends_only_effective_columns():
     engine.get_sheet_data_with_validation = Mock(return_value=(current_df, None, None))
     engine.get_current_sheet_data = Mock(return_value=current_df)
     engine._update_selective_columns = Mock(return_value=True)
-    engine.api.write_selective_columns = Mock(return_value=True)
+    engine._typed_sheet_selective_write = Mock(return_value=True)
 
     assert engine._sync_full_sheet(local_df) is True
 
-    call = engine.api.write_selective_columns.call_args
-    assert set(call.args[2]) == {"ID", "Name"}
-    assert "Manual" not in call.args[2]
-    assert call.args[2]["ID"] == [2]
-    assert call.args[2]["Name"] == ["new"]
+    call = engine._typed_sheet_selective_write.call_args
+    assert set(call.args[0]) == {"ID", "Name"}
+    assert "Manual" not in call.args[0]
 
 
 def test_full_sheet_fails_when_protected_formula_is_index_column():
@@ -529,18 +698,18 @@ def test_full_sheet_formula_protection_never_rewrites_formula_columns():
     engine.get_sheet_data_with_validation = Mock(
         return_value=(current_df, formula_df, {"Formula"})
     )
-    engine.api.write_selective_columns = Mock(return_value=True)
-    engine.api.write_sheet_data = Mock(return_value=True)
-    engine.api.append_sheet_data = Mock(return_value=True)
+    engine._typed_sheet_selective_write = Mock(return_value=True)
+    engine._typed_sheet_write = Mock(return_value=True)
+    engine._typed_sheet_append = Mock(return_value=True)
 
     assert engine._sync_full_sheet(local_df) is True
 
-    assert engine.api.write_selective_columns.call_count == 2
-    for call in engine.api.write_selective_columns.call_args_list:
-        assert set(call.args[2]) == {"ID", "Name"}
-        assert "Formula" not in call.args[2]
-    engine.api.write_sheet_data.assert_not_called()
-    engine.api.append_sheet_data.assert_not_called()
+    assert engine._typed_sheet_selective_write.call_count == 2
+    for call in engine._typed_sheet_selective_write.call_args_list:
+        assert set(call.args[0]) == {"ID", "Name"}
+        assert "Formula" not in call.args[0]
+    engine._typed_sheet_write.assert_not_called()
+    engine._typed_sheet_append.assert_not_called()
 
 
 def test_overwrite_sheet_hashes_each_new_index_once():
@@ -548,7 +717,7 @@ def test_overwrite_sheet_hashes_each_new_index_once():
     current_df = pd.DataFrame({"ID": [1, 2, 3], "Name": ["a", "b", "c"]})
     new_df = pd.DataFrame({"ID": [2, 4], "Name": ["new-b", "d"]})
     engine.get_current_sheet_data = Mock(return_value=current_df)
-    engine.api.write_sheet_data = Mock(return_value=True)
+    engine._typed_sheet_write = Mock(return_value=True)
     original_hash = engine.converter.get_index_value_hash
     hash_calls = []
 
@@ -561,6 +730,6 @@ def test_overwrite_sheet_hashes_each_new_index_once():
     assert engine._sync_overwrite_sheet(new_df) is True
 
     assert hash_calls == [2, 4, 1, 2, 3]
-    written_values = engine.api.write_sheet_data.call_args.args[2]
+    written_values = engine._typed_sheet_write.call_args.args[0]
     assert written_values[0] == ["ID", "Name"]
     assert [row[0] for row in written_values[1:]] == [1, 3, 2, 4]

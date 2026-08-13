@@ -46,6 +46,8 @@ sheet_write_max_cols: 100                 # 写入/清空分块最大列数
 # 逻辑同步与结果检测（默认全部关闭，不影响现有同步流程）
 sheet_validate_results: false             # 是否启用结果检测（会双读云端数据）
 sheet_protect_formulas: false             # 仅 full 模式：保护云端公式列不被覆盖
+sheet_verify_formulas: false              # 成功数据 mutation 后是否调用 Sheet AI 校验受影响范围
+sheet_formula_max_locations: 20           # 每类公式错误最多返回的位置数（正整数）
 sheet_report_column_diff: false           # 是否输出列级差异报告
 sheet_diff_tolerance: 0.001               # 数值差异容忍度（浮点数比较）
 
@@ -53,6 +55,8 @@ sheet_diff_tolerance: 0.001               # 数值差异容忍度（浮点数比
 # - sheet_validate_results: 启用后会双读云端（Formula + FormattedValue），检测差异
 # - sheet_protect_formulas: 仅支持 full；启用后公式列只检测不覆盖，数据列正常同步
 #   注意：会自动启用 sheet_validate_results，且必须配置 index_column
+# - sheet_verify_formulas: 仅适用于 target_type=sheet，默认关闭且不由公式保护自动开启
+#   只校验已成功写入且可证明落点的范围；无法定位 append 落点时会失败关闭
 # - sheet_report_column_diff: 启用后在日志中输出列级差异统计
 # - sheet_diff_tolerance: 数值比较时的容忍度，避免浮点数精度问题
 #

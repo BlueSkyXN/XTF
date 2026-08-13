@@ -75,7 +75,7 @@ from .bitable_backend import (
 )
 from .bitable_v1 import BitableV1Backend
 from .bitable_v3 import BaseV3Backend
-from .sheet import SheetAPI
+from .sheet import A1Range, FormulaVerificationResult, SheetAPI, SheetMetadata
 from .sdk import (
     FeishuAPIError,
     FeishuResponseParser,
@@ -105,7 +105,10 @@ __all__ = [
     "ReadbackStatus",
     "RecordReadResult",
     "UserIDType",
+    "A1Range",
+    "FormulaVerificationResult",
     "SheetAPI",
+    "SheetMetadata",
     "FeishuAPIError",
     "FeishuResponseParser",
     "Page",

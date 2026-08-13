@@ -92,6 +92,7 @@ from typing import Optional, Dict, Any, List, Union, Tuple, cast
 from .config import SyncConfig, SyncMode, TargetType
 from .converter import DataConverter
 from api import (
+    A1Range,
     BitableBackend,
     CanonicalRecord,
     FieldSchema,
@@ -565,6 +566,291 @@ class XTFSyncEngine:
                 readback=status,
             )
             remaining -= verified
+
+    @staticmethod
+    def _merge_sheet_formula_ranges(
+        actual_ranges: List[A1Range], start_col: int, header_width: int
+    ) -> List[str]:
+        """Collapse successful write rows into formula-verification bands."""
+        if start_col <= 0 or header_width <= 0:
+            return []
+        row_bands = sorted(
+            {
+                (item.start_row, item.end_row)
+                for item in actual_ranges
+                if item.start_row > 0 and item.end_row >= item.start_row
+            }
+        )
+        if not row_bands:
+            return []
+        merged: List[List[int]] = []
+        for start_row, end_row in row_bands:
+            if merged and start_row <= merged[-1][1] + 1:
+                merged[-1][1] = max(merged[-1][1], end_row)
+            else:
+                merged.append([start_row, end_row])
+        left = SheetAPI.column_number_to_letter_static(start_col)
+        right = SheetAPI.column_number_to_letter_static(start_col + header_width - 1)
+        return [f"{left}{start}:{right}{end}" for start, end in merged]
+
+    def _finalize_sheet_mutation(
+        self,
+        receipt: MutationReceipt,
+        *,
+        expected_ranges: Optional[Dict[str, List[List[Any]]]] = None,
+        header_width: Optional[int] = None,
+        verify_formulas: bool = True,
+        skip_header_row: bool = False,
+    ) -> bool:
+        """Apply receipt gates, optional data readback, and Sheet AI verification."""
+        if receipt.outcome is not MutationOutcome.ACCEPTED:
+            self.logger.error(
+                f"Sheet {receipt.operation} 结果为 {receipt.outcome.value}；"
+                "已成功前缀不会回滚，停止后续阶段"
+            )
+            return False
+
+        actual_ranges = [
+            item for item in receipt.actual_ranges if isinstance(item, A1Range)
+        ]
+        if self.config.verify_remote_writes:
+            if not expected_ranges:
+                self.logger.error(
+                    "Sheet 写后读回范围未知，无法证明 mutation 已完整应用"
+                )
+                return False
+            if not isinstance(self.api, SheetAPI) or not self.config.spreadsheet_token:
+                return False
+            for range_text, expected in expected_ranges.items():
+                try:
+                    observed = self.api.get_sheet_data(
+                        self.config.spreadsheet_token, range_text
+                    )
+                except Exception as error:
+                    self.logger.error(f"Sheet 写后读回失败: {error}")
+                    return False
+                if observed != expected:
+                    self.logger.error(f"Sheet 写后读回不一致: {range_text}")
+                    return False
+
+        if not self.config.sheet_verify_formulas or not verify_formulas:
+            return True
+        if not actual_ranges:
+            self.logger.error("公式验证范围未知：mutation 未返回可证明的实际范围")
+            return False
+        if not isinstance(self.api, SheetAPI) or not self.config.spreadsheet_token:
+            return False
+        width = header_width if header_width is not None else 0
+        formula_ranges = actual_ranges
+        if skip_header_row:
+            formula_ranges = [
+                A1Range(
+                    item.sheet_id,
+                    max(item.start_row, self.config.start_row + 1),
+                    item.end_row,
+                    item.start_col,
+                    item.end_col,
+                )
+                for item in actual_ranges
+                if item.end_row > self.config.start_row
+            ]
+        if not formula_ranges:
+            self.logger.info("没有成功写入数据行，跳过公式验证")
+            return True
+        ranges = self._merge_sheet_formula_ranges(
+            formula_ranges, self.api.start_col_num, width
+        )
+        if not ranges:
+            self.logger.error("公式验证范围未知：无法证明表头宽度、起始列或实际行区间")
+            return False
+        try:
+            result = self.api.verify_formulas(
+                self.config.spreadsheet_token,
+                [str(self.config.sheet_id)],
+                ranges,
+                max_locations_per_error=self.config.sheet_formula_max_locations,
+            )
+        except Exception as error:
+            self.logger.error(f"Sheet AI 公式验证失败: {error}")
+            return False
+        if not result.passed:
+            self.logger.error(
+                f"Sheet AI 公式验证未通过: status={result.status}, "
+                f"has_more={result.has_more}"
+            )
+            return False
+        return True
+
+    def _typed_sheet_write(
+        self, values: List[List[Any]], *, verify_formulas: bool = True
+    ) -> bool:
+        if (
+            not values
+            or not isinstance(self.api, SheetAPI)
+            or not self.config.spreadsheet_token
+            or not self.config.sheet_id
+        ):
+            return False
+        end_row = self.config.start_row + len(values) - 1
+        end_col = self.api.start_col_num + len(values[0]) - 1
+        a1 = A1Range(
+            str(self.config.sheet_id),
+            self.config.start_row,
+            end_row,
+            self.api.start_col_num,
+            end_col,
+        )
+        receipt = self.api.write_values(self.config.spreadsheet_token, a1.text, values)
+        expected = {
+            item.text: [
+                row[item.start_col - a1.start_col : item.end_col - a1.start_col + 1]
+                for row in values[
+                    item.start_row - a1.start_row : item.end_row - a1.start_row + 1
+                ]
+            ]
+            for item in receipt.actual_ranges
+            if isinstance(item, A1Range)
+        }
+        return self._finalize_sheet_mutation(
+            receipt,
+            expected_ranges=expected,
+            header_width=len(values[0]),
+            verify_formulas=verify_formulas,
+            skip_header_row=True,
+        )
+
+    def _typed_sheet_append(
+        self, values: List[List[Any]], *, header_width: int
+    ) -> bool:
+        if (
+            not values
+            or not isinstance(self.api, SheetAPI)
+            or not self.config.spreadsheet_token
+            or not self.config.sheet_id
+        ):
+            return False
+        placeholder_end_row = self.config.start_row + len(values) - 1
+        end_col = self.api.start_col_num + len(values[0]) - 1
+        requested = A1Range(
+            str(self.config.sheet_id),
+            self.config.start_row,
+            placeholder_end_row,
+            self.api.start_col_num,
+            end_col,
+        )
+        receipt = self.api.append_values(
+            self.config.spreadsheet_token, requested.text, values
+        )
+        expected: Dict[str, List[List[Any]]] = {}
+        actual_ranges = [
+            item for item in receipt.actual_ranges if isinstance(item, A1Range)
+        ]
+        if actual_ranges and sum(item.row_count for item in actual_ranges) == len(
+            values
+        ):
+            offset = 0
+            for item in actual_ranges:
+                expected[item.text] = values[offset : offset + item.row_count]
+                offset += item.row_count
+        return self._finalize_sheet_mutation(
+            receipt,
+            expected_ranges=expected,
+            header_width=header_width,
+        )
+
+    def _typed_sheet_batch_update(
+        self,
+        value_ranges: List[Dict[str, Any]],
+        *,
+        header_width: int,
+        verify_formulas: bool = True,
+    ) -> bool:
+        if (
+            not value_ranges
+            or not isinstance(self.api, SheetAPI)
+            or not self.config.spreadsheet_token
+        ):
+            return False
+        receipt = self.api.batch_update_values(
+            self.config.spreadsheet_token, value_ranges
+        )
+        expected = (
+            {
+                str(item["range"]): [list(row) for row in item["values"]]
+                for item in value_ranges
+            }
+            if self.config.verify_remote_writes
+            else None
+        )
+        return self._finalize_sheet_mutation(
+            receipt,
+            expected_ranges=expected,
+            header_width=header_width,
+            verify_formulas=verify_formulas,
+        )
+
+    def _typed_sheet_selective_write(
+        self,
+        column_data: Dict[str, List[Any]],
+        column_positions: Dict[str, int],
+        *,
+        start_row: int,
+        max_gap: int,
+        header_width: int,
+    ) -> bool:
+        if not isinstance(self.api, SheetAPI) or not self.config.sheet_id:
+            return False
+        optimized = self.api._optimize_column_ranges(
+            column_data, column_positions, start_row, max_gap
+        )
+        value_ranges: List[Dict[str, Any]] = []
+        for item in optimized:
+            full_range = f"{self.config.sheet_id}!{item['range']}"
+            a1 = A1Range.parse(full_range)
+            values = [list(row) for row in item["values"]]
+            for row_start in range(
+                a1.start_row, a1.end_row + 1, self.api.write_max_rows
+            ):
+                row_end = min(row_start + self.api.write_max_rows - 1, a1.end_row)
+                offset = row_start - a1.start_row
+                chunk = values[offset : offset + row_end - row_start + 1]
+                value_ranges.append(
+                    {
+                        "range": A1Range(
+                            a1.sheet_id,
+                            row_start,
+                            row_end,
+                            a1.start_col,
+                            a1.end_col,
+                        ).text,
+                        "values": chunk,
+                    }
+                )
+        for value_range in value_ranges:
+            if not self._typed_sheet_batch_update(
+                [value_range], header_width=header_width
+            ):
+                return False
+        return True
+
+    def _typed_sheet_clear(self, range_str: str) -> bool:
+        if (
+            not isinstance(self.api, SheetAPI)
+            or not self.config.spreadsheet_token
+            or not self.config.sheet_id
+        ):
+            return False
+        full_range = (
+            range_str if "!" in range_str else f"{self.config.sheet_id}!{range_str}"
+        )
+        a1 = A1Range.parse(full_range)
+        receipt = self.api.clear_values(self.config.spreadsheet_token, a1.text)
+        return self._finalize_sheet_mutation(
+            receipt,
+            expected_ranges=None,
+            header_width=a1.col_count,
+            verify_formulas=False,
+        )
 
     def _get_operation_type(self, processor_func) -> str:
         """根据处理函数获取操作类型"""
@@ -1341,14 +1627,7 @@ class XTFSyncEngine:
                 and self.config.spreadsheet_token
                 and self.config.sheet_id
             ):
-                success = self.api.write_sheet_data(
-                    self.config.spreadsheet_token,
-                    self.config.sheet_id,
-                    values,
-                    self.config.batch_size,
-                    80,  # 列批次大小，保持安全裕度
-                    self.config.rate_limit_delay,
-                )
+                success = self._typed_sheet_write(values)
 
         # 追加新行
         if new_rows and success:
@@ -1362,12 +1641,8 @@ class XTFSyncEngine:
                 and self.config.sheet_id
             ):
                 self.logger.info(f"开始追加 {len(new_values)} 行新数据")
-                success = self.api.append_sheet_data(
-                    self.config.spreadsheet_token,
-                    self.config.sheet_id,
-                    new_values,
-                    self.config.batch_size,
-                    self.config.rate_limit_delay,
+                success = self._typed_sheet_append(
+                    new_values, header_width=len(sync_df.columns)
                 )
 
         return success
@@ -1494,14 +1769,12 @@ class XTFSyncEngine:
                 if self.config.selective_sync.optimize_ranges
                 else 0
             )
-            return self.api.write_selective_columns(
-                self.config.spreadsheet_token,
-                self.config.sheet_id,
+            return self._typed_sheet_selective_write(
                 column_data,
                 column_positions,
                 start_row=actual_start_row,
-                rate_limit_delay=self.config.rate_limit_delay,
                 max_gap=effective_max_gap,
+                header_width=len(current_df.columns),
             )
 
         return False
@@ -1607,13 +1880,7 @@ class XTFSyncEngine:
                 and self.config.spreadsheet_token
                 and self.config.sheet_id
             ):
-                return self.api.append_sheet_data(
-                    self.config.spreadsheet_token,
-                    self.config.sheet_id,
-                    values,
-                    self.config.batch_size,
-                    self.config.rate_limit_delay,
-                )
+                return self._typed_sheet_append(values, header_width=len(df.columns))
             return False
 
         # 获取现有数据
@@ -1669,12 +1936,8 @@ class XTFSyncEngine:
                 and self.config.sheet_id
             ):
                 self.logger.info(f"开始增量追加 {len(new_values)} 行数据")
-                return self.api.append_sheet_data(
-                    self.config.spreadsheet_token,
-                    self.config.sheet_id,
-                    new_values,
-                    self.config.batch_size,
-                    self.config.rate_limit_delay,
+                return self._typed_sheet_append(
+                    new_values, header_width=len(new_df.columns)
                 )
             return False
         else:
@@ -1699,13 +1962,7 @@ class XTFSyncEngine:
                 and self.config.spreadsheet_token
                 and self.config.sheet_id
             ):
-                return self.api.append_sheet_data(
-                    self.config.spreadsheet_token,
-                    self.config.sheet_id,
-                    values,
-                    self.config.batch_size,
-                    self.config.rate_limit_delay,
-                )
+                return self._typed_sheet_append(values, header_width=len(df.columns))
             return False
 
         # 获取当前表格数据以确定正确的列位置。调用方已有完整快照时直接复用，
@@ -1736,13 +1993,8 @@ class XTFSyncEngine:
                 and self.config.spreadsheet_token
                 and self.config.sheet_id
             ):
-                header_success = self.api.write_sheet_data(
-                    self.config.spreadsheet_token,
-                    self.config.sheet_id,
-                    header_values,
-                    self.config.batch_size,
-                    80,
-                    self.config.rate_limit_delay,
+                header_success = self._typed_sheet_write(
+                    header_values, verify_formulas=False
                 )
                 if not header_success:
                     return False
@@ -1780,14 +2032,12 @@ class XTFSyncEngine:
                 if self.config.selective_sync.optimize_ranges
                 else 0
             )
-            return self.api.write_selective_columns(
-                self.config.spreadsheet_token,
-                self.config.sheet_id,
+            return self._typed_sheet_selective_write(
                 column_data,
                 column_positions,
                 start_row=start_row,
-                rate_limit_delay=self.config.rate_limit_delay,
                 max_gap=effective_max_gap,
+                header_width=len(effective_columns),
             )
 
         return False
@@ -1925,14 +2175,7 @@ class XTFSyncEngine:
                 and self.config.sheet_id
             ):
                 self.logger.info("使用write_sheet_data覆盖写入")
-                return self.api.write_sheet_data(
-                    self.config.spreadsheet_token,
-                    self.config.sheet_id,
-                    values,
-                    self.config.batch_size,
-                    80,  # col_batch_size
-                    self.config.rate_limit_delay,
-                )
+                return self._typed_sheet_write(values)
             return False
         else:
             # 如果没有数据，清空表格
@@ -1945,9 +2188,7 @@ class XTFSyncEngine:
                 if not clear_range:
                     self.logger.error("无法获取工作表网格范围，清空失败")
                     return False
-                return self.api.clear_sheet_data(
-                    self.config.spreadsheet_token, self.config.sheet_id, clear_range
-                )
+                return self._typed_sheet_clear(clear_range)
             return False
 
     def _sync_overwrite_selective_columns_sheet(
@@ -2015,12 +2256,8 @@ class XTFSyncEngine:
                     and self.config.spreadsheet_token
                     and self.config.sheet_id
                 ):
-                    success = self.api.append_sheet_data(
-                        self.config.spreadsheet_token,
-                        self.config.sheet_id,
-                        new_values,
-                        self.config.batch_size,
-                        self.config.rate_limit_delay,
+                    success = self._typed_sheet_append(
+                        new_values, header_width=len(new_df.columns)
                     )
 
         return success
@@ -2092,22 +2329,13 @@ class XTFSyncEngine:
             if not clear_range:
                 self.logger.error("无法获取工作表网格范围，清空失败")
                 return False
-            clear_success = self.api.clear_sheet_data(
-                self.config.spreadsheet_token, self.config.sheet_id, clear_range
-            )
+            clear_success = self._typed_sheet_clear(clear_range)
             if not clear_success:
                 self.logger.error("清空电子表格失败，终止克隆同步")
                 return False
 
             # 使用增强的写入方法
-            write_success = self.api.write_sheet_data(
-                self.config.spreadsheet_token,
-                self.config.sheet_id,
-                values,
-                self.config.batch_size,
-                80,  # col_batch_size
-                self.config.rate_limit_delay,
-            )
+            write_success = self._typed_sheet_write(values)
         else:
             write_success = False
 

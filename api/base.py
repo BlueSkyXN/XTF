@@ -154,7 +154,9 @@ class RetryableAPIClient:
                 self.logger.warning(f"初始化全局控制器失败，回退到传统模式: {e}")
                 self.use_global_controller = False
 
-    def call_api(self, method: str, url: str, **kwargs) -> requests.Response:
+    def call_api(
+        self, method: str, url: str, *, retry_transport: bool = True, **kwargs
+    ) -> requests.Response:
         """
         调用 API，并在 transport 层处理网络异常与 HTTP 429/5xx 重试。
 
@@ -165,6 +167,8 @@ class RetryableAPIClient:
         Args:
             method: HTTP方法
             url: 请求URL
+            retry_transport: 是否对网络异常和 HTTP 429/5xx 做 transport 重试；
+                无幂等键的 create/append 应传 False
             **kwargs: 其他请求参数
 
         Returns:
@@ -173,6 +177,9 @@ class RetryableAPIClient:
         Raises:
             FeishuAPIError: 所有网络尝试均未取得 HTTP response 时
         """
+        if not retry_transport:
+            return self._call_api_once(method, url, **kwargs)
+
         # 如果配置了全局控制器并且可用，使用新的统一控制系统
         if self.use_global_controller and self._controller:
             last_response = None
@@ -222,6 +229,33 @@ class RetryableAPIClient:
 
         # 否则使用传统的重试和频控机制（向后兼容）
         return self._call_api_legacy(method, url, **kwargs)
+
+    def _call_api_once(self, method: str, url: str, **kwargs) -> requests.Response:
+        """Send once for mutations whose outcome cannot be replayed safely."""
+        request_started = False
+        try:
+            if self.use_global_controller and self._controller:
+                rate_limit_strategy = getattr(
+                    self._controller, "rate_limit_strategy", None
+                )
+                if rate_limit_strategy and not rate_limit_strategy.wait_if_needed():
+                    raise RuntimeError("频控限制：本次 mutation 未发送")
+            else:
+                self.rate_limiter.wait()
+            request_started = True
+            return requests.request(method, url, timeout=60, **kwargs)
+        except requests.exceptions.RequestException as exc:
+            from .sdk import FeishuAPIError
+
+            error = FeishuAPIError.from_transport(str(exc), cause=exc)
+            error.response_data = {"request_started": request_started}
+            raise error from exc
+        except Exception as exc:
+            from .sdk import FeishuAPIError
+
+            error = FeishuAPIError.from_transport(str(exc), cause=exc)
+            error.response_data = {"request_started": request_started}
+            raise error from exc
 
     def _call_api_legacy(self, method: str, url: str, **kwargs) -> requests.Response:
         """

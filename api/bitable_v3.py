@@ -113,9 +113,20 @@ class BaseV3Backend:
             )
         return data
 
-    def _call(self, method: str, url: str, **kwargs: Any) -> Dict[str, Any]:
+    def _call(
+        self,
+        method: str,
+        url: str,
+        *,
+        retry_transport: bool = True,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
         response = self.api_client.call_api(
-            method, url, headers=self.auth.get_auth_headers(), **kwargs
+            method,
+            url,
+            headers=self.auth.get_auth_headers(),
+            retry_transport=retry_transport,
+            **kwargs,
         )
         try:
             payload = response.json()
@@ -710,6 +721,7 @@ class BaseV3Backend:
                 "POST",
                 self._base_path(base_token, table_id, "records", operation),
                 json=body,
+                retry_transport=operation != "batch_create",
             )
         except FeishuAPIError as exc:
             if exc.kind == "transport":
