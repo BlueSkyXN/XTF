@@ -1,35 +1,30 @@
 # core navigation card
 
-`core/` owns XTF configuration semantics and sync behavior.
-Read before modifying config parsing, sync modes, conversion, reader dispatch, retry/rate-limit, selective sync, or Sheet formula protection.
-Key files: `config.py`, `engine.py`, `converter.py`, `reader.py`, `control.py`; focused tests: `test_config.py`, `test_converter.py`, `test_reader.py`, `test_control.py`.
+`core/` owns config, conversion, sync orchestration, reader dispatch, and request-control strategies.
+Read before changing config/inference, sync modes, selective or destructive sync, partial failures, retries/rate limits, or Sheet formula protection.
+Key files: `config.py`, `engine.py`, `converter.py`, `reader.py`, `control.py`; matching tests use the same module names.
 
-## Local Invariants
+## Local invariants
 
-- Config priority: CLI args > YAML config > target inference > defaults.
-- Keep target-specific required-field checks for Bitable and Sheet.
-- `selective_sync.enabled` is invalid with `SyncMode.CLONE`; preserve column and `max_gap_for_merge` checks.
-- `overwrite` and `clone` delete remote data; keep scope, batching, logs, and failures explicit.
-- Sheet formula protection relies on `Formula` and `FormattedValue` dual reads.
-- Field strategy behavior stays progressive: `raw`, `base`, `auto`, `intelligence`.
-- Shared engine changes must cover both `TargetType.BITABLE` and `TargetType.SHEET`.
+- Preserve config priority and target-specific required fields. `selective_sync.enabled` is invalid with `clone`; keep column/duplicate checks and `max_gap_for_merge <= 50`.
+- `overwrite` and `clone` delete remote data. Keep scope, batching, logs, and failure paths explicit.
+- Multi-batch mutations stop on first failure. Never create/write after a prerequisite update/delete/clear fails or report an applied prefix as full success.
+- Formula protection is limited to `full` with `index_column`; failed/incomplete `Formula` or `FormattedValue` reads stop writes. Never rewrite a protected formula column or formula-backed index.
+- Field strategies remain `raw`, `base`, `auto`, `intelligence`; shared engine changes must cover both targets.
 
-## Local Rules
+## Local rules
 
-- Keep Feishu HTTP details in `api/`; `core/engine.py` should use API client methods.
-- Keep low-level file helpers in `utils/` unless the code is sync orchestration.
-- Config key/default changes may require `config.example.yaml`, docs, tests, and root rule updates; batch/retry/rate-limit tests should mock time and requests.
+- Keep raw HTTP behavior in `api/`; `engine.py` consumes `XTFFeishuClient` and target-client contracts.
+- Config key/default changes usually require `config.example.yaml`, docs, tests, and root updates.
 
-## Do Not
+## Do not
 
-- Do not bypass required-field validation, duplicate checks, range limits, chunk splitting, retry, or rate-limit controls.
-- Do not downgrade destructive-mode logging or error handling.
+- Do not bypass validation, range/chunk limits, retry/rate control, or destructive-mode diagnostics.
+- Do not fall back from an incomplete remote read to a destructive or whole-sheet write.
 - Do not add Bitable-only behavior to shared paths without guarding Sheet behavior.
 
 ## Validation
 
-- `pytest tests/test_config.py -v` for config, target inference, CLI/YAML merge, and validation.
-- `pytest tests/test_converter.py -v` for field type, conversion, index, and range helpers.
-- `pytest tests/test_reader.py -v` for reader changes.
-- `pytest tests/test_control.py -v` for retry/rate-limit changes.
-- Run root CI-like pytest and quality checks for shared `engine.py` or config-default changes.
+- Use `pytest tests/test_config.py -v`, `test_converter.py`, `test_reader.py`, or `test_control.py` for the matching module.
+- `pytest tests/test_engine.py -v` for sync ordering, partial failures, selective sync, destructive modes, SDK assembly, or formula protection.
+- Run root CI-like checks for shared engine, defaults, destructive modes, or cross-target changes.
