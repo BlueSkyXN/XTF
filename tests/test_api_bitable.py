@@ -44,6 +44,15 @@ def test_list_fields_collects_pages():
     assert client.call_api.call_args_list[1].kwargs["params"]["page_token"] == "p2"
 
 
+def test_list_fields_encodes_dynamic_path_segments():
+    api, client = make_api([make_response({"items": [], "has_more": False})])
+
+    api.list_fields("app/../x", "表?格#1")
+
+    url = client.call_api.call_args.args[1]
+    assert "/apps/app%2F..%2Fx/tables/%E8%A1%A8%3F%E6%A0%BC%231/fields" in url
+
+
 def test_list_fields_rejects_has_more_without_token():
     api, _ = make_api(
         [make_response({"items": [], "has_more": True, "page_token": None})]

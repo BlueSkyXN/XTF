@@ -113,6 +113,7 @@ from .sdk import (
     PaginationError,
     Paginator,
 )
+from .url import encode_path_segment
 
 
 class BitableAPI:
@@ -268,7 +269,9 @@ class BitableAPI:
         Raises:
             Exception: 当API调用失败时
         """
-        url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/fields"
+        app = encode_path_segment(app_token)
+        table = encode_path_segment(table_id)
+        url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app}/tables/{table}/fields"
         headers = self.auth.get_auth_headers()
 
         def fetch_page(page_token: Optional[str]) -> Page[Dict[str, Any]]:
@@ -305,7 +308,9 @@ class BitableAPI:
         Returns:
             是否创建成功
         """
-        url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/fields"
+        app = encode_path_segment(app_token)
+        table = encode_path_segment(table_id)
+        url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app}/tables/{table}/fields"
         headers = self.auth.get_auth_headers()
         data = {"field_name": field_name, "type": field_type}
 
@@ -367,7 +372,9 @@ class BitableAPI:
         field_names: Optional[List[str]] = None,
     ) -> Page[Dict[str, Any]]:
         """读取单页并保留服务端 has_more，供完整分页校验使用。"""
-        url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/search"
+        app = encode_path_segment(app_token)
+        table = encode_path_segment(table_id)
+        url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app}/tables/{table}/records/search"
         headers = self.auth.get_auth_headers()
 
         # 分页参数作为查询参数（限制在接口上限内）
@@ -464,7 +471,9 @@ class BitableAPI:
             )
             return False
 
-        url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/batch_create"
+        app = encode_path_segment(app_token)
+        table = encode_path_segment(table_id)
+        url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app}/tables/{table}/records/batch_create"
         headers = self.auth.get_auth_headers()
 
         # 每次逻辑调用生成一个全局唯一 token；业务错误重试复用同一 params，
@@ -510,7 +519,9 @@ class BitableAPI:
             )
             return False
 
-        url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/batch_update"
+        app = encode_path_segment(app_token)
+        table = encode_path_segment(table_id)
+        url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app}/tables/{table}/records/batch_update"
         headers = self.auth.get_auth_headers()
 
         # 添加查询参数提高性能
@@ -553,7 +564,9 @@ class BitableAPI:
             )
             return False
 
-        url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/batch_delete"
+        app = encode_path_segment(app_token)
+        table = encode_path_segment(table_id)
+        url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app}/tables/{table}/records/batch_delete"
         headers = self.auth.get_auth_headers()
         data = {"records": record_ids}
 
