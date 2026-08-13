@@ -393,6 +393,39 @@ def test_sheet_selective_write_stops_after_first_failed_chunk():
     assert engine._typed_sheet_batch_update.call_count == 2
 
 
+def test_sheet_clear_readback_requires_observed_empty_cells():
+    engine = make_sheet_engine(verify_remote_writes=True)
+    engine.api.clear_values = Mock(
+        return_value=MutationReceipt(
+            operation="batch_update",
+            backend="sheet_v2",
+            requested_count=1,
+            accepted_count=1,
+            actual_ranges=(A1Range.parse("sh1!A1:B2"),),
+        )
+    )
+    engine.api.get_sheet_data = Mock(return_value=[["still-present"]])
+
+    assert engine._typed_sheet_clear("A1:B2") is False
+    engine.api.get_sheet_data.assert_called_once_with("sheet-token", "sh1!A1:B2")
+
+
+def test_sheet_clear_readback_accepts_trimmed_empty_matrix():
+    engine = make_sheet_engine(verify_remote_writes=True)
+    engine.api.clear_values = Mock(
+        return_value=MutationReceipt(
+            operation="batch_update",
+            backend="sheet_v2",
+            requested_count=1,
+            accepted_count=1,
+            actual_ranges=(A1Range.parse("sh1!A1:B2"),),
+        )
+    )
+    engine.api.get_sheet_data = Mock(return_value=[])
+
+    assert engine._typed_sheet_clear("A1:B2") is True
+
+
 def test_full_bitable_stops_before_create_when_update_fails():
     engine = XTFSyncEngine.__new__(XTFSyncEngine)
     engine.config = Mock(

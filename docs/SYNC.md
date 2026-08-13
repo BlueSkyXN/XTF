@@ -420,6 +420,9 @@ incomplete 或范围未知会阻止后续阶段。`sheet_verify_formulas: true` 
 执行 Sheet AI `verify_formula`；只有 `success + has_more=false` 通过。两种验证都不是事务，
 不会回滚已经被服务端接受的前缀。
 
+clear 的读回按“范围内不得出现任何非空 cell”判断；OpenAPI 将尾部空行/空列裁剪为
+空矩阵也视为已清空，不要求返回与请求 range 同形状的空字符串矩阵。
+
 > 详细算法设计：[SHEET.md](./SHEET.md)
 
 ---
