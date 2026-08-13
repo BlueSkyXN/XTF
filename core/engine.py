@@ -601,6 +601,7 @@ class XTFSyncEngine:
         header_width: Optional[int] = None,
         verify_formulas: bool = True,
         skip_header_row: bool = False,
+        skip_data_readback: bool = False,
     ) -> bool:
         """Apply receipt gates, optional data readback, and Sheet AI verification."""
         if receipt.outcome is not MutationOutcome.ACCEPTED:
@@ -613,7 +614,7 @@ class XTFSyncEngine:
         actual_ranges = [
             item for item in receipt.actual_ranges if isinstance(item, A1Range)
         ]
-        if self.config.verify_remote_writes:
+        if self.config.verify_remote_writes and not skip_data_readback:
             if not expected_ranges:
                 self.logger.error(
                     "Sheet 写后读回范围未知，无法证明 mutation 已完整应用"
@@ -845,12 +846,29 @@ class XTFSyncEngine:
         )
         a1 = A1Range.parse(full_range)
         receipt = self.api.clear_values(self.config.spreadsheet_token, a1.text)
-        return self._finalize_sheet_mutation(
+        if not self._finalize_sheet_mutation(
             receipt,
             expected_ranges=None,
             header_width=a1.col_count,
             verify_formulas=False,
-        )
+            skip_data_readback=True,
+        ):
+            return False
+        if not self.config.verify_remote_writes:
+            return True
+        try:
+            observed = self.api.get_sheet_data(self.config.spreadsheet_token, a1.text)
+        except Exception as error:
+            self.logger.error(f"Sheet clear 写后读回失败: {error}")
+            return False
+        if any(
+            cell is not None and str(cell).strip() != ""
+            for row in observed
+            for cell in row
+        ):
+            self.logger.error(f"Sheet clear 写后读回不一致: {a1.text}")
+            return False
+        return True
 
     def _get_operation_type(self, processor_func) -> str:
         """根据处理函数获取操作类型"""
