@@ -138,6 +138,8 @@ class SyncConfig:
     app_token: Optional[str] = None
     table_id: Optional[str] = None
     create_missing_fields: bool = True
+    bitable_api_backend: str = "base_v3"
+    bitable_user_id_type: str = "open_id"
 
     # 智能字段类型选择配置
     field_type_strategy: FieldTypeStrategy = FieldTypeStrategy.BASE
@@ -172,6 +174,7 @@ class SyncConfig:
     # 同步设置
     sync_mode: SyncMode = SyncMode.FULL
     index_column: Optional[str] = None  # 索引列名，用于记录比对
+    verify_remote_writes: bool = False
 
     # 性能设置
     batch_size: int = 500  # 批处理大小
@@ -210,6 +213,16 @@ class SyncConfig:
             self.target_type = TargetType(self.target_type)
         if isinstance(self.field_type_strategy, str):
             self.field_type_strategy = FieldTypeStrategy(self.field_type_strategy)
+
+        self.bitable_api_backend = str(self.bitable_api_backend).strip().lower()
+        if self.bitable_api_backend not in {"base_v3", "bitable_v1"}:
+            raise ValueError(
+                "bitable_api_backend 仅支持 base_v3 或 bitable_v1，不支持自动回退"
+            )
+
+        self.bitable_user_id_type = str(self.bitable_user_id_type).strip().lower()
+        if self.bitable_user_id_type not in {"open_id", "union_id", "user_id"}:
+            raise ValueError("bitable_user_id_type 仅支持 open_id、union_id 或 user_id")
 
         # 验证必需参数
         if self.target_type == TargetType.BITABLE:
@@ -508,6 +521,9 @@ class ConfigManager:
                 "rate_limit_delay": 0.01,
                 "max_retries": 3,
                 "create_missing_fields": True,
+                "bitable_api_backend": "base_v3",
+                "bitable_user_id_type": "open_id",
+                "verify_remote_writes": False,
                 "field_type_strategy": "base",
                 "intelligence_date_confidence": 0.85,
                 "intelligence_choice_confidence": 0.9,
@@ -534,6 +550,7 @@ class ConfigManager:
                 "sheet_protect_formulas": False,
                 "sheet_report_column_diff": False,
                 "sheet_diff_tolerance": 0.001,
+                "verify_remote_writes": False,
                 "selective_sync": {
                     "enabled": False,
                     "columns": None,

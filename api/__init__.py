@@ -60,6 +60,21 @@ API 调用流程：
 from .auth import FeishuAuth
 from .base import RateLimiter, RetryableAPIClient
 from .bitable import BitableAPI
+from .bitable_backend import (
+    BitableBackend,
+    BitableBackendKind,
+    CanonicalRecord,
+    FieldKind,
+    FieldSchema,
+    IncompleteReadError,
+    MutationOutcome,
+    MutationReceipt,
+    ReadbackStatus,
+    RecordReadResult,
+    UserIDType,
+)
+from .bitable_v1 import BitableV1Backend
+from .bitable_v3 import BaseV3Backend
 from .sheet import SheetAPI
 from .sdk import (
     FeishuAPIError,
@@ -77,6 +92,19 @@ __all__ = [
     "RateLimiter",
     "RetryableAPIClient",
     "BitableAPI",
+    "BitableBackend",
+    "BitableBackendKind",
+    "BitableV1Backend",
+    "BaseV3Backend",
+    "CanonicalRecord",
+    "FieldKind",
+    "FieldSchema",
+    "IncompleteReadError",
+    "MutationOutcome",
+    "MutationReceipt",
+    "ReadbackStatus",
+    "RecordReadResult",
+    "UserIDType",
     "SheetAPI",
     "FeishuAPIError",
     "FeishuResponseParser",

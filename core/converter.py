@@ -215,7 +215,7 @@ class DataConverter:
         return self._normalize_timestamp_index_value(timestamp)
 
     def _normalize_index_value(
-        self, value: Any, field_type: Optional[int] = None
+        self, value: Any, field_type: Optional[Any] = None
     ) -> Optional[str]:
         """将本地值和飞书返回值统一为可比较的索引字符串。"""
         if self._is_empty_value(value):
@@ -305,16 +305,55 @@ class DataConverter:
         self,
         row: pd.Series,
         index_column: Optional[str],
-        field_types: Optional[Dict[str, int]] = None,
+        field_types: Optional[Dict[str, Any]] = None,
     ) -> Optional[str]:
         """计算索引值的哈希，空值返回 None 避免误匹配"""
         if index_column and index_column in row:
             value = row[index_column]
-            field_type = field_types.get(index_column) if field_types else None
+            field_type = (
+                self._field_schema_type_code(field_types.get(index_column))
+                if field_types
+                else None
+            )
             index_value = self._normalize_index_value(value, field_type)
             if index_value is None:
                 return None
             return hashlib.md5(index_value.encode("utf-8")).hexdigest()
+        return None
+
+    @staticmethod
+    def _field_schema_type_code(field_schema: Any) -> Optional[int]:
+        """将 canonical FieldSchema 映射到既有 v1 转换代码使用的语义码。"""
+        from api.bitable_backend import FieldKind, FieldSchema
+
+        if not isinstance(field_schema, FieldSchema):
+            return field_schema if isinstance(field_schema, int) else None
+        if isinstance(field_schema.raw_type, int):
+            return field_schema.raw_type
+        if field_schema.kind is FieldKind.TEXT:
+            return 1
+        if field_schema.kind is FieldKind.NUMBER:
+            return 2
+        if field_schema.kind is FieldKind.SELECT:
+            return 4 if field_schema.multiple else 3
+        if field_schema.kind is FieldKind.DATETIME:
+            return 5
+        if field_schema.kind is FieldKind.CHECKBOX:
+            return 7
+        if field_schema.kind is FieldKind.USER:
+            return 11
+        if field_schema.kind is FieldKind.ATTACHMENT:
+            return 17
+        if field_schema.kind is FieldKind.LINK:
+            return 18
+        if field_schema.kind is FieldKind.LOOKUP:
+            return 19
+        if field_schema.kind is FieldKind.FORMULA:
+            return 20
+        if field_schema.kind is FieldKind.LOCATION:
+            return 22
+        if field_schema.kind is FieldKind.GROUP_CHAT:
+            return 23
         return None
 
     # ========== 多维表格转换方法 ==========
@@ -323,7 +362,7 @@ class DataConverter:
         self,
         records: List[Dict[str, Any]],
         index_column: Optional[str],
-        field_types: Optional[Dict[str, int]] = None,
+        field_types: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Dict[str, Any]]:
         """构建多维表格记录索引"""
         index: Dict[str, Dict[str, Any]] = {}
@@ -334,7 +373,11 @@ class DataConverter:
             fields = record.get("fields", {})
             if index_column in fields:
                 raw_value = fields[index_column]
-                field_type = field_types.get(index_column) if field_types else None
+                field_type = (
+                    self._field_schema_type_code(field_types.get(index_column))
+                    if field_types
+                    else None
+                )
                 index_value = self._normalize_index_value(raw_value, field_type)
                 if index_value is None:
                     continue
@@ -921,7 +964,7 @@ class DataConverter:
         return analysis
 
     def convert_field_value_safe(
-        self, field_name: str, value, field_types: Optional[Dict[str, int]] = None
+        self, field_name: str, value, field_types: Optional[Dict[str, Any]] = None
     ):
         """安全的字段值转换"""
         # 多维表格模式使用复杂转换
@@ -933,7 +976,20 @@ class DataConverter:
             if field_types is None or field_name not in field_types:
                 return self.smart_convert_value(value)
 
-            field_type = field_types[field_name]
+            field_schema = field_types[field_name]
+            from api.bitable_backend import FieldKind, FieldSchema
+
+            if isinstance(field_schema, FieldSchema):
+                if (
+                    not field_schema.writable
+                    or field_schema.kind is FieldKind.UNSUPPORTED
+                ):
+                    raise ValueError(f"字段 '{field_name}' 不可写或类型不受支持")
+                if field_schema.kind is FieldKind.ATTACHMENT:
+                    raise ValueError(f"字段 '{field_name}' 的附件写入首轮不支持")
+            field_type = self._field_schema_type_code(field_schema)
+            if field_type is None:
+                raise ValueError(f"字段 '{field_name}' 缺少可用 canonical 类型映射")
 
             # 强制转换为目标类型，按飞书字段类型进行转换
             try:
@@ -946,6 +1002,8 @@ class DataConverter:
                 else:
                     self.conversion_stats["failed"] += 1
                     return None
+            except ValueError:
+                raise
             except Exception as e:
                 self.logger.warning(
                     f"字段 '{field_name}' 强制转换失败: {e}, 原始值: '{value}'"
@@ -1534,7 +1592,7 @@ class DataConverter:
     # ========== 统一接口方法 ==========
 
     def df_to_records(
-        self, df: pd.DataFrame, field_types: Optional[Dict[str, int]] = None
+        self, df: pd.DataFrame, field_types: Optional[Dict[str, Any]] = None
     ) -> List[Dict]:
         """将DataFrame转换为飞书记录格式（多维表格模式）"""
         if self.target_type != TargetType.BITABLE:

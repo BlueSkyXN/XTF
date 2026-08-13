@@ -289,3 +289,20 @@ def test_real_transport_does_not_multiply_http_retries(monkeypatch):
     assert api.batch_create_records("app", "table", [{"fields": {}}]) is False
 
     assert request.call_count == 4
+
+
+@pytest.mark.parametrize(
+    ("field_type", "display_name"),
+    [
+        (18, "单向关联"),
+        (19, "查找引用"),
+        (20, "公式"),
+        (21, "双向关联"),
+        (22, "地理位置"),
+        (23, "群组"),
+    ],
+)
+def test_field_type_display_mapping_18_to_23(field_type, display_name):
+    api, _ = make_api([])
+
+    assert api._get_field_type_display_name(field_type) == display_name

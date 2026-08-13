@@ -173,3 +173,30 @@ def test_unified_client_without_injected_transport_uses_requested_controls():
 
     assert client.api_client.max_retries == 7
     assert client.api_client.rate_limiter.delay == 0.25
+
+
+def test_unified_client_creates_explicit_typed_bitable_backends():
+    from api import BaseV3Backend, BitableV1Backend
+
+    transport = Mock()
+    client = XTFFeishuClient("cli_test", "secret", api_client=transport)
+
+    base = client.bitable_backend("base_v3", user_id_type="union_id")
+    legacy = client.bitable_backend("bitable_v1", user_id_type="user_id")
+
+    assert isinstance(base, BaseV3Backend)
+    assert isinstance(legacy, BitableV1Backend)
+    assert base.auth is client.auth
+    assert legacy.auth is client.auth
+    assert base.api_client is transport
+    assert legacy.api_client is transport
+    assert base.user_id_type.value == "union_id"
+    assert legacy.user_id_type.value == "user_id"
+
+
+@pytest.mark.parametrize("backend", ["auto", "v3", "unknown"])
+def test_unified_client_rejects_implicit_or_unknown_backend(backend):
+    client = XTFFeishuClient("cli_test", "secret", api_client=Mock())
+
+    with pytest.raises(ValueError, match="base_v3.*bitable_v1"):
+        client.bitable_backend(backend)
