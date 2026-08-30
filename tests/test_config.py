@@ -169,6 +169,7 @@ class TestBitableSourceConfig:
                 sync_mode=SyncMode.CLONE,
             )
 
+
 class TestSelectiveSyncConfig:
     """选择性同步配置测试"""
 

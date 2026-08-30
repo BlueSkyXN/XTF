@@ -7,6 +7,7 @@
 ## 目录
 
 - [1. 同步模式概览](#1-同步模式概览)
+- [1.1 多维表格到多维表格的差异同步](#11-多维表格到多维表格的差异同步)
 - [2. Full 模式（全量同步）](#2-full-模式全量同步)
 - [3. Incremental 模式（增量同步）](#3-incremental-模式增量同步)
 - [4. Overwrite 模式（覆盖同步）](#4-overwrite-模式覆盖同步)
@@ -22,22 +23,68 @@
 
 ## 1. 同步模式概览
 
-XTF 支持四种同步模式，通过 `sync_mode` 参数指定：
+XTF 支持四种同步模式，通过 YAML v2 的 `sync.mode` 或 `XTF sync --mode` 指定：
 
 | 模式 | 说明 | 已存在记录 | 不存在记录 | 数据安全 | 需要索引列 |
 |------|------|-----------|-----------|----------|-----------|
 | **full** | 全量同步 | 更新 | 新增 | ⭐⭐⭐⭐⭐ 最安全 | 推荐 |
 | **incremental** | 增量同步 | 跳过 | 新增 | ⭐⭐⭐⭐⭐ 最安全 | 推荐 |
-| **overwrite** | 覆盖同步 | 删除后重建 | 新增 | ⭐⭐⭐ 中等 | 必需 |
-| **clone** | 克隆同步 | 全部清除 | 全部创建 | ⭐ 危险 | 不需要 |
+| **overwrite** | 覆盖同步 | 删除后重建 | 新增 | ⚠️ 需要 `--allow-delete` | 必需 |
+| **clone** | 克隆同步 | 全部清除 | 全部创建 | 🔴 需要 `--allow-delete` | 不需要 |
 
-> **索引列说明**：索引列（`index_column`）用于在本地数据和远程数据之间建立匹配关系。值必须具有唯一性（如 ID、编号、工号等）。
+> **索引列说明**：索引列（`sync.index.column` / `--index-column`）用于建立匹配关系，值必须唯一。日期时间默认统一到 UTC 后按完整毫秒匹配，只有显式选择 `day` 才按本地日期匹配。
 
 ```bash
 # 使用方式
-python XTF.py --sync-mode full --index-column "ID"
-python XTF.py --sync-mode clone  # 不需要索引列
+python3 XTF.py sync --mode full --index-column "ID"
+python3 XTF.py sync --mode clone --dry-run
+python3 XTF.py sync --mode clone --allow-delete
 ```
+
+---
+
+## 1.1 多维表格到多维表格的差异同步
+
+设置 `source.type: bitable` 后，XTF 从源表读取记录并写入既有目标表。这个能力只复制
+数据，不创建新 Base，不复制视图、权限或自动化，也不会删除目标表中多余的记录。
+
+```yaml
+schema_version: 2
+source:
+  type: bitable
+  bitable:
+    app_token: "app_source"
+    table_id: "tbl_source"
+target:
+  type: bitable
+  bitable:
+    app_token: "app_target"
+    table_id: "tbl_target"
+    api_backend: base_v3
+sync:
+  mode: full
+  index:
+    column: ID
+    datetime_granularity: exact
+```
+
+执行：
+
+```bash
+python3 XTF.py sync --source-type bitable --mode full --config config.yaml
+python3 XTF.py sync --source-type bitable --mode full --config config.yaml --dry-run
+```
+
+模式语义：
+
+- `full`：新增目标缺失记录，只更新已有记录中真正变化的字段；源表没有而目标表已有的
+  记录保持不变。
+- `incremental`：只新增目标缺失记录；目标已存在的索引全部跳过。
+
+源、目标记录都按索引列唯一匹配；源表索引为空、任一侧索引重复、分页读取
+不完整、字段缺失或类型不兼容时，会在写入前停止。目标字段必须预先存在；公式、附件、
+系统字段以及需要跨表记录 ID 映射的关联字段不作为普通数据复制。`sync.selective` 可用于
+限定字段范围。该数据源明确不支持 `overwrite` / `clone`，避免把差异同步误用为破坏性重建。
 
 ---
 
@@ -276,14 +323,14 @@ python XTF.py --sync-mode clone  # 不需要索引列
 | 公式保护支持 | ✅ | ❌ | ❌ | ❌ |
 | 智能字段配置 | ❌ | ❌ | ❌ | ✅ |
 
-`sheet_protect_formulas: true` 仅允许与 `full` 组合；配置层会拒绝其他模式。
+`target.sheet.protect_formulas: true` 仅允许与 `sync.mode: full` 组合；配置层会拒绝其他模式。
 `full` 双读失败、公式列状态不明、缺少索引列时均停止写入，不会退化成 clone。
 
 ---
 
 ## 7. 索引列机制
 
-索引列 (`index_column`) 是数据比对的关键，决定了本地记录与远程记录的匹配关系。
+索引列 (`sync.index.column` / `--index-column`) 是数据比对的关键，决定了源记录与目标记录的匹配关系。
 
 ### 工作原理
 
@@ -300,7 +347,9 @@ python XTF.py --sync-mode clone  # 不需要索引列
 
 ### 注意事项
 
-- **唯一性**：建议选择唯一性强的列（如 ID、编号），重复索引值会影响匹配准确性
+- **唯一性**：必须选择唯一性强的列（如 ID、编号）；重复或空索引在严格路径中会停止写入
+- **日期时间**：默认 `exact` 统一到 UTC 后保留完整毫秒；`day` 必须显式配置，且同日多条会触发重复保护
+- **数字时间戳边界**：epoch seconds / milliseconds 仅在 2000-01-01～2100-01-01 范围内自动识别，范围外不猜测单位
 - **位置无关**：索引列可以是任意列，不要求在第一列
 - **Bitable**：通过字段值精确匹配，支持循环检测防止无限翻页
 - **Sheet**：通过列名匹配到对应列，再按值匹配到行号
@@ -319,13 +368,14 @@ python XTF.py --sync-mode clone  # 不需要索引列
 ### 配置方式
 
 ```yaml
-selective_sync:
-  enabled: true
-  columns: ["salary", "department", "last_updated"]
-  auto_include_index: true         # 自动包含索引列
-  optimize_ranges: true            # 合并相邻列范围（仅 Sheet）
-  max_gap_for_merge: 2             # 0 禁用；正数仅合并相邻目标列（仅 Sheet）
-  preserve_column_order: true      # 保持原始列顺序
+sync:
+  selective:
+    enabled: true
+    columns: ["salary", "department", "last_updated"]
+    auto_include_index: true         # 自动包含索引列
+    optimize_ranges: true            # 合并相邻列范围（仅 Sheet）
+    max_gap_for_merge: 2             # 0 禁用；正数仅合并相邻目标列（仅 Sheet）
+    preserve_column_order: true      # 保持原始列顺序
 ```
 
 ### 双平台实现差异
@@ -416,7 +466,7 @@ append 与 Base v3 create 没有已确认幂等键，因此 transport 无响应�
 batch update 仍使用有界 transport policy。
 
 `verify_remote_writes: true` 时对可证明落点的数据 mutation 做 values 读回；mismatch、
-incomplete 或范围未知会阻止后续阶段。`sheet_verify_formulas: true` 时进一步对成功范围
+incomplete 或范围未知会阻止后续阶段。`target.sheet.verify_formulas: true` 时进一步对成功范围
 执行 Sheet AI `verify_formula`；只有 `success + has_more=false` 通过。两种验证都不是事务，
 不会回滚已经被服务端接受的前缀。
 
@@ -481,40 +531,50 @@ incremental   full   overwrite   clone
 
 ```yaml
 # 最安全的日常同步配置
-sync_mode: "full"
-index_column: "ID"
+sync:
+  mode: full
+  index:
+    column: ID
+    datetime_granularity: exact
 ```
 
 ```yaml
 # 只追加新数据（日志/交易记录）
-sync_mode: "incremental"
-index_column: "交易编号"
+sync:
+  mode: incremental
+  index:
+    column: 交易编号
 ```
 
 ```yaml
 # 本地数据优先覆盖
-sync_mode: "overwrite"
-index_column: "工号"
+sync:
+  mode: overwrite
+  index:
+    column: 工号
 ```
 
 ```yaml
-# 完全重建（请先备份！）
-sync_mode: "clone"
-# 不需要 index_column
+# 完全重建（正式执行还需要 --allow-delete）
+sync:
+  mode: clone
 ```
 
 ```yaml
 # 只更新薪资和部门列
-sync_mode: "full"
-index_column: "工号"
-selective_sync:
-  enabled: true
-  columns: ["薪资", "部门", "更新时间"]
+sync:
+  mode: full
+  index:
+    column: 工号
+  selective:
+    enabled: true
+    columns: ["薪资", "部门", "更新时间"]
 ```
 
 ```bash
 # 命令行快速使用
-python XTF.py --sync-mode full --index-column "ID"
-python XTF.py --sync-mode incremental --index-column "ID"
-python XTF.py --sync-mode clone
+python3 XTF.py sync --mode full --index-column "ID"
+python3 XTF.py sync --mode incremental --index-column "ID"
+python3 XTF.py sync --mode clone --dry-run
+python3 XTF.py sync --mode clone --allow-delete
 ```

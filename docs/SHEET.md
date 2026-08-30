@@ -182,13 +182,13 @@ get_info(范围) → batch_update(清空) → values PUT(全部写入)
 
 ### 双读策略
 
-当 `sheet_validate_results: true` 或 `sheet_protect_formulas: true` 时，系统执行双读：
+当 `target.sheet.validate_results: true` 或 `target.sheet.protect_formulas: true` 时，系统执行双读：
 
 ```
-第一次读取：sheet_value_render_option = "Formula"
+第一次读取：target.sheet.value_render_option = "Formula"
     → 获取公式文本，识别哪些列包含公式
 
-第二次读取：sheet_value_render_option = "FormattedValue"
+第二次读取：target.sheet.value_render_option = "FormattedValue"
     → 获取计算后的结果值，用于差异对比
 ```
 
@@ -206,8 +206,8 @@ get_info(范围) → batch_update(清空) → values PUT(全部写入)
   └─ 数据列 → 正常同步
 ```
 
-当 `sheet_protect_formulas: true` 时，仅支持 `sync_mode: full`：
-1. 自动启用 `sheet_validate_results: true`
+当 `target.sheet.protect_formulas: true` 时，仅支持 `sync.mode: full`：
+1. 自动启用 `target.sheet.validate_results: true`
 2. 配置加载时要求有效索引列，用于不移动行地精确匹配
 3. 双读任一步失败或无法确认公式列时停止写入
 4. 从同步列表中移除公式列，数据列使用精确列 range 写入
@@ -217,7 +217,7 @@ get_info(范围) → batch_update(清空) → values PUT(全部写入)
 
 ### 写后 Sheet AI 公式验证
 
-`sheet_verify_formulas: true` 是独立的写后门禁，不由 `sheet_protect_formulas` 自动开启。
+`target.sheet.verify_formulas: true` 是独立的写后门禁，不由公式保护自动开启。
 同步引擎使用 typed mutation receipt 中已成功写入的实际行区间，按
 `start_column + 当前表头宽度` 构造不带 sheet prefix 的 A1 ranges，并调用：
 
@@ -230,7 +230,7 @@ POST /open-apis/sheet_ai/v2/spreadsheets/{token}/tools/invoke_read
 actual range 时不会猜测落点或改扫全表，而是报告验证范围未知。XTF 只验证既有公式，
 不会为新增行生成、复制或平移公式。
 
-`sheet_validate_results` 仍保持写前 `Formula` / `FormattedValue` 双读与差异报告职责，
+`target.sheet.validate_results` 仍保持写前 `Formula` / `FormattedValue` 双读与差异报告职责，
 没有被改造成写后验证。
 
 ---

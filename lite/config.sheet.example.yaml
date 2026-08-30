@@ -1,0 +1,15 @@
+# Legacy flat template for the archived XTF-Sheet binary.
+# This file is not accepted by the XTF 2.0 main CLI.
+file_path: data.xlsx
+app_id: cli_your_app_id
+app_secret: your_app_secret
+spreadsheet_token: your_spreadsheet_token
+sheet_id: your_sheet_id
+sync_mode: full
+index_column: ID
+start_row: 1
+start_column: A
+batch_size: 1000
+rate_limit_delay: 0.1
+max_retries: 3
+log_level: INFO

@@ -31,8 +31,8 @@ XTF 提供四种字段类型策略，控制如何将 Excel 列映射为飞书字
 | **intelligence** | 全部 8 种类型 | 🔴 高 | 高质量数据 + 进阶用户 |
 
 ```bash
-python XTF.py --field-type-strategy base       # 默认推荐
-python XTF.py --field-type-strategy intelligence  # 全面智能
+python3 XTF.py sync --field-type-strategy base          # 默认推荐
+python3 XTF.py sync --field-type-strategy intelligence  # 全面智能
 ```
 
 ---

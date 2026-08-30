@@ -39,30 +39,33 @@
 
 ### 1.1 系统定位
 
-XTF (Excel To Feishu) 是一个企业级数据同步工具，将本地 Excel/CSV 文件智能同步到飞书平台。支持多维表格 (Bitable) 和电子表格 (Sheet) 两种目标，通过统一引擎实现四种同步模式。
+XTF 2.0 是一个 flags-first、可审计的同步 CLI，将本地 Excel/CSV 或另一张 Bitable 的数据同步到飞书 Bitable/Sheet。同步先形成只读 `SyncPlan`，再由 executor 按 action 顺序执行并返回结构化 `SyncOutcome`。
 
 ### 1.2 设计哲学
 
 | 原则 | 实现方式 |
 |------|----------|
-| **统一入口** | 单个 `XTF.py` 统一处理 Bitable 和 Sheet 两种目标 |
+| **单一 CLI** | `XTF.py` 是薄入口，所有 parser/config/output 行为由 `xtf_cli/` 统一管理 |
 | **策略模式** | 同步模式、字段类型策略、重试策略均可配置切换 |
 | **渐进增强** | 从基础功能（raw/base）到高级功能（intelligence/advanced_control）逐步开启 |
 | **防御式编程** | 三层上传保障、自动分块、二分重试、频控保护 |
-| **配置驱动** | YAML 配置 + CLI 覆盖，支持多环境灵活切换 |
+| **Flags-first** | 全部配置都可由 CLI 覆盖，严格 YAML v2 作为可复用 preset |
+| **计划与执行分离** | dry-run 与正式执行共享 planner；dry-run 可以读远端但绝不 mutation |
+| **证据可见** | plan、applied prefix、verification 和 error 通过 human/JSON outcome 输出 |
 
-### 1.3 四层架构
+### 1.3 五层架构
 
 ```
 ┌─────────────────────────────────────────────────────────┐
 │                    入口层 (Entry)                         │
-│   XTF.py — CLI 解析、配置加载、流程编排                     │
+│   XTF.py — 薄入口，raise SystemExit(main())               │
 ├─────────────────────────────────────────────────────────┤
-│                    配置层 (Config)                        │
-│   core/config.py — SyncConfig 数据类、验证、优先级合并       │
+│                    CLI 层 (CLI)                           │
+│   xtf_cli — parser、config v2、dispatch、human/JSON 输出   │
 ├─────────────────────────────────────────────────────────┤
-│                    引擎层 (Engine)                        │
-│   core/engine.py    — XTFSyncEngine 同步引擎              │
+│                    计划/引擎层 (Core)                     │
+│   core/plan.py      — SyncPlan / PlanAction / Outcome     │
+│   core/engine.py    — read-only planner + executor        │
 │   core/converter.py — DataConverter 数据转换器             │
 │   core/control.py   — 高级重试与频控控制器                  │
 ├─────────────────────────────────────────────────────────┤
@@ -78,12 +81,22 @@ XTF (Excel To Feishu) 是一个企业级数据同步工具，将本地 Excel/CSV
 ### 1.4 核心组件交互
 
 ```
-XTF.py (入口)
+XTF.py (薄入口)
   │
-  ├─→ ConfigManager.load_config()
-  │     └─→ SyncConfig (配置数据类)
+  └─→ xtf_cli.main(argv)
+        ├─→ 单一 argparse parser
+        ├─→ config v2 resolver
+        │     ├─→ CLI
+        │     ├─→ XTF_APP_SECRET
+        │     ├─→ YAML v2
+        │     └─→ target defaults
+        ├─→ XTFSyncEngine.plan(...)
+        │     └─→ ordered PlanAction（零 mutation）
+        ├─→ --dry-run → renderer
+        └─→ execute_plan(plan)
+              └─→ SyncOutcome → human / JSON renderer
   │
-  ├─→ XTFSyncEngine(config)
+XTFSyncEngine(config)
   │     ├─→ RetryableAPIClient (共享重试、频控)
   │     ├─→ FeishuAuth(app_id, app_secret, api_client)
   │     │     └─→ tenant_access_token (自动缓存 & 刷新)
@@ -97,58 +110,58 @@ XTF.py (入口)
   │           ├─→ RetryStrategy (指数/线性/固定)
   │           └─→ RateLimitStrategy (固定/滑动窗/固定窗)
   │
-  └─→ engine.sync(DataFrame)
-        ├─→ sync_full()
-        ├─→ sync_incremental()
-        ├─→ sync_overwrite()
-        └─→ sync_clone()
+  └─→ source_type
+        ├─→ file → engine.sync(DataFrame)
+        │            ├─→ sync_full()
+        │            ├─→ sync_incremental()
+        │            ├─→ sync_overwrite()
+        │            └─→ sync_clone()
+        └─→ bitable → engine.sync_bitable_source()
+                       └─→ 按索引新增缺失记录 / 更新真实差异
 ```
 
 ---
 
-## 2. 入口层
+## 2. CLI 与入口层
 
 > 源码：[`XTF.py`](../XTF.py)
 
-### 2.1 统一入口 XTF.py
+### 2.1 薄入口 XTF.py
 
-`XTF.py` 是整个系统的唯一入口，负责：
+`XTF.py` 不再承载配置、读取和同步分支，只负责调用 CLI main 并将返回值作为进程退出码。
 
-1. **初始化日志**：创建控制台 + 文件双输出（`logs/xtf_{target}_{timestamp}.log`）
-2. **打印横幅**：显示版本号、Excel 引擎信息、支持特性
-3. **加载配置**：解析 CLI 参数 → 合并 YAML 配置 → 构建 `SyncConfig`
-4. **读取数据**：使用 `ExcelReader` 读取 Excel/CSV 为 DataFrame
-5. **执行同步**：调用 `XTFSyncEngine.sync(df)` 完成同步
-6. **输出报告**：显示同步结果、耗时、飞书文档链接
+1. `--help` / `--version` 无配置、网络或日志副作用。
+2. `sync`、`config`、`doctor` 共用一个 parser。
+3. CLI resolver 合并 flags、ENV、YAML v2 和 defaults，并记录每个值的来源。
+4. planner 完成读取和分类，executor 才获得 mutation 权限。
+5. renderer 分离 stdout 最终结果与 stderr 诊断。
 
-### 2.2 目标类型自动推断
+### 2.2 配置发现与优先级
 
-当用户未指定 `--target-type` 时，系统按以下顺序推断：
+未传 `--config` 时可自动发现 `./config.yaml`；显式配置路径缺失必须失败。目标类型必须由 CLI 或 YAML 明确提供，不再静默默认到另一个远端资源。
 
 ```
-1. CLI 参数 --target-type          (最高优先级)
-2. 配置文件 target_type 字段
-3. 智能推断：
-   ├─ 有 app_token + table_id      → bitable
-   └─ 有 spreadsheet_token + sheet_id → sheet
-4. 默认值：bitable                  (最低优先级)
+app_secret: CLI > XTF_APP_SECRET > YAML
+其他配置:   CLI > YAML > target-specific defaults
 ```
 
-> 源码：`core/config.py` → `parse_target_type()`
+配置 resolver 是纯解析/验证逻辑，不调用 Feishu API。
 
 ### 2.3 CLI 参数体系
 
-XTF 支持 20+ CLI 参数，覆盖配置文件中的大部分选项：
+XTF 2.0 对每个有效 `SyncConfig` leaf 提供显式 override，并按功能分组：
 
 | 分类 | 参数 | 说明 |
 |------|------|------|
-| **基础** | `--config`, `--file-path`, `--app-id`, `--app-secret`, `--target-type` | 必要连接信息 |
-| **Bitable** | `--app-token`, `--table-id`, `--create-missing-fields`, `--no-create-fields` | 多维表格专用 |
+| **Auth** | `--app-id`, `--app-secret` | 应用身份；secret 也可来自 ENV |
+| **Source** | `--source-type`, `--file`, `--source-app-token`, `--source-table-id` | 本地或远端数据源 |
+| **源 Bitable** | `--source-app-token`, `--source-table-id` | 远端多维表格数据源 |
+| **Bitable** | `--target-app-token`, `--target-table-id`, backend、字段创建 | Bitable 目标 |
 | **Sheet** | `--spreadsheet-token`, `--sheet-id`, `--start-row`, `--start-column` | 电子表格专用 |
-| **同步** | `--sync-mode`, `--index-column` | 同步行为控制 |
+| **同步** | `--mode`, `--index-column`, `--datetime-index-granularity` | 同步行为控制 |
 | **性能** | `--batch-size`, `--rate-limit-delay`, `--max-retries` | 性能调优 |
 | **策略** | `--field-type-strategy` | 字段类型策略 |
-| **日志** | `--log-level` | 日志级别 |
+| **Output** | `--dry-run`, `--allow-delete`, `--json`, `--quiet`, `--log-level` | 计划、安全和自动化输出 |
 
 > 详细参数说明：[CONFIG.md](./CONFIG.md)
 
@@ -166,10 +179,14 @@ XTF 支持 20+ CLI 参数，覆盖配置文件中的大部分选项：
 @dataclass
 class SyncConfig:
     # 基础配置（必需）
-    file_path: str
+    file_path: Optional[str]          # bitable 数据源时不需要本地文件
     app_id: str
     app_secret: str
     target_type: TargetType           # bitable | sheet
+
+    source_type: SourceType            # file | bitable
+    source_app_token: Optional[str]    # 源多维表格 Token
+    source_table_id: Optional[str]     # 源数据表 ID
 
     # 多维表格配置
     app_token: Optional[str]          # 多维表格应用 Token
@@ -204,10 +221,11 @@ class SyncConfig:
 ### 3.2 配置优先级
 
 ```
-CLI 参数 (最高)  →  YAML 配置文件  →  智能推断  →  系统默认值 (最低)
+app_secret: CLI → XTF_APP_SECRET → YAML → missing error
+其他配置:   CLI → YAML → target-specific defaults
 ```
 
-**智能推断示例**：
+**目标默认示例**：
 - Bitable 默认 `batch_size=500`，`rate_limit_delay=0.01`
 - Sheet 默认 `batch_size=1000`，`rate_limit_delay=0.1`
 - `sheet_protect_formulas=True` 时自动启用 `sheet_validate_results=True`
@@ -220,8 +238,9 @@ CLI 参数 (最高)  →  YAML 配置文件  →  智能推断  →  系统默�
 | 验证项 | 规则 | 错误类型 |
 |--------|------|----------|
 | 目标类型 | 必须为 `bitable` 或 `sheet` | `ValueError` |
-| Bitable 必填 | `app_token` + `table_id` 不能为空 | `ValueError` |
+| Bitable 必填 | 目标 `app_token` + `table_id` 不能为空 | `ValueError` |
 | Sheet 必填 | `spreadsheet_token` + `sheet_id` 不能为空 | `ValueError` |
+| 远端源表限制 | 需要 `source_app_token` + `source_table_id` + `index_column`，只支持 `full` / `incremental` | `ValueError` |
 | 选择性同步 | `columns` 非空列表；不含重复项；不支持 clone 模式 | `ValueError` |
 | 分块参数 | `sheet_scan_max_rows/cols > 0`，`sheet_write_max_rows/cols > 0` | `ValueError` |
 | 合并间隔 | `max_gap_for_merge` 范围 0-50 | `ValueError` |
@@ -241,12 +260,16 @@ CLI 参数 (最高)  →  YAML 配置文件  →  智能推断  →  系统默�
 
 | 方法 | 签名 | 说明 |
 |------|------|------|
+| `plan()` | `(df: Optional[DataFrame]) → SyncPlan` | 只读生成 ordered actions；禁止 mutation |
+| `execute_plan()` | `(plan: SyncPlan) → SyncOutcome` | 按计划执行，首错停止并保留 applied prefix |
 | `sync()` | `(df: DataFrame) → bool` | 主入口，根据 sync_mode 分发 |
+| `sync_bitable_source()` | `() → bool` | 从源 Bitable 读取并差异写入既有目标表 |
 | `sync_full()` | `(df: DataFrame) → bool` | 全量同步 |
 | `sync_incremental()` | `(df: DataFrame) → bool` | 增量同步 |
 | `sync_overwrite()` | `(df: DataFrame) → bool` | 覆盖同步 |
 | `sync_clone()` | `(df: DataFrame) → bool` | 克隆同步 |
-| `ensure_fields_exist()` | `(df: DataFrame) → Tuple[bool, Dict]` | 确保字段存在（Bitable） |
+| `plan_fields()` | `(df: DataFrame) → PlanAction` | 只读分析缺失字段和预测 schema |
+| `ensure_fields_exist()` | `(df: DataFrame) → Tuple[bool, Dict]` | 兼容 wrapper；正式执行时创建字段 |
 | `get_all_bitable_records()` | `() → List[Dict]` | 获取全部 Bitable 记录 |
 | `get_current_sheet_data()` | `() → DataFrame` | 获取当前 Sheet 数据 |
 | `process_in_batches()` | `(items, batch_size, func) → bool` | 通用批处理 |
@@ -301,7 +324,7 @@ def sync(self, df):
 
 > 源码：[`core/control.py`](../core/control.py)
 
-当 `enable_advanced_control: true` 时，系统使用高级控制器替代默认的简单重试和固定延迟。
+当 YAML v2 的 `control.advanced.enabled: true`（内部字段 `enable_advanced_control`）时，系统使用高级控制器替代默认的简单重试和固定延迟。
 
 **组件架构**：
 
@@ -440,8 +463,8 @@ Sheet 元数据不可用时可以用配置化窗口做有界诊断读取，但�
 完整的数据同步流程（以 Full 模式为例）：
 
 ```
-第1步：初始化
-  XTF.py → 解析 CLI → 加载 YAML → 构建 SyncConfig → 初始化日志
+第1步：解析
+  XTF.py → xtf_cli → CLI/ENV/YAML v2/defaults → SyncConfig + sources
 
 第2步：读取数据
   ExcelReader → 读取 Excel/CSV → pandas DataFrame
@@ -451,25 +474,22 @@ Sheet 元数据不可用时可以用配置化窗口做有界诊断读取，但�
 第3步：初始化引擎
   XTFSyncEngine(config) → 初始化 FeishuAuth → 初始化 API 客户端
 
-第4步：字段准备 (仅 Bitable)
+第4步：只读规划
   ├─ 获取远程字段列表
   ├─ DataConverter 分析 DataFrame 列类型
-  ├─ 创建缺失字段 (如 create_missing_fields=True)
-  └─ 生成字段类型映射
+  ├─ 生成缺失字段 action（不创建）
+  ├─ 分类 create/update/delete/clear/write actions
+  └─ 生成 SyncPlan；dry-run 到此结束
 
-第5步：数据同步
-  ├─ 获取远程现有数据
-  ├─ 构建索引映射 (index_column → 记录ID/行号)
-  ├─ 数据分类：更新 vs 新增
-  ├─ 应用选择性同步过滤 (如启用)
-  ├─ 应用字段类型转换
-  └─ 批量执行 API 操作
+第5步：计划执行
+  ├─ destructive gate 检查 --allow-delete
+  ├─ 按 action 顺序 mutation
+  ├─ 首错停止并保留 applied prefix
+  └─ 生成 SyncOutcome 与 verification
 
-第6步：结果报告
-  ├─ 转换统计报告（成功率、问题字段）
-  ├─ 同步统计（更新/新增/删除数量）
-  ├─ 列差异报告（如启用公式保护）
-  └─ 输出飞书文档链接
+第6步：输出
+  ├─ human：最终 stdout，诊断 stderr
+  └─ JSON：stdout 单一文档，退出码表达结果
 ```
 
 ---
@@ -538,10 +558,12 @@ XTF 采用多层错误处理策略：
 
 ```
 XTF/
-├── XTF.py                    # 统一入口：CLI 解析、流程编排
+├── XTF.py                    # 薄入口：SystemExit(main())
+├── xtf_cli/                  # parser、v2 resolver、dispatch、renderer、version
 ├── core/
-│   ├── config.py             # 配置管理：SyncConfig、验证、优先级
-│   ├── engine.py             # 同步引擎：四种模式、选择性同步、公式保护
+│   ├── config.py             # SyncConfig 与业务组合验证
+│   ├── plan.py               # SyncPlan / PlanAction / SyncOutcome
+│   ├── engine.py             # planner + executor
 │   ├── converter.py          # 数据转换：类型分析、转换、统计报告
 │   └── control.py            # 高级控制：重试策略、频控策略
 ├── api/
@@ -554,7 +576,7 @@ XTF/
 ├── lite/                     # 旧版独立脚本（兼容保留）
 │   ├── XTF_Bitable.py
 │   └── XTF_Sheet.py
-├── config.example.yaml       # 配置模板
+├── config.example.yaml       # 主程序严格 YAML schema v2
 ├── requirements.txt          # 生产依赖
 ├── requirements-dev.txt      # 开发依赖
 ├── docs/                     # 文档目录

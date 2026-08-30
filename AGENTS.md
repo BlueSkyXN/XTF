@@ -16,7 +16,8 @@ XTF is a Python 3.10+ CLI tool that syncs local Excel or CSV data to Feishu Bita
 
 | Path | Responsibility | Local AGENTS.md | Read when |
 | --- | --- | --- | --- |
-| `XTF.py` | Unified CLI entrypoint, startup banner, config loading, logging setup, data-file read orchestration, sync dispatch, user-visible console output. | No | Change CLI flow, startup messages, config bootstrapping, logging, target inference display, or final sync reporting. |
+| `XTF.py` | Thin executable entrypoint that delegates to the XTF 2.0 CLI and exits with its status code. | No | Change the source/PyInstaller entrypoint or process-exit behavior. |
+| `xtf_cli/` | XTF 2.0 command parser, strict config-v2 resolver, command dispatch, output rendering, diagnostics, and version source. | No | Change subcommands, flags, config precedence/discovery, JSON/human output, exit codes, doctor behavior, or CLI versioning. |
 | `core/` | Configuration model, sync engine, field conversion, reader facade, retry/rate-limit strategies, destructive sync behavior, selective sync, Sheet formula protection. | Yes | Change config priority, defaults, validation, sync modes, batching, conversion strategies, selective sync, formula protection, retry, rate limiting, or cross-target engine behavior. |
 | `api/` | Public Feishu SDK facade, typed response/error contracts, auth, transport, pagination/batching helpers, and Bitable/Sheet wrappers. | Yes | Change public exports or constructor compatibility, token handling, typed errors, retry ownership, page tokens, batch failure semantics, Bitable operations, or Sheet ranges/chunks/styles. |
 | `utils/` | Side-effect-light helpers, currently Excel engine detection and smart Excel read support. | Yes | Change optional Excel engines, engine fallback, supported formats, import boundaries, helper side effects, or read error behavior. |
@@ -28,7 +29,7 @@ XTF is a Python 3.10+ CLI tool that syncs local Excel or CSV data to Feishu Bita
 | `.codex/` | Local agent/tooling metadata. | No | Avoid unless the user explicitly asks for local Codex configuration changes. |
 | `logs/` | Runtime log output. | No | Generated output; do not edit, commit, or use as stable test fixtures. |
 | `htmlcov/`, `.coverage`, `.pytest_cache/`, `.ruff_cache/`, `__pycache__/`, `build/`, `dist/`, `artifacts/` | Coverage, cache, build, and packaging output. | No | Generated output; ignore for implementation and commits. |
-| `config.example.yaml` | Committed configuration template and packaged default config source. | No | Change only with aligned code/docs/tests; CI packages it as `config.yaml` in release artifacts. |
+| `config.example.yaml` | Strict nested XTF 2.0 configuration template and packaged main-program config source. | No | Change only with aligned resolver/docs/tests; CI packages it as `config.yaml` for the main XTF artifact. |
 | `config.yaml` | Local real config, gitignored. | No | Use only for explicit local manual runs. Never commit or quote real credentials. |
 | `requirements.txt` | Runtime dependency list for the CLI and CI builds. | No | Change runtime dependencies or minimum versions. Keep workflows and docs aligned. |
 | `requirements-dev.txt` | Test/dev dependency list for pytest coverage and mocks. | No | Change pytest, coverage, mock, lint, or typecheck dependency assumptions. |
@@ -63,27 +64,28 @@ Run commands from the repository root unless noted. The repository uses `pip` wi
 | `python -m pip install -r requirements.txt` | Install runtime dependencies. | repo | Requires network and writes environment packages. |
 | `python -m pip install -r requirements-dev.txt` | Install pytest/coverage/mock test dependencies. | repo | Requires network and writes environment packages. |
 | `pytest tests/ -v` | Run the full pytest suite. | tests | No Feishu service required for unit tests. |
-| `pytest tests/ -v -m "not integration" --tb=short --cov=core --cov=api --cov=utils --cov-report=term` | CI-like unit test and coverage run without XML output. | tests/core/api/utils | No external Feishu service required; depends on installed test dependencies. |
+| `pytest tests/ -v -m "not integration" --tb=short --cov=core --cov=api --cov=utils --cov=xtf_cli --cov-report=term` | CI-like unit test and coverage run without XML output. | tests/core/api/utils/xtf_cli | No external Feishu service required; depends on installed test dependencies. |
 | `ruff check . --ignore E501,F401` | Ruff check used by CI. | repo | CI pins Ruff `0.15.13`; local `ruff` must be installed. |
 | `black --check .` | Formatting check only. | repo | Mirrors `.github/workflows/test.yml`; does not modify files. |
-| `mypy core/ api/ utils/ --ignore-missing-imports` | Type check package modules. | core/api/utils | Mirrors `.github/workflows/test.yml`; `mypy` must be installed. |
-| `python -m py_compile XTF.py core/*.py api/*.py utils/*.py` | Syntax check mainline Python files. | mainline | Mirrors `.github/workflows/test.yml`. |
+| `mypy core/ api/ utils/ xtf_cli/ --ignore-missing-imports` | Type check package modules. | core/api/utils/xtf_cli | Mirrors `.github/workflows/test.yml`; `mypy` must be installed. |
+| `python -m py_compile XTF.py core/*.py api/*.py utils/*.py xtf_cli/*.py` | Syntax check mainline Python files. | mainline | Mirrors `.github/workflows/test.yml`. |
 | `python -m py_compile lite/*.py` | Syntax check legacy standalone scripts. | lite | Use for `lite/` changes; CI build compiles through PyInstaller. |
-| `python XTF.py --target-type bitable --config config.yaml` | Manual Bitable sync run. | runtime | Requires valid local config, Feishu credentials, network, and may write/delete remote data. Use only when explicitly intended. |
-| `python XTF.py --target-type sheet --config config.yaml` | Manual Sheet sync run. | runtime | Requires valid local config, Feishu credentials, network, and may write/delete remote data. Use only when explicitly intended. |
+| `python XTF.py sync --config config.yaml --dry-run` | Build an exact read-only sync plan. | runtime | May use Feishu read APIs but must not call any mutation endpoint. |
+| `python XTF.py sync --config config.yaml` | Execute the configured sync. | runtime | Requires valid credentials/network and may write remote data; `overwrite`/`clone` additionally require `--allow-delete`. Use only when explicitly intended. |
 
 If the local machine lacks `python`, run the same module command with `python3` and report the substitution. Keep committed workflow/documentation command changes aligned with the actual CI commands.
 
 ## CI and build notes
 
-- `.github/workflows/test.yml` pins Ruff `0.15.13`, runs Ruff, Black check, MyPy, and `py_compile` on Python 3.11, then runs pytest with coverage on Ubuntu 22.04/Python 3.10-3.13, Ubuntu 24.04/Python 3.11-3.13, Windows/Python 3.10-3.12, and macOS ARM/Python 3.11-3.13.
+- `.github/workflows/test.yml` pins Ruff `0.15.13`, runs Ruff, Black check, MyPy, and `py_compile` across `core/`, `api/`, `utils/`, and `xtf_cli/` on Python 3.11, then runs pytest with matching coverage on Ubuntu 22.04/Python 3.10-3.13, Ubuntu 24.04/Python 3.11-3.13, Windows/Python 3.10-3.12, and macOS ARM/Python 3.11-3.13.
 - `.github/workflows/multi-platform-build.yml` installs PyInstaller in CI and builds three entrypoints: `XTF.py`, `lite/XTF_Sheet.py` as `XTF-Sheet`, and `lite/XTF_Bitable.py` as `XTF-Bitable`.
-- Build artifacts package `config.example.yaml` as `config.yaml`; changes to config template defaults are release-visible.
+- The main artifact packages `config.example.yaml` as `config.yaml`; legacy artifacts package the target-specific `lite/config.sheet.example.yaml` or `lite/config.bitable.example.yaml`. Changes to any template are release-visible.
 - Complete PyInstaller builds, platform bundles, release bundles, and release uploads require GitHub Actions. Do not treat them as default local validation.
 
 ## Architecture boundaries
 
-- `XTF.py` coordinates startup and orchestration. Keep reusable sync behavior in package modules.
+- `XTF.py` is a thin executable wrapper. Keep parsing, configuration resolution, command dispatch, rendering, and exit-code mapping in `xtf_cli/`.
+- `core/` owns sync planning and execution. A dry-run may perform remote reads but must never execute field, record, range, style, or validation mutations.
 - `core/` owns configuration semantics and sync behavior. It may call `api/` through explicit clients but must not embed raw Feishu HTTP request details.
 - `api/` owns the public SDK facade, typed Feishu responses/errors, auth headers, HTTP retry behavior, pagination, batch operations, and Sheet range/style/validation API calls. Preserve existing direct `FeishuAuth`/`BitableAPI`/`SheetAPI` construction and `api.__all__` unless a deliberate compatibility change is requested.
 - `utils/` must stay reusable and side-effect-light. It must not import remote sync clients or trigger network behavior.
@@ -94,7 +96,7 @@ If the local machine lacks `python`, run the same module command with `python3` 
 
 ## Global rules
 
-- Configuration priority is CLI arguments > YAML config > intelligent inference > defaults.
+- Configuration is flags-first. `app_secret` priority is CLI > `XTF_APP_SECRET` > YAML; every other value uses CLI > YAML > target-specific defaults. An unqualified command may discover `./config.yaml`, but an explicit missing `--config` path must fail.
 - Supported targets are `bitable` and `sheet`; shared changes must consider both unless the code path is target-specific by construction.
 - Sync modes are `full`, `incremental`, `overwrite`, and `clone`.
 - Treat `overwrite` and `clone` as destructive remote-data modes. Preserve clear logging, batching semantics, deletion scope, failure handling, and user-facing risk wording when touching them.
@@ -128,7 +130,7 @@ Use the smallest meaningful validation first, then expand based on blast radius.
 Default unit-test path:
 
 ```bash
-pytest tests/ -v -m "not integration" --tb=short --cov=core --cov=api --cov=utils --cov-report=term
+pytest tests/ -v -m "not integration" --tb=short --cov=core --cov=api --cov=utils --cov=xtf_cli --cov-report=term
 ```
 
 Default quality path:
@@ -136,8 +138,8 @@ Default quality path:
 ```bash
 ruff check . --ignore E501,F401
 black --check .
-mypy core/ api/ utils/ --ignore-missing-imports
-python -m py_compile XTF.py core/*.py api/*.py utils/*.py
+mypy core/ api/ utils/ xtf_cli/ --ignore-missing-imports
+python -m py_compile XTF.py core/*.py api/*.py utils/*.py xtf_cli/*.py
 ```
 
 Add `python -m py_compile lite/*.py` for legacy script changes.

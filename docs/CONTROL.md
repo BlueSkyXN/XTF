@@ -24,7 +24,7 @@
 
 ## 1. 概述
 
-XTF 默认使用简单的固定延迟和固定重试机制。当需要更精细的控制时，可通过 `enable_advanced_control: true` 启用高级策略系统。
+XTF 默认使用简单的固定延迟和固定重试机制。当需要更精细的控制时，可通过 `control.advanced.enabled: true` 启用高级策略系统。
 
 **架构**：
 
@@ -41,10 +41,12 @@ AdvancedController (线程安全单例)
 **启用方式**：
 
 ```yaml
-enable_advanced_control: true  # 开启高级控制
+control:
+  advanced:
+    enabled: true
 ```
 
-> 未启用时，系统使用 `rate_limit_delay` + `max_retries` 的简单模式。
+> 未启用时，系统使用 `control.rate_limit_delay` + `control.max_retries` 的简单模式。
 
 ---
 
@@ -77,10 +79,13 @@ enable_advanced_control: true  # 开启高级控制
 **配置**：
 
 ```yaml
-retry_strategy_type: "exponential_backoff"
-retry_initial_delay: 0.5    # 初始等待（秒）
-retry_multiplier: 2.0       # 倍增系数
-retry_max_wait_time: 60     # 最大等待时间（秒，可选）
+control:
+  advanced:
+    retry:
+      strategy: exponential_backoff
+      initial_delay: 0.5
+      multiplier: 2.0
+      max_wait_time: 60
 ```
 
 ### 2.2 线性增长 (linear_growth)
@@ -105,9 +110,12 @@ retry_max_wait_time: 60     # 最大等待时间（秒，可选）
 **配置**：
 
 ```yaml
-retry_strategy_type: "linear_growth"
-retry_initial_delay: 0.5    # 初始等待（秒）
-retry_increment: 0.5        # 每次增量（秒）
+control:
+  advanced:
+    retry:
+      strategy: linear_growth
+      initial_delay: 0.5
+      increment: 0.5
 ```
 
 ### 2.3 固定等待 (fixed_wait)
@@ -130,8 +138,11 @@ retry_increment: 0.5        # 每次增量（秒）
 **配置**：
 
 ```yaml
-retry_strategy_type: "fixed_wait"
-retry_initial_delay: 1.0    # 固定等待时间（秒）
+control:
+  advanced:
+    retry:
+      strategy: fixed_wait
+      initial_delay: 1.0
 ```
 
 ---
@@ -152,8 +163,11 @@ retry_initial_delay: 1.0    # 固定等待时间（秒）
 **配置**：
 
 ```yaml
-rate_limit_strategy_type: "fixed_wait"
-rate_limit_delay: 0.01  # 使用通用 rate_limit_delay 参数
+control:
+  rate_limit_delay: 0.01
+  advanced:
+    rate_limit:
+      strategy: fixed_wait
 ```
 
 ### 3.2 滑动窗口 (sliding_window)
@@ -175,9 +189,12 @@ rate_limit_delay: 0.01  # 使用通用 rate_limit_delay 参数
 **配置**：
 
 ```yaml
-rate_limit_strategy_type: "sliding_window"
-rate_limit_window_size: 1.0    # 时间窗口（秒）
-rate_limit_max_requests: 10    # 窗口内最大请求数
+control:
+  advanced:
+    rate_limit:
+      strategy: sliding_window
+      window_size: 1.0
+      max_requests: 10
 ```
 
 ### 3.3 固定窗口 (fixed_window)
@@ -197,9 +214,12 @@ rate_limit_max_requests: 10    # 窗口内最大请求数
 **配置**：
 
 ```yaml
-rate_limit_strategy_type: "fixed_window"
-rate_limit_window_size: 1.0    # 窗口大小（秒）
-rate_limit_max_requests: 10    # 每窗口最大请求数
+control:
+  advanced:
+    rate_limit:
+      strategy: fixed_window
+      window_size: 1.0
+      max_requests: 10
 ```
 
 ---
@@ -224,15 +244,12 @@ rate_limit_max_requests: 10    # 每窗口最大请求数
 适合生产环境、大数据集、网络不稳定场景。
 
 ```yaml
-enable_advanced_control: true
-retry_strategy_type: "exponential_backoff"
-retry_initial_delay: 1.0
-retry_multiplier: 2.0
-retry_max_wait_time: 60
-rate_limit_strategy_type: "sliding_window"
-rate_limit_window_size: 2.0
-rate_limit_max_requests: 5
-max_retries: 5
+control:
+  max_retries: 5
+  advanced:
+    enabled: true
+    retry: {strategy: exponential_backoff, initial_delay: 1.0, multiplier: 2.0, max_wait_time: 60}
+    rate_limit: {strategy: sliding_window, window_size: 2.0, max_requests: 5}
 ```
 
 ### 渐进方案 — 平衡模式
@@ -240,14 +257,12 @@ max_retries: 5
 适合日常使用、中等数据量。
 
 ```yaml
-enable_advanced_control: true
-retry_strategy_type: "exponential_backoff"
-retry_initial_delay: 0.5
-retry_multiplier: 2.0
-rate_limit_strategy_type: "sliding_window"
-rate_limit_window_size: 1.0
-rate_limit_max_requests: 10
-max_retries: 3
+control:
+  max_retries: 3
+  advanced:
+    enabled: true
+    retry: {strategy: exponential_backoff, initial_delay: 0.5, multiplier: 2.0}
+    rate_limit: {strategy: sliding_window, window_size: 1.0, max_requests: 10}
 ```
 
 ### 激进方案 — 性能优先
@@ -255,13 +270,13 @@ max_retries: 3
 适合网络良好、小数据集、限流宽松场景。
 
 ```yaml
-enable_advanced_control: true
-retry_strategy_type: "linear_growth"
-retry_initial_delay: 0.2
-retry_increment: 0.3
-rate_limit_strategy_type: "fixed_wait"
-rate_limit_delay: 0.1
-max_retries: 3
+control:
+  rate_limit_delay: 0.1
+  max_retries: 3
+  advanced:
+    enabled: true
+    retry: {strategy: linear_growth, initial_delay: 0.2, increment: 0.3}
+    rate_limit: {strategy: fixed_wait}
 ```
 
 ### 调试方案 — 详细观察
@@ -269,13 +284,15 @@ max_retries: 3
 适合排查问题、观察 API 行为。
 
 ```yaml
-enable_advanced_control: true
-retry_strategy_type: "fixed_wait"
-retry_initial_delay: 2.0
-rate_limit_strategy_type: "fixed_wait"
-rate_limit_delay: 1.0
-max_retries: 1
-log_level: DEBUG
+control:
+  rate_limit_delay: 1.0
+  max_retries: 1
+  advanced:
+    enabled: true
+    retry: {strategy: fixed_wait, initial_delay: 2.0}
+    rate_limit: {strategy: fixed_wait}
+output:
+  log_level: DEBUG
 ```
 
 ---
@@ -286,21 +303,21 @@ log_level: DEBUG
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `retry_strategy_type` | `str` | `exponential_backoff` | 策略类型 |
-| `retry_initial_delay` | `float` | `0.5` | 初始等待时间（秒） |
-| `retry_multiplier` | `float` | `2.0` | 指数退避乘数 |
-| `retry_increment` | `float` | `0.5` | 线性增长步长 |
-| `retry_max_wait_time` | `float` | `null` | 最大等待时间（秒） |
-| `max_retries` | `int` | `3` | 最大重试次数 |
+| `control.advanced.retry.strategy` | `str` | `exponential_backoff` | 策略类型 |
+| `control.advanced.retry.initial_delay` | `float` | `0.5` | 初始等待时间（秒） |
+| `control.advanced.retry.multiplier` | `float` | `2.0` | 指数退避乘数 |
+| `control.advanced.retry.increment` | `float` | `0.5` | 线性增长步长 |
+| `control.advanced.retry.max_wait_time` | `float` | `null` | 最大等待时间（秒） |
+| `control.max_retries` | `int` | `3` | 最大重试次数 |
 
 ### 频控参数
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `rate_limit_strategy_type` | `str` | `fixed_wait` | 策略类型 |
-| `rate_limit_window_size` | `float` | `1.0` | 时间窗口大小（秒） |
-| `rate_limit_max_requests` | `int` | `10` | 窗口内最大请求数 |
-| `rate_limit_delay` | `float` | `0.01` | 固定等待延迟（秒） |
+| `control.advanced.rate_limit.strategy` | `str` | `fixed_wait` | 策略类型 |
+| `control.advanced.rate_limit.window_size` | `float` | `1.0` | 时间窗口大小（秒） |
+| `control.advanced.rate_limit.max_requests` | `int` | `10` | 窗口内最大请求数 |
+| `control.rate_limit_delay` | `float` | `0.01` | 固定等待延迟（秒） |
 
 ---
 
@@ -387,20 +404,18 @@ INFO  - 批量操作完成: 500/500 条记录, 重试 2 次
 **建议的频控配置**：
 
 ```yaml
-# 查询密集型（大量数据拉取）
-rate_limit_strategy_type: "sliding_window"
-rate_limit_window_size: 1.0
-rate_limit_max_requests: 20   # 查询 API 官方上限
-
-# 写入密集型（大量数据同步）
-rate_limit_strategy_type: "sliding_window"
-rate_limit_window_size: 1.0
-rate_limit_max_requests: 50   # 写入 API 官方上限
+control:
+  advanced:
+    enabled: true
+    rate_limit:
+      strategy: sliding_window
+      window_size: 1.0
+      max_requests: 20  # 根据已验证的接口配额调整
 ```
 
 | 接口 | 限制 | 建议 |
 |------|------|------|
-| 多维表格查询操作 | 20 次/秒 | `rate_limit_max_requests: 20` |
-| 多维表格写入操作 | 50 次/秒 | `rate_limit_max_requests: 50` |
-| 电子表格读写 | ~100 次/秒 | `rate_limit_max_requests: 10-20` |
+| 多维表格查询操作 | 20 次/秒 | `control.advanced.rate_limit.max_requests: 20` |
+| 多维表格写入操作 | 50 次/秒 | 按实例实际配额设置 |
+| 电子表格读写 | ~100 次/秒 | 按实例实际配额设置 |
 | 单次请求体积 | ≤ 10MB | 使用分块 + 二分重试 |

@@ -5,17 +5,27 @@
 from unittest.mock import Mock, patch
 
 import pandas as pd
+import pytest
 
 from api.bitable_backend import (
     BitableBackend,
     BitableBackendKind,
     CanonicalRecord,
+    FieldKind,
+    FieldSchema,
     MutationOutcome,
     MutationReceipt,
     ReadbackStatus,
+    RecordReadResult,
 )
 from api.sheet import A1Range, FormulaVerificationResult, SheetAPI
-from core.config import SelectiveSyncConfig, SyncConfig, SyncMode, TargetType
+from core.config import (
+    SelectiveSyncConfig,
+    SourceType,
+    SyncConfig,
+    SyncMode,
+    TargetType,
+)
 from core.converter import DataConverter
 from core.engine import XTFSyncEngine
 
@@ -79,6 +89,159 @@ def test_engine_uses_unified_sdk_client(
     assert engine.api is api
     sdk.bitable_backend.assert_called_once_with(
         backend="base_v3", user_id_type="open_id"
+    )
+
+
+def make_bitable_source_engine(sync_mode=SyncMode.FULL):
+    engine = XTFSyncEngine.__new__(XTFSyncEngine)
+    engine.config = SyncConfig(
+        file_path=None,
+        app_id="cli_test",
+        app_secret="test_secret",
+        target_type=TargetType.BITABLE,
+        source_type=SourceType.BITABLE,
+        source_app_token="app_source",
+        source_table_id="tbl_source",
+        app_token="app_target",
+        table_id="tbl_target",
+        index_column="ID",
+        sync_mode=sync_mode,
+        verify_remote_writes=False,
+    )
+    engine.logger = Mock()
+    engine.converter = DataConverter(TargetType.BITABLE)
+    engine.api = Mock(spec=BitableBackend)
+    engine.api.max_batch_create_size = 500
+    engine.api.max_batch_update_size = 500
+    return engine
+
+
+def remote_copy_schemas():
+    return (
+        FieldSchema("fld_id", "ID", FieldKind.NUMBER, raw_type="number"),
+        FieldSchema("fld_name", "Name", FieldKind.TEXT, raw_type="text"),
+    )
+
+
+def remote_read(records, fields=None, *, complete=True):
+    return RecordReadResult(
+        records=tuple(records),
+        fields=tuple(fields or remote_copy_schemas()),
+        complete=complete,
+        backend=BitableBackendKind.BASE_V3,
+    )
+
+
+def test_bitable_source_full_only_writes_changed_and_missing_records():
+    engine = make_bitable_source_engine()
+    schemas = remote_copy_schemas()
+    engine.api.list_fields.side_effect = [schemas, schemas]
+    engine.api.list_records.side_effect = [
+        remote_read(
+            [
+                CanonicalRecord("src1", {"ID": 1, "Name": "new"}),
+                CanonicalRecord("src2", {"ID": 2, "Name": "added"}),
+                CanonicalRecord("src4", {"ID": 4, "Name": "unchanged"}),
+            ]
+        ),
+        remote_read(
+            [
+                CanonicalRecord("dst1", {"ID": 1, "Name": "old"}),
+                CanonicalRecord("dst3", {"ID": 3, "Name": "target only"}),
+                CanonicalRecord("dst4", {"ID": 4, "Name": "unchanged"}),
+            ]
+        ),
+    ]
+    updated = []
+    created = []
+
+    def batch_update(_app, _table, records):
+        updated.extend(records)
+        return MutationReceipt(
+            "batch_update",
+            BitableBackendKind.BASE_V3,
+            len(records),
+            accepted_count=len(records),
+        )
+
+    def batch_create(_app, _table, records):
+        created.extend(records)
+        return MutationReceipt(
+            "batch_create",
+            BitableBackendKind.BASE_V3,
+            len(records),
+            accepted_count=len(records),
+        )
+
+    engine.api.batch_update = batch_update
+    engine.api.batch_create = batch_create
+
+    assert engine.sync_bitable_source() is True
+    assert updated == [CanonicalRecord("dst1", {"Name": "new"})]
+    assert created == [CanonicalRecord(None, {"ID": 2, "Name": "added"})]
+    engine.api.batch_delete.assert_not_called()
+
+
+def test_bitable_source_incremental_skips_existing_changed_record():
+    engine = make_bitable_source_engine(SyncMode.INCREMENTAL)
+    schemas = remote_copy_schemas()
+    engine.api.list_fields.side_effect = [schemas, schemas]
+    engine.api.list_records.side_effect = [
+        remote_read(
+            [
+                CanonicalRecord("src1", {"ID": 1, "Name": "new"}),
+                CanonicalRecord("src2", {"ID": 2, "Name": "added"}),
+            ]
+        ),
+        remote_read([CanonicalRecord("dst1", {"ID": 1})], fields=(schemas[0],)),
+    ]
+    created = []
+
+    def batch_create(_app, _table, records):
+        created.extend(records)
+        return MutationReceipt(
+            "batch_create",
+            BitableBackendKind.BASE_V3,
+            len(records),
+            accepted_count=len(records),
+        )
+
+    engine.api.batch_create = batch_create
+
+    assert engine.sync_bitable_source() is True
+    assert created == [CanonicalRecord(None, {"ID": 2, "Name": "added"})]
+    engine.api.batch_update.assert_not_called()
+    engine.api.batch_delete.assert_not_called()
+
+
+def test_bitable_source_duplicate_index_stops_before_write():
+    engine = make_bitable_source_engine()
+    schemas = remote_copy_schemas()
+    engine.api.list_fields.side_effect = [schemas, schemas]
+    engine.api.list_records.side_effect = [
+        remote_read(
+            [
+                CanonicalRecord("src1", {"ID": 1, "Name": "a"}),
+                CanonicalRecord("src2", {"ID": 1, "Name": "b"}),
+            ]
+        ),
+        remote_read([]),
+    ]
+
+    assert engine.sync_bitable_source() is False
+    engine.logger.error.assert_called_once()
+
+    engine.api.batch_update.assert_not_called()
+    engine.api.batch_create.assert_not_called()
+    engine.api.batch_delete.assert_not_called()
+
+
+def test_engine_sync_rejects_dataframe_for_bitable_source():
+    engine = make_bitable_source_engine()
+
+    assert engine.sync(pd.DataFrame({"ID": [1]})) is False
+    engine.logger.error.assert_called_once_with(
+        "source_type=bitable 不接受本地 DataFrame"
     )
 
 

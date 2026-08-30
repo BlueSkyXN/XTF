@@ -1,7 +1,6 @@
 # XTF 文档中心
 
-> XTF (Excel To Feishu) — 企业级 Excel/CSV 到飞书平台的智能同步工具。
-> 支持多维表格 (Bitable) 与电子表格 (Sheet) 双目标，四种同步模式，智能字段管理。
+> XTF 2.0 — flags-first、可 dry-run、可 JSON 自动化的 Excel/CSV/Bitable 到飞书同步 CLI。
 
 ## 📚 核心文档
 
@@ -10,19 +9,19 @@
 XTF 的整体架构设计、核心组件交互、数据处理流水线与扩展机制。
 
 1. 系统概览与设计哲学
-2. 四层架构（入口 → 配置 → 引擎 → API）
-3. 数据处理流水线（6 步完整流程）
+2. CLI → config resolver → planner/executor → API 分层
+3. 数据处理流水线与结构化 outcome
 4. 错误处理与三层上传保障
 5. 扩展点与二次开发指南
 
 ### [CONFIG.md](./CONFIG.md) — 配置参数详解
 
-完整的配置文件参考手册，含每个字段的类型、默认值、代码位置与实际影响。
+严格 YAML schema v2、完整 CLI override、配置发现和退出码参考。
 
-1. 配置优先级体系（CLI > YAML > 推断 > 默认）
-2. 通用参数、目标平台参数、性能参数
-3. 选择性同步、高级控制、逻辑检测等进阶配置
-4. CLI 参数映射与常用配置场景
+1. CLI / `XTF_APP_SECRET` / YAML / defaults 优先级
+2. source、target、sync、conversion、control 嵌套 schema
+3. `config init/validate/show` 与 flags-first 覆盖
+4. dry-run、删除授权、JSON 和退出码
 
 ### [SYNC.md](./SYNC.md) — 同步模式与选择性同步
 
@@ -78,11 +77,11 @@ AI 友好型飞书 OpenAPI Markdown 文档库，便于查阅与扩展开发。
 ## 🚀 快速开始
 
 1. 安装依赖：`pip install -r requirements.txt`
-2. 复制配置：`cp config.example.yaml config.yaml`
-3. 编辑 `config.yaml`，填入飞书应用凭证和目标表格信息
-4. 多维表格同步：`python XTF.py --target-type bitable --config config.yaml`
-5. 电子表格同步：`python XTF.py --target-type sheet --config config.yaml`
-6. 查看日志：`logs/xtf_*.log`
+2. 查看命令：`python3 XTF.py --help`
+3. 生成 v2 配置：`python3 XTF.py config init --target-type bitable`
+4. 本地验证：`python3 XTF.py config validate --config config.yaml`
+5. 精确只读计划：`python3 XTF.py sync --config config.yaml --dry-run`
+6. 正式同步：`python3 XTF.py sync --config config.yaml`
 
 ---
 

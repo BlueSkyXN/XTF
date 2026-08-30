@@ -82,6 +82,7 @@ jobs:
           --strip \
           --hidden-import=core.config \
           --hidden-import=core.engine \
+          --hidden-import=core.plan \
           --hidden-import=core.converter \
           --hidden-import=core.control \
           --hidden-import=core.reader \
@@ -90,8 +91,24 @@ jobs:
           --hidden-import=api.bitable \
           --hidden-import=api.sheet \
           --hidden-import=utils.excel_reader \
+          --hidden-import=xtf_cli.runtime \
+          --hidden-import=xtf_cli.parser \
+          --hidden-import=xtf_cli.config \
+          --hidden-import=xtf_cli.errors \
           XTF.py \
           --distpath dist/${{ matrix.platform }}
+      shell: bash
+
+    - name: Smoke XTF CLI
+      run: |
+        platform="${{ matrix.platform }}"
+        if [[ "${{ matrix.platform }}" == "windows-x64" ]]; then
+          "dist/${platform}/XTF.exe" --version
+          "dist/${platform}/XTF.exe" sync --help
+        else
+          "dist/${platform}/XTF" --version
+          "dist/${platform}/XTF" sync --help
+        fi
       shell: bash
     
     - name: Prepare XTF artifacts
@@ -201,7 +218,7 @@ jobs:
           --name XTF-Sheet \
           --distpath dist/${{ matrix.platform }}
       shell: bash
-    
+
     - name: Prepare XTF-Sheet artifacts
       run: |
         platform="${{ matrix.platform }}"
@@ -216,7 +233,7 @@ jobs:
           chmod +x "artifacts/XTF-Sheet_py-${platform}-${version}/XTF-Sheet"
         fi
         
-        cp config.example.yaml "artifacts/XTF-Sheet_py-${platform}-${version}/config.yaml"
+        cp lite/config.sheet.example.yaml "artifacts/XTF-Sheet_py-${platform}-${version}/config.yaml"
         
         # Install zip on Windows if needed
         if [[ "${{ matrix.platform }}" == "windows-x64" ]]; then
@@ -309,7 +326,7 @@ jobs:
           --name XTF-Bitable \
           --distpath dist/${{ matrix.platform }}
       shell: bash
-    
+
     - name: Prepare XTF-Bitable artifacts
       run: |
         platform="${{ matrix.platform }}"
@@ -324,7 +341,7 @@ jobs:
           chmod +x "artifacts/XTF-Bitable_py-${platform}-${version}/XTF-Bitable"
         fi
         
-        cp config.example.yaml "artifacts/XTF-Bitable_py-${platform}-${version}/config.yaml"
+        cp lite/config.bitable.example.yaml "artifacts/XTF-Bitable_py-${platform}-${version}/config.yaml"
         
         # Install zip on Windows if needed
         if [[ "${{ matrix.platform }}" == "windows-x64" ]]; then
