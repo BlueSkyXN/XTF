@@ -99,6 +99,11 @@ class ConversionStats(TypedDict):
 class DataConverter:
     """统一数据转换器"""
 
+    MIN_TIMESTAMP_SECONDS = 946_684_800  # 2000-01-01 UTC
+    MAX_TIMESTAMP_SECONDS = 4_102_444_800  # 2100-01-01 UTC
+    MIN_TIMESTAMP_MILLISECONDS = MIN_TIMESTAMP_SECONDS * 1000
+    MAX_TIMESTAMP_MILLISECONDS = MAX_TIMESTAMP_SECONDS * 1000
+
     def __init__(self, target_type: TargetType):
         """
         初始化数据转换器
@@ -107,6 +112,9 @@ class DataConverter:
             target_type: 目标类型（多维表格或电子表格）
         """
         self.target_type = target_type
+        # Standalone converter callers retain the historical day-level behavior.
+        # XTFSyncEngine applies SyncConfig's explicit default (``exact``).
+        self.datetime_index_granularity = "day"
         self.logger = logging.getLogger("XTF.converter")
 
         # 类型转换统计
@@ -161,10 +169,45 @@ class DataConverter:
             return str(int(number))
         return str(number)
 
-    def _normalize_timestamp_index_value(self, value: Any) -> Optional[str]:
-        """规范化日期索引值，统一为按天比较的 ISO 日期字符串。"""
+    @classmethod
+    def _numeric_timestamp_to_milliseconds(
+        cls, value: float, *, strict: bool = True
+    ) -> Optional[int]:
+        """Normalize supported epoch seconds/milliseconds in 2000-2100."""
+        if cls.MIN_TIMESTAMP_SECONDS <= value <= cls.MAX_TIMESTAMP_SECONDS:
+            return int(value * 1000)
+        if (
+            cls.MIN_TIMESTAMP_MILLISECONDS
+            <= value
+            <= cls.MAX_TIMESTAMP_MILLISECONDS
+        ):
+            return int(value)
+        if strict:
+            raise ValueError(
+                "numeric DATETIME index must be epoch seconds or milliseconds "
+                "within 2000-01-01..2100-01-01 UTC"
+            )
+        return None
+
+    def _normalize_timestamp_index_value(
+        self, value: Any, granularity: Optional[str] = None
+    ) -> Optional[str]:
+        """规范化日期索引值。
+
+        ``exact`` 保留完整毫秒时间戳；``day`` 保留历史按本地日期匹配语义。
+        """
         if self._is_empty_value(value):
             return None
+
+        effective_granularity = (
+            (granularity or self.datetime_index_granularity).strip().lower()
+        )
+        if effective_granularity not in {"exact", "day"}:
+            raise ValueError("datetime index granularity must be 'exact' or 'day'")
+
+        if effective_granularity == "exact":
+            timestamp = self._exact_index_timestamp_ms(value)
+            return str(timestamp) if timestamp is not None else None
 
         if isinstance(value, pd.Timestamp):
             value = value.to_pydatetime()
@@ -176,13 +219,11 @@ class DataConverter:
             return value.isoformat()
 
         if isinstance(value, numbers.Real) and not isinstance(value, bool):
-            timestamp = int(float(value))
-            if timestamp > 2524608000:
-                seconds = timestamp / 1000
-            elif timestamp > 946684800:
-                seconds = timestamp
-            else:
-                return str(timestamp)
+            numeric = float(value)
+            milliseconds = self._numeric_timestamp_to_milliseconds(numeric)
+            if milliseconds is None:
+                return None
+            seconds = milliseconds / 1000
             # Keep index normalization aligned with _force_to_timestamp(), which
             # parses date strings as local wall-clock dates before writing them.
             return dt.datetime.fromtimestamp(seconds).date().isoformat()
@@ -190,7 +231,9 @@ class DataConverter:
         if isinstance(value, str):
             str_val = value.strip()
             if str_val.isdigit():
-                return self._normalize_timestamp_index_value(int(str_val))
+                return self._normalize_timestamp_index_value(
+                    int(str_val), effective_granularity
+                )
 
             for fmt in [
                 "%Y-%m-%d %H:%M:%S",
@@ -212,10 +255,35 @@ class DataConverter:
         timestamp = self._force_to_timestamp(value, "__index__")
         if timestamp is None:
             return None
-        return self._normalize_timestamp_index_value(timestamp)
+        return self._normalize_timestamp_index_value(timestamp, effective_granularity)
+
+    def _exact_index_timestamp_ms(self, value: Any) -> Optional[int]:
+        """Normalize every exact DATETIME index representation through UTC."""
+        if self._is_empty_value(value) or isinstance(value, bool):
+            return None
+        if isinstance(value, numbers.Real):
+            return self._numeric_timestamp_to_milliseconds(float(value))
+        if isinstance(value, str) and value.strip().isdigit():
+            return self._exact_index_timestamp_ms(int(value.strip()))
+        if isinstance(value, dt.date) and not isinstance(value, dt.datetime):
+            value = dt.datetime.combine(value, dt.time.min)
+        try:
+            parsed = pd.Timestamp(value)
+        except (TypeError, ValueError):
+            return None
+        if pd.isna(parsed):
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.tz_localize("UTC")
+        else:
+            parsed = parsed.tz_convert("UTC")
+        return int(parsed.timestamp() * 1000)
 
     def _normalize_index_value(
-        self, value: Any, field_type: Optional[Any] = None
+        self,
+        value: Any,
+        field_type: Optional[Any] = None,
+        datetime_granularity: Optional[str] = None,
     ) -> Optional[str]:
         """将本地值和飞书返回值统一为可比较的索引字符串。"""
         if self._is_empty_value(value):
@@ -224,7 +292,9 @@ class DataConverter:
         if isinstance(value, dict):
             if "value" in value and "type" in value:
                 nested_type = value.get("type")
-                return self._normalize_index_value(value.get("value"), nested_type)
+                return self._normalize_index_value(
+                    value.get("value"), nested_type, datetime_granularity
+                )
 
             if "text" in value:
                 text_value = str(value.get("text", ""))
@@ -232,7 +302,7 @@ class DataConverter:
 
             if "link_record_ids" in value:
                 return self._normalize_index_value(
-                    value.get("link_record_ids"), field_type
+                    value.get("link_record_ids"), field_type, datetime_granularity
                 )
 
             if "id" in value:
@@ -242,7 +312,10 @@ class DataConverter:
                 return str(value.get("file_token"))
 
             normalized_dict = {
-                str(k): self._normalize_index_value(v) for k, v in value.items()
+                str(k): self._normalize_index_value(
+                    v, datetime_granularity=datetime_granularity
+                )
+                for k, v in value.items()
             }
             normalized_dict = {
                 k: v for k, v in normalized_dict.items() if v is not None
@@ -268,7 +341,9 @@ class DataConverter:
                         if text_value.strip():
                             text_parts.append(text_value)
                     else:
-                        item_value = self._normalize_index_value(item)
+                        item_value = self._normalize_index_value(
+                            item, datetime_granularity=datetime_granularity
+                        )
                         if item_value is not None:
                             text_parts.append(item_value)
                 if not text_parts:
@@ -276,7 +351,8 @@ class DataConverter:
                 return "".join(text_parts)
 
             normalized_items = [
-                self._normalize_index_value(item, field_type) for item in values
+                self._normalize_index_value(item, field_type, datetime_granularity)
+                for item in values
             ]
             normalized_items = [item for item in normalized_items if item is not None]
             if not normalized_items:
@@ -291,7 +367,7 @@ class DataConverter:
             return self._normalize_number_index_value(value)
 
         if field_type == 5:
-            return self._normalize_timestamp_index_value(value)
+            return self._normalize_timestamp_index_value(value, datetime_granularity)
 
         if field_type == 7:
             if isinstance(value, bool):
@@ -382,6 +458,10 @@ class DataConverter:
                 if index_value is None:
                     continue
                 index_hash = hashlib.md5(index_value.encode("utf-8")).hexdigest()
+                if index_hash in index:
+                    raise ValueError(
+                        f"索引列 '{index_column}' 存在重复值: {index_value}"
+                    )
                 index[index_hash] = record
 
         return index
@@ -557,15 +637,15 @@ class DataConverter:
         try:
             timestamp = int(s)
 
-            # 秒级时间戳: 1970-2050年
-            if 946684800 <= timestamp <= 2524608000:  # 2000-2050
+            # 秒级时间戳: 2000-2100年
+            if 946684800 <= timestamp <= 4102444800:
                 confidence = (
                     0.9 if 1640995200 <= timestamp <= 1893456000 else 0.7
                 )  # 2022-2030更高置信度
                 return True, confidence
 
-            # 毫秒级时间戳: 2000-2050年
-            elif 946656000000 <= timestamp <= 2524579200000:
+            # 毫秒级时间戳: 2000-2100年
+            elif 946684800000 <= timestamp <= 4102444800000:
                 confidence = 0.85
                 return True, confidence
 
@@ -1159,11 +1239,9 @@ class DataConverter:
         """强制转换为时间戳"""
         # 如果已经是数字时间戳
         if isinstance(value, (int, float)):
-            if value > 2524608000:  # 毫秒级
-                return int(value)
-            elif value > 946684800:  # 秒级，转为毫秒级
-                return int(value * 1000)
-            else:
+            try:
+                return self._numeric_timestamp_to_milliseconds(float(value))
+            except ValueError:
                 self.logger.warning(
                     f"字段 '{field_name}': 数字 {value} 不在有效时间戳范围内"
                 )
@@ -1207,7 +1285,7 @@ class DataConverter:
             )
             return None
 
-        # 处理pandas时间戳
+        # 处理pandas/Python时间戳
         if hasattr(value, "timestamp"):
             return int(value.timestamp() * 1000)
 
@@ -1415,7 +1493,10 @@ class DataConverter:
     # ========== 电子表格转换方法 ==========
 
     def build_data_index(
-        self, df: pd.DataFrame, index_column: Optional[str]
+        self,
+        df: pd.DataFrame,
+        index_column: Optional[str],
+        field_types: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, int]:
         """构建电子表格数据索引（哈希 -> 行号）"""
         index: Dict[str, int] = {}
@@ -1423,8 +1504,19 @@ class DataConverter:
             return index
 
         for idx, row in df.iterrows():
-            index_hash = self.get_index_value_hash(row, index_column)
+            index_hash = self.get_index_value_hash(row, index_column, field_types)
             if index_hash:
+                if index_hash in index:
+                    value = row[index_column] if index_column in row else None
+                    field_type = (
+                        self._field_schema_type_code(field_types.get(index_column))
+                        if field_types
+                        else None
+                    )
+                    normalized = self._normalize_index_value(value, field_type)
+                    raise ValueError(
+                        f"索引列 '{index_column}' 存在重复值: {normalized}"
+                    )
                 index[index_hash] = idx
 
         return index

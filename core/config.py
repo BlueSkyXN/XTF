@@ -19,6 +19,7 @@
         - FieldTypeStrategy: 字段类型选择策略（raw/base/auto/intelligence）
         - SyncMode: 同步模式（full/incremental/overwrite/clone）
         - TargetType: 目标类型（bitable/sheet）
+        - SourceType: 数据源类型（file/bitable）
 
     配置数据类：
         - SelectiveSyncConfig: 选择性同步配置
@@ -33,6 +34,7 @@
 配置验证规则：
     - Bitable模式：必须提供 app_token 和 table_id
     - Sheet模式：必须提供 spreadsheet_token 和 sheet_id
+    - Bitable数据源：必须提供源表、索引列，且只支持 full/incremental
     - SelectiveSync：与 Clone 模式互斥
     - 列名验证：不允许重复、空值、None
 
@@ -107,6 +109,13 @@ class TargetType(Enum):
     SHEET = "sheet"  # 电子表格
 
 
+class SourceType(Enum):
+    """同步数据源类型。"""
+
+    FILE = "file"
+    BITABLE = "bitable"
+
+
 @dataclass
 class SelectiveSyncConfig:
     """选择性同步配置"""
@@ -124,10 +133,16 @@ class SyncConfig:
     """统一同步配置"""
 
     # 基础配置
-    file_path: str
+    file_path: Optional[str]
     app_id: str
     app_secret: str
     target_type: TargetType
+
+    # 数据源。file 保持现有 Excel/CSV 行为；bitable 从另一张多维表格读取记录，
+    # 再按索引列把差异写入既有目标表。
+    source_type: SourceType = SourceType.FILE
+    source_app_token: Optional[str] = None
+    source_table_id: Optional[str] = None
 
     # Excel工作表选择
     excel_sheet_name: Optional[Union[str, int]] = (
@@ -178,6 +193,7 @@ class SyncConfig:
     # 同步设置
     sync_mode: SyncMode = SyncMode.FULL
     index_column: Optional[str] = None  # 索引列名，用于记录比对
+    datetime_index_granularity: str = "exact"
     verify_remote_writes: bool = False
 
     # 性能设置
@@ -215,8 +231,21 @@ class SyncConfig:
             self.sync_mode = SyncMode(self.sync_mode)
         if isinstance(self.target_type, str):
             self.target_type = TargetType(self.target_type)
+        if isinstance(self.source_type, str):
+            self.source_type = SourceType(self.source_type.strip().lower())
         if isinstance(self.field_type_strategy, str):
             self.field_type_strategy = FieldTypeStrategy(self.field_type_strategy)
+
+        self.datetime_index_granularity = (
+            str(self.datetime_index_granularity).strip().lower()
+        )
+        if self.datetime_index_granularity not in {"exact", "day"}:
+            raise ValueError("datetime_index_granularity 仅支持 exact 或 day")
+
+        if self.source_app_token is not None:
+            self.source_app_token = str(self.source_app_token).strip() or None
+        if self.source_table_id is not None:
+            self.source_table_id = str(self.source_table_id).strip() or None
 
         self.bitable_api_backend = str(self.bitable_api_backend).strip().lower()
         if self.bitable_api_backend not in {"base_v3", "bitable_v1"}:
@@ -228,7 +257,7 @@ class SyncConfig:
         if self.bitable_user_id_type not in {"open_id", "union_id", "user_id"}:
             raise ValueError("bitable_user_id_type 仅支持 open_id、union_id 或 user_id")
 
-        # 验证必需参数
+        # 验证目标配置。
         if self.target_type == TargetType.BITABLE:
             if not self.app_token or not self.table_id:
                 raise ValueError("多维表格模式需要app_token和table_id")
@@ -236,12 +265,38 @@ class SyncConfig:
             if not self.spreadsheet_token or not self.sheet_id:
                 raise ValueError("电子表格模式需要spreadsheet_token和sheet_id")
 
+        # 多维表格数据源只做非破坏性的差异同步，不创建新 Base，也不删除目标数据。
+        if self.source_type is SourceType.BITABLE:
+            if self.target_type is not TargetType.BITABLE:
+                raise ValueError("bitable 数据源仅支持 target_type=bitable")
+            if not self.source_app_token or not self.source_table_id:
+                raise ValueError(
+                    "bitable 数据源需要 source_app_token 和 source_table_id"
+                )
+            if not self.index_column:
+                raise ValueError("bitable 数据源必须配置 index_column")
+            if self.sync_mode not in {SyncMode.FULL, SyncMode.INCREMENTAL}:
+                raise ValueError("bitable 数据源仅支持 full 或 incremental 模式")
+            if (
+                self.source_app_token == self.app_token
+                and self.source_table_id == self.table_id
+            ):
+                raise ValueError("源表和目标表不能是同一张多维表格")
+
         # 验证 selective 配置
         if self.selective_sync.enabled:
             if self.sync_mode == SyncMode.CLONE:
                 raise ValueError("Clone 模式不支持 selective 同步")
             if not self.selective_sync.columns:
                 raise ValueError("启用 selective 同步时必须指定 columns")
+            if (
+                self.index_column
+                and not self.selective_sync.auto_include_index
+                and self.index_column not in self.selective_sync.columns
+            ):
+                raise ValueError(
+                    "关闭 selective_sync.auto_include_index 时必须在 columns 中显式包含 index_column"
+                )
 
             # 增强的配置组合有效性检查
             self._validate_selective_sync_config()
@@ -307,6 +362,41 @@ class SyncConfig:
             raise ValueError("max_retries 不能为负数")
         if self.rate_limit_delay < 0:
             raise ValueError("rate_limit_delay 不能为负数")
+        if self.start_row <= 0:
+            raise ValueError("start_row 必须为正整数")
+        if not isinstance(self.start_column, str) or not self.start_column.strip():
+            raise ValueError("start_column 必须为非空列名")
+        for name, confidence in (
+            ("intelligence_date_confidence", self.intelligence_date_confidence),
+            ("intelligence_choice_confidence", self.intelligence_choice_confidence),
+            ("intelligence_boolean_confidence", self.intelligence_boolean_confidence),
+        ):
+            if not 0 <= confidence <= 1:
+                raise ValueError(f"{name} 必须在 0 到 1 之间")
+        if self.retry_strategy_type not in {
+            "exponential_backoff",
+            "linear_growth",
+            "fixed_wait",
+        }:
+            raise ValueError("retry_strategy_type 无效")
+        if self.rate_limit_strategy_type not in {
+            "fixed_wait",
+            "sliding_window",
+            "fixed_window",
+        }:
+            raise ValueError("rate_limit_strategy_type 无效")
+        if self.retry_initial_delay < 0:
+            raise ValueError("retry_initial_delay 不能为负数")
+        if self.retry_max_wait_time is not None and self.retry_max_wait_time <= 0:
+            raise ValueError("retry_max_wait_time 必须为正数或 null")
+        if self.retry_multiplier <= 0:
+            raise ValueError("retry_multiplier 必须为正数")
+        if self.retry_increment < 0:
+            raise ValueError("retry_increment 不能为负数")
+        if self.rate_limit_window_size <= 0:
+            raise ValueError("rate_limit_window_size 必须为正数")
+        if self.rate_limit_max_requests <= 0:
+            raise ValueError("rate_limit_max_requests 必须为正整数")
         if self.sheet_protect_formulas and not self.sheet_validate_results:
             # 保护公式时必须启用结果检测（需要双读）
             self.sheet_validate_results = True
@@ -420,6 +510,9 @@ class ConfigManager:
                                 return TargetType.BITABLE
                             elif target_type_val == "sheet":
                                 return TargetType.SHEET
+                        # 远端多维表格数据源只能同步到多维表格。
+                        elif config_data.get("source_type") == SourceType.BITABLE.value:
+                            return TargetType.BITABLE
                         # 如果配置中有app_token和table_id，推断为多维表格
                         elif config_data.get("app_token") and config_data.get(
                             "table_id"
@@ -464,6 +557,14 @@ class ConfigManager:
             choices=["bitable", "sheet"],
             help="目标类型: bitable(多维表格) 或 sheet(电子表格)",
         )
+        parser.add_argument(
+            "--source-type",
+            type=str,
+            choices=["file", "bitable"],
+            help="数据源类型: file(本地文件) 或 bitable(另一张多维表格)",
+        )
+        parser.add_argument("--source-app-token", type=str, help="源多维表格应用Token")
+        parser.add_argument("--source-table-id", type=str, help="源数据表ID")
 
         # 多维表格配置
         parser.add_argument("--app-token", type=str, help="多维表格应用Token")
@@ -500,6 +601,11 @@ class ConfigManager:
             help="同步模式",
         )
         parser.add_argument("--index-column", type=str, help="索引列名")
+        parser.add_argument(
+            "--datetime-index-granularity",
+            choices=["exact", "day"],
+            help="日期时间索引匹配粒度: exact(毫秒) 或 day(按天)",
+        )
 
         # 性能设置
         parser.add_argument("--batch-size", type=int, help="批处理大小")
@@ -528,7 +634,11 @@ class ConfigManager:
         if target_type == TargetType.BITABLE:
             config_data = {
                 "target_type": target_type.value,
+                "source_type": "file",
+                "source_app_token": None,
+                "source_table_id": None,
                 "sync_mode": "full",
+                "datetime_index_granularity": "exact",
                 "batch_size": 500,
                 "rate_limit_delay": 0.01,
                 "max_retries": 3,
@@ -545,7 +655,9 @@ class ConfigManager:
         else:  # SHEET
             config_data = {
                 "target_type": target_type.value,
+                "source_type": "file",
                 "sync_mode": "full",
+                "datetime_index_granularity": "exact",
                 "start_row": 1,
                 "start_column": "A",
                 "batch_size": 1000,
@@ -587,6 +699,7 @@ class ConfigManager:
                 sensitive_keys = {
                     "app_secret",
                     "app_token",
+                    "source_app_token",
                     "spreadsheet_token",
                     "tenant_access_token",
                     "access_token",
@@ -621,6 +734,18 @@ class ConfigManager:
         if args.target_type:
             config_data["target_type"] = args.target_type
             cli_overrides.append(f"target_type={args.target_type}")
+        source_type_arg = getattr(args, "source_type", None)
+        source_app_token_arg = getattr(args, "source_app_token", None)
+        source_table_id_arg = getattr(args, "source_table_id", None)
+        if source_type_arg:
+            config_data["source_type"] = source_type_arg
+            cli_overrides.append(f"source_type={source_type_arg}")
+        if source_app_token_arg:
+            config_data["source_app_token"] = source_app_token_arg
+            cli_overrides.append(f"source_app_token={source_app_token_arg[:8]}...")
+        if source_table_id_arg:
+            config_data["source_table_id"] = source_table_id_arg
+            cli_overrides.append(f"source_table_id={source_table_id_arg}")
 
         # 多维表格参数
         if args.app_token:
@@ -665,6 +790,14 @@ class ConfigManager:
         if args.sync_mode is not None:
             config_data["sync_mode"] = args.sync_mode
             cli_overrides.append(f"sync_mode={args.sync_mode}")
+        datetime_index_granularity_arg = getattr(
+            args, "datetime_index_granularity", None
+        )
+        if datetime_index_granularity_arg is not None:
+            config_data["datetime_index_granularity"] = datetime_index_granularity_arg
+            cli_overrides.append(
+                "datetime_index_granularity=" f"{datetime_index_granularity_arg}"
+            )
         if args.batch_size is not None:
             config_data["batch_size"] = args.batch_size
             cli_overrides.append(f"batch_size={args.batch_size}")
@@ -691,8 +824,15 @@ class ConfigManager:
         elif "selective_sync" not in config_data:
             config_data["selective_sync"] = SelectiveSyncConfig()
 
-        # 验证必需参数
-        required_fields = ["file_path", "app_id", "app_secret"]
+        # 验证必需参数。远端多维表格数据源不需要本地文件，但源、目标表都必须明确。
+        source_type = SourceType(str(config_data.get("source_type", "file")))
+        required_fields = ["app_id", "app_secret"]
+        if source_type is SourceType.FILE:
+            required_fields.insert(0, "file_path")
+        else:
+            config_data.setdefault("file_path", None)
+            required_fields.extend(["source_app_token", "source_table_id"])
+
         if target_type == TargetType.BITABLE:
             required_fields.extend(["app_token", "table_id"])
         else:  # SHEET
@@ -754,16 +894,21 @@ def create_sample_config(
     config_file: str = "config.yaml", target_type: TargetType = TargetType.BITABLE
 ):
     """创建示例配置文件"""
+    sample_config: Dict[str, Any]
     if target_type == TargetType.BITABLE:
         sample_config = {
             "file_path": "data.xlsx",
             "app_id": "cli_your_app_id",
             "app_secret": "your_app_secret",
             "target_type": "bitable",
+            "source_type": "file",
+            "source_app_token": None,
+            "source_table_id": None,
             "app_token": "your_app_token",
             "table_id": "your_table_id",
             "sync_mode": "full",
             "index_column": "ID",
+            "datetime_index_granularity": "exact",
             "batch_size": 500,
             "rate_limit_delay": 0.01,
             "max_retries": 3,
@@ -784,6 +929,7 @@ def create_sample_config(
             "sheet_id": "your_sheet_id",
             "sync_mode": "full",
             "index_column": "ID",
+            "datetime_index_granularity": "exact",
             "start_row": 1,
             "start_column": "A",
             "batch_size": 1000,

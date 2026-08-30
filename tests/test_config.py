@@ -65,6 +65,7 @@ import pytest
 import yaml
 
 from core.config import (
+    SourceType,
     SyncConfig,
     SelectiveSyncConfig,
     ConfigManager,
@@ -92,6 +93,10 @@ class TestEnums:
         assert SyncMode.OVERWRITE.value == "overwrite"
         assert SyncMode.CLONE.value == "clone"
 
+    def test_source_type_values(self):
+        assert SourceType.FILE.value == "file"
+        assert SourceType.BITABLE.value == "bitable"
+
     def test_field_type_strategy_values(self):
         """测试字段类型策略枚举值"""
         assert FieldTypeStrategy.RAW.value == "raw"
@@ -99,6 +104,70 @@ class TestEnums:
         assert FieldTypeStrategy.AUTO.value == "auto"
         assert FieldTypeStrategy.INTELLIGENCE.value == "intelligence"
 
+
+class TestBitableSourceConfig:
+    def test_bitable_source_does_not_require_local_file(self):
+        config = SyncConfig(
+            file_path=None,
+            app_id="test_id",
+            app_secret="test_secret",
+            target_type=TargetType.BITABLE,
+            source_type="bitable",
+            source_app_token="app_source",
+            source_table_id="tbl_source",
+            app_token="app_target",
+            table_id="tbl_target",
+            index_column="ID",
+        )
+
+        assert config.source_type is SourceType.BITABLE
+        assert config.file_path is None
+        assert config.source_app_token == "app_source"
+
+    def test_bitable_source_rejects_sheet_target(self):
+        with pytest.raises(ValueError, match="仅支持 target_type=bitable"):
+            SyncConfig(
+                file_path=None,
+                app_id="test_id",
+                app_secret="test_secret",
+                target_type=TargetType.SHEET,
+                source_type="bitable",
+                source_app_token="app_source",
+                source_table_id="tbl_source",
+                spreadsheet_token="sheet_target",
+                sheet_id="sheet1",
+                index_column="ID",
+            )
+
+    def test_bitable_source_requires_source_table_and_index(self):
+        with pytest.raises(ValueError, match="source_app_token 和 source_table_id"):
+            SyncConfig(
+                file_path=None,
+                app_id="test_id",
+                app_secret="test_secret",
+                target_type=TargetType.BITABLE,
+                source_type=SourceType.BITABLE,
+                source_app_token="app_source",
+                app_token="app_target",
+                table_id="tbl_target",
+                index_column="ID",
+            )
+
+    def test_bitable_source_rejects_destructive_mode(self):
+        with pytest.raises(ValueError, match="仅支持 full 或 incremental"):
+            SyncConfig(
+                file_path=None,
+                app_id="test_id",
+                app_secret="test_secret",
+                target_type=TargetType.BITABLE,
+                source_type=SourceType.BITABLE,
+                source_app_token="app_source",
+                source_table_id="tbl_source",
+                app_token="app_target",
+                table_id="tbl_target",
+                index_column="ID",
+                sync_mode=SyncMode.CLONE,
+            )
 
 class TestSelectiveSyncConfig:
     """选择性同步配置测试"""
@@ -401,6 +470,39 @@ class TestSyncConfig:
                 sheet_id="test_sheet_id",
                 selective_sync=SelectiveSyncConfig(enabled=True, columns=None),
             )
+
+    def test_selective_sync_without_auto_include_requires_explicit_index(self):
+        with pytest.raises(ValueError, match="显式包含 index_column"):
+            SyncConfig(
+                file_path="test.xlsx",
+                app_id="test_id",
+                app_secret="test_secret",
+                target_type=TargetType.SHEET,
+                spreadsheet_token="test_spreadsheet_token",
+                sheet_id="test_sheet_id",
+                index_column="ID",
+                selective_sync=SelectiveSyncConfig(
+                    enabled=True,
+                    columns=["Name"],
+                    auto_include_index=False,
+                ),
+            )
+
+        config = SyncConfig(
+            file_path="test.xlsx",
+            app_id="test_id",
+            app_secret="test_secret",
+            target_type=TargetType.SHEET,
+            spreadsheet_token="test_spreadsheet_token",
+            sheet_id="test_sheet_id",
+            index_column="ID",
+            selective_sync=SelectiveSyncConfig(
+                enabled=True,
+                columns=["ID", "Name"],
+                auto_include_index=False,
+            ),
+        )
+        assert config.selective_sync.columns == ["ID", "Name"]
 
     def test_selective_sync_duplicate_columns(self):
         """测试 selective sync 包含重复列名时的错误"""
