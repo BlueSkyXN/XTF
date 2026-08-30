@@ -79,7 +79,6 @@ jobs:
     - name: Build XTF
       run: |
         pyinstaller --onefile \
-          --strip \
           --hidden-import=core.config \
           --hidden-import=core.engine \
           --hidden-import=core.plan \
@@ -213,7 +212,6 @@ jobs:
     - name: Build XTF-Sheet
       run: |
         pyinstaller --onefile \
-          --strip \
           lite/XTF_Sheet.py \
           --name XTF-Sheet \
           --distpath dist/${{ matrix.platform }}
@@ -321,7 +319,6 @@ jobs:
     - name: Build XTF-Bitable
       run: |
         pyinstaller --onefile \
-          --strip \
           lite/XTF_Bitable.py \
           --name XTF-Bitable \
           --distpath dist/${{ matrix.platform }}
