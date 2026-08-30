@@ -1,204 +1,62 @@
-# XTF 统一配置文件示例
-# 支持多维表格和电子表格两种目标平台，通过 target_type 参数指定
-#
-# 文件格式支持：
-# - Excel (.xlsx/.xls)：✅ 稳定支持，生产就绪，推荐使用
-# - CSV (.csv)：🧪 实验性支持，测试阶段，仅供测试环境使用
+# XTF 2.0 strict configuration. Legacy flat YAML is not accepted by `XTF`.
+schema_version: 2
 
-# 基础配置
-file_path: "data.xlsx"                    # 数据文件路径（推荐 .xlsx，稳定可靠）
-                                          # 🧪 也支持 .csv（测试阶段）
-excel_sheet_name: null                   # Excel工作表名称或索引（0=第一个sheet），null=默认第一个
-                                          # 仅对Excel文件(.xlsx/.xls)生效，CSV文件忽略此参数
-app_id: "cli_your_app_id_here"            # 飞书应用ID
-app_secret: "your_app_secret_here"        # 飞书应用密钥
-target_type: "bitable"                    # 目标类型: bitable(多维表格) 或 sheet(电子表格)
+auth:
+  app_id: cli_your_app_id
+  app_secret: null
 
-# 多维表格配置 (target_type: bitable)
-app_token: "your_app_token_here"          # 多维表格应用Token
-table_id: "your_table_id_here"            # 数据表ID
-create_missing_fields: true               # 是否自动创建缺失字段
-bitable_api_backend: "base_v3"            # 原生后端: base_v3（默认）或 bitable_v1；不会自动回退
-bitable_user_id_type: "open_id"           # 人员 ID 类型: open_id/union_id/user_id
+source:
+  type: file
+  file:
+    path: data.xlsx
+    sheet_name: null
 
-# 电子表格配置 (target_type: sheet)
-spreadsheet_token: "your_spreadsheet_token_here"  # 电子表格Token
-sheet_id: "your_sheet_id_here"            # 工作表ID
-start_row: 1                              # 开始行号
-start_column: "A"                         # 开始列号
-# 读取渲染选项（可选，不配置则保持原始行为）
-# - sheet_value_render_option:
-#   * ToString: 返回纯文本（适合展示）
-#   * Formula: 返回公式文本（适合校验公式是否被改动）
-#   * FormattedValue: 返回计算并格式化后的值（推荐：对比“结果”）
-#   * UnformattedValue: 返回计算后的原始值（适合精确数值对比）
-# - sheet_datetime_render_option:
-#   * FormattedString: 日期以格式化字符串返回（推荐与 FormattedValue 配合）
-sheet_value_render_option: null           # 示例: "FormattedValue"
-sheet_datetime_render_option: null        # 示例: "FormattedString"
+target:
+  type: bitable
+  bitable:
+    app_token: your_app_token
+    table_id: your_table_id
+    create_missing_fields: true
+    api_backend: base_v3
+    user_id_type: open_id
 
-# 读取/写入分块上限（默认 5000x100，遇到 10MB/90221 会自动二分）
-sheet_scan_max_rows: 5000                 # 读取分块最大行数
-sheet_scan_max_cols: 100                  # 读取分块最大列数
-sheet_write_max_rows: 5000                # 写入/清空分块最大行数
-sheet_write_max_cols: 100                 # 写入/清空分块最大列数
+sync:
+  mode: full
+  index:
+    column: ID
+    datetime_granularity: exact
+  verify_remote_writes: false
+  selective:
+    enabled: false
+    columns: []
+    auto_include_index: true
+    optimize_ranges: true
+    max_gap_for_merge: 2
+    preserve_column_order: true
 
-# 逻辑同步与结果检测（默认全部关闭，不影响现有同步流程）
-sheet_validate_results: false             # 是否启用结果检测（会双读云端数据）
-sheet_protect_formulas: false             # 仅 full 模式：保护云端公式列不被覆盖
-sheet_verify_formulas: false              # 成功数据 mutation 后是否调用 Sheet AI 校验受影响范围
-sheet_formula_max_locations: 20           # 每类公式错误最多返回的位置数（正整数）
-sheet_report_column_diff: false           # 是否输出列级差异报告
-sheet_diff_tolerance: 0.001               # 数值差异容忍度（浮点数比较）
+conversion:
+  strategy: base
+  intelligence:
+    date_confidence: 0.85
+    choice_confidence: 0.9
+    boolean_confidence: 0.95
 
-# 逻辑同步与结果检测说明:
-# - sheet_validate_results: 启用后会双读云端（Formula + FormattedValue），检测差异
-# - sheet_protect_formulas: 仅支持 full；启用后公式列只检测不覆盖，数据列正常同步
-#   注意：会自动启用 sheet_validate_results，且必须配置 index_column
-# - sheet_verify_formulas: 仅适用于 target_type=sheet，默认关闭且不由公式保护自动开启
-#   只校验已成功写入且可证明落点的范围；无法定位 append 落点时会失败关闭
-# - sheet_report_column_diff: 启用后在日志中输出列级差异统计
-# - sheet_diff_tolerance: 数值比较时的容忍度，避免浮点数精度问题
-#
-# 使用场景:
-# 1. 只检测差异但仍然同步: sheet_validate_results=true, sheet_protect_formulas=false
-# 2. 保护公式+检测差异: sheet_validate_results=true, sheet_protect_formulas=true
-# 3. 保护公式+差异报告: 以上配置 + sheet_report_column_diff=true
-#
-# 差异报告示例:
-# 🔒 公式列（已保护，不覆盖）:
-#   ✓ 销售额: 120/39749 行结果不一致 (0.30%)
-# 📝 数据列（已同步）:
-#   ✓ 问题分类: 50 行差异 → 已更新
+control:
+  batch_size: 500
+  rate_limit_delay: 0.01
+  max_retries: 3
+  advanced:
+    enabled: false
+    retry:
+      strategy: exponential_backoff
+      initial_delay: 0.5
+      max_wait_time: null
+      multiplier: 2.0
+      increment: 0.5
+    rate_limit:
+      strategy: fixed_wait
+      window_size: 1.0
+      max_requests: 10
 
-# 同步设置
-sync_mode: "full"                         # 同步模式: full/incremental/overwrite/clone
-index_column: "ID"                        # 索引列名，用于记录比对
-verify_remote_writes: false               # 是否对同步引擎产生的数据 mutation 做写后读回
-
-# 性能设置
-batch_size: 500                           # 批处理大小
-rate_limit_delay: 0.01                    # 接口调用间隔(秒)
-max_retries: 3                            # 最大重试次数
-
-# 飞书官方 API 频率限制参考（应用级别）:
-#
-# 多维表格 (Bitable):
-#   查询记录 (search):     20 次/秒
-#   批量获取 (batch_get):  20 次/秒
-#   新增记录 (batch_create): 50 次/秒
-#   更新记录 (batch_update): 50 次/秒
-#   删除记录 (batch_delete): 50 次/秒
-#   列出字段 (list_fields):  20 次/秒
-#   新增字段 (create_field): 10 次/秒
-#
-# 程序直接使用官方限制作为内嵌上限。
-# HTTP 429/5xx 由 transport 重试；HTTP 200 的飞书业务限流码由 Bitable 层重试。
-# 两层按错误类型分工，不会对同一个 HTTP 失败嵌套放大请求次数。
-#
-# rate_limit_delay 用于传统模式下的串行请求间隔控制:
-#   - Bitable 推荐: 0.01 ~ 0.5 秒
-#   - Sheet 推荐: 0.1 ~ 0.5 秒
-#   - 如频繁遇到限流，可适当增大
-
-# 智能字段类型配置 (支持多维表格和电子表格)
-field_type_strategy: "base"                # 字段类型策略: base/auto/intelligence/raw
-
-# Intelligence策略专用配置（仅在使用intelligence策略时生效）
-intelligence_date_confidence: 0.85         # 日期类型置信度
-intelligence_choice_confidence: 0.9        # 选择类型置信度
-intelligence_boolean_confidence: 0.95      # 布尔类型置信度
-
-# 智能字段类型策略说明:
-# - raw策略: 【保持原值】
-#   * 多维表格: 所有字段创建为文本类型，不进行数据类型转换
-#   * 电子表格: 不应用任何格式化，保持Excel原始数据和格式
-# - base策略: 【基础智能】⭐ CSV文件推荐
-#   * 多维表格: 自动识别文本/数字/日期三种基础类型
-#   * 电子表格: 自动设置日期/数字格式，不创建下拉列表
-#   * CSV兼容: 完美支持CSV文件，智能识别数据类型
-# - auto策略: 【增强智能】
-#   * 多维表格: 在基础类型上增加Excel验证检测（单选/多选）
-#   * 电子表格: 基于Excel数据验证设置下拉列表，自动设置日期/数字格式
-#   * CSV兼容: 部分受限（CSV不保留验证信息）
-# - intelligence策略: 【最强智能】⭐ CSV文件推荐
-#   * 多维表格: 基于置信度算法智能创建所有字段类型
-#   * 电子表格: 基于数据分析智能创建下拉列表、日期格式、数字格式
-#     - 单选下拉列表: 唯一值≤20个的字符串字段
-#     - 多选下拉列表: 包含分隔符的字符串字段
-#     - 日期格式: 自动设置为yyyy/MM/dd格式
-#     - 数字格式: 自动设置为#,##0.00格式
-#     - 颜色标记: 自动为下拉列表选项分配颜色
-#   * CSV兼容: 完美支持CSV文件，基于数据内容智能分析
-
-# CSV文件使用说明（🧪 实验性功能，测试阶段）:
-# ⚠️ 警告: CSV支持当前处于测试阶段，仅建议在测试环境使用
-# 🏭 生产环境请使用 Excel 格式 (.xlsx/.xls)
-#
-# 已实现功能:
-# - 支持格式: .csv (逗号分隔值)
-# - 编码支持: 自动检测UTF-8和GBK编码
-# - 推荐策略: base 或 intelligence（auto策略功能受限）
-# - 使用方法: file_path: "data.csv" （与Excel使用方式完全相同）
-#
-# 局限性:
-# - CSV不保留Excel数据验证信息（下拉列表等）
-# - AUTO策略功能受限
-# - 稳定性正在验证中
-
-# 选择性同步配置 (支持多维表格和电子表格)
-selective_sync:
-  enabled: false                          # 是否启用选择性同步
-  columns: ["column1", "column2", "column3"]  # 指定要同步的列名列表
-  auto_include_index: true                # 自动包含索引列用于匹配
-  optimize_ranges: true                   # 优化合并相邻列范围 (仅电子表格)
-  max_gap_for_merge: 2                   # 兼容参数；0 禁用合并，正数仅合并相邻目标列
-  preserve_column_order: true            # 保持原始列顺序
-
-# 选择性同步说明:
-# - 支持两种模式: 多维表格使用字段级精确控制，电子表格使用列范围精确控制
-# - 与现有同步模式兼容: full+selective, incremental+selective, overwrite+selective
-# - 不支持clone模式 (逻辑冲突)
-# - 自动包含索引列: 确保匹配逻辑正常工作，但可选择是否更新
-# - 安全范围优化: 仅合并相邻目标列，不跨未选择列，避免覆盖中间列
-# - 高效批量操作: 利用飞书API的精确控制能力，支持不连续列的高效处理
-# 
-# 多维表格模式 - 字段级精确控制:
-# - 只更新指定字段，其他字段完全不受影响
-# - 利用飞书多维表格API的字段级更新特性
-# 
-# 电子表格模式 - 列范围精确控制:
-# - 只更新指定列的单元格，其他列完全不受影响
-# - 利用飞书电子表格API的多范围批量更新特性
-# 
-# 使用示例:
-# sync_mode: "full"
-# selective_sync:
-#   enabled: true
-#   columns: ["salary", "department", "last_updated"]
-# 
-# 结果: 只同步指定的3列/字段，其他列/字段保持不变
-
-# 日志设置
-log_level: "INFO"                         # 日志级别: DEBUG/INFO/WARNING/ERROR
-
-# 高级控制开关（可选，默认关闭）
-# enable_advanced_control: false           # 是否启用高级重试和频控策略
-#
-# 高级重试配置（仅当 enable_advanced_control: true 时生效）
-# retry_strategy_type: "exponential_backoff"  # 策略: exponential_backoff / linear_growth / fixed_wait
-# retry_initial_delay: 0.5                   # 初始延迟（秒）
-# retry_multiplier: 2.0                      # 指数退避倍数（仅 exponential_backoff）
-# retry_increment: 0.5                       # 线性增长步长（仅 linear_growth）
-# retry_max_wait_time: 30.0                  # 最大单次等待时间（秒）
-#
-# 高级频控配置（仅当 enable_advanced_control: true 时生效）
-# rate_limit_strategy_type: "sliding_window"  # 策略: fixed_wait / sliding_window / fixed_window
-# rate_limit_window_size: 1.0                 # 时间窗大小（秒）
-# rate_limit_max_requests: 10                 # 时间窗内最大请求数
-#
-# 建议: 对于大批量同步任务，推荐使用 sliding_window 频控策略：
-#   enable_advanced_control: true
-#   rate_limit_strategy_type: "sliding_window"
-#   rate_limit_window_size: 1.0
-#   rate_limit_max_requests: 20   # 查询类 API 官方上限
+output:
+  log_level: INFO

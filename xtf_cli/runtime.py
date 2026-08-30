@@ -1,0 +1,715 @@
+"""Command dispatch and stdout/stderr contracts for XTF 2.0."""
+
+from __future__ import annotations
+
+import argparse
+import importlib.util
+import io
+import json
+import logging
+import sys
+from collections.abc import Mapping, Sequence
+from contextlib import redirect_stdout
+from pathlib import Path
+from time import perf_counter
+from typing import TYPE_CHECKING, Any
+
+from .config import (
+    ResolvedConfig,
+    discover_config,
+    has_cli_overrides,
+    resolve_config,
+    shown_values,
+    write_template,
+)
+from .errors import (
+    EXIT_AUTH,
+    EXIT_CONFIG,
+    EXIT_INPUT,
+    EXIT_INTERRUPTED,
+    EXIT_OK,
+    EXIT_PARTIAL,
+    EXIT_REMOTE,
+    EXIT_RUNTIME,
+    EXIT_VERIFICATION,
+    CLIError,
+    ParserSignal,
+)
+from .parser import parse_args
+
+if TYPE_CHECKING:
+    from core.plan import SyncPlan
+
+
+class Reporter:
+    def __init__(self, *, json_mode: bool, quiet: bool, command: str | None = None):
+        self.json_mode = json_mode
+        self.quiet = quiet
+        self.command = command
+
+    def info(self, message: str) -> None:
+        if not self.quiet and not self.json_mode:
+            print(message, file=sys.stderr)
+
+    def warning(self, message: str) -> None:
+        if not self.json_mode:
+            print(f"warning: {message}", file=sys.stderr)
+
+    @staticmethod
+    def _envelope(
+        *,
+        command: str | None,
+        ok: bool,
+        status: str,
+        duration_ms: int,
+        result: Mapping[str, Any] | None = None,
+        error: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        result_data = dict(result or {})
+        outcome = result_data.get("outcome")
+        outcome_data = dict(outcome) if isinstance(outcome, Mapping) else {}
+        plan = result_data.get("plan") or outcome_data.get("plan")
+        plan_data = dict(plan) if isinstance(plan, Mapping) else None
+        return {
+            "schema_version": 1,
+            "command": command,
+            "status": status,
+            "ok": ok,
+            "dry_run": result_data.get("dry_run"),
+            "config_path": result_data.get("config_path") or result_data.get("path"),
+            "source": (
+                plan_data.get("source") if plan_data else result_data.get("source")
+            ),
+            "target": (
+                plan_data.get("target") if plan_data else result_data.get("target")
+            ),
+            "requested_mode": (
+                plan_data.get("requested_mode")
+                if plan_data
+                else result_data.get("requested_mode")
+            ),
+            "effective_mode": (
+                plan_data.get("effective_mode")
+                if plan_data
+                else result_data.get("effective_mode")
+            ),
+            "plan": plan_data,
+            "applied": list(outcome_data.get("applied") or []),
+            "verification": list(outcome_data.get("verification") or []),
+            "warnings": list(
+                outcome_data.get("warnings")
+                or (plan_data.get("warnings") if plan_data else [])
+                or []
+            ),
+            "error": dict(error) if error else None,
+            "duration_ms": duration_ms,
+            "result": result_data,
+        }
+
+    def success(
+        self,
+        command: str,
+        result: Mapping[str, Any],
+        human: str,
+        duration_ms: int,
+    ) -> None:
+        if self.json_mode:
+            outcome = result.get("outcome")
+            outcome_status = (
+                outcome.get("status") if isinstance(outcome, Mapping) else None
+            )
+            status = str(
+                "planned" if result.get("dry_run") else outcome_status or "success"
+            )
+            print(
+                json.dumps(
+                    self._envelope(
+                        command=command,
+                        ok=True,
+                        status=status,
+                        duration_ms=duration_ms,
+                        result=result,
+                    ),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+            )
+        else:
+            print(human)
+
+    def error(self, error: CLIError, duration_ms: int) -> None:
+        if self.json_mode:
+            kinds = {
+                1: "internal",
+                2: "usage",
+                3: "config",
+                4: "auth",
+                5: "read",
+                6: "mutation",
+                7: "verification",
+                130: "interrupt",
+            }
+            error_kind = kinds.get(error.exit_code, "internal")
+            if error.code in {"XTF_E_RESOURCE", "XTF_E_REMOTE_RESOURCE_NOT_FOUND"}:
+                error_kind = "resource"
+            error_data: dict[str, Any] = {
+                "kind": error_kind,
+                "code": error.code,
+                "message": error.message,
+            }
+            result: dict[str, Any] = {}
+            if error.details:
+                outcome = error.details.get("outcome")
+                if isinstance(outcome, Mapping):
+                    result["outcome"] = dict(outcome)
+                plan = error.details.get("plan")
+                if isinstance(plan, Mapping):
+                    result["plan"] = dict(plan)
+                if "dry_run" in error.details:
+                    result["dry_run"] = error.details["dry_run"]
+                config_path = error.details.get("config_path")
+                if config_path is not None:
+                    result["config_path"] = config_path
+            payload = self._envelope(
+                command=self.command,
+                ok=False,
+                status="error",
+                duration_ms=duration_ms,
+                result=result,
+                error=error_data,
+            )
+            print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        else:
+            print(f"{error.code}: {error.message}", file=sys.stderr)
+
+
+def _as_dict(value: Any) -> dict[str, Any]:
+    if hasattr(value, "to_dict") and callable(value.to_dict):
+        result = value.to_dict()
+        if isinstance(result, Mapping):
+            return dict(result)
+    if isinstance(value, Mapping):
+        return dict(value)
+    return {"value": value}
+
+
+def _plan_is_destructive(plan: SyncPlan | Mapping[str, Any]) -> bool:
+    if bool(getattr(plan, "destructive", False)):
+        return True
+    actions = getattr(plan, "actions", None)
+    if actions is None and isinstance(plan, Mapping):
+        actions = plan.get("actions", ())
+    for action in actions or ():
+        kind = getattr(action, "kind", None)
+        destructive = getattr(action, "destructive", False)
+        if isinstance(action, Mapping):
+            kind = action.get("kind")
+            destructive = action.get("destructive", False)
+        if kind in {"delete_records", "clear_range"} or destructive:
+            return True
+    return False
+
+
+def _load_dataframe(resolved: ResolvedConfig) -> Any:
+    config = resolved.config
+    source_type = getattr(config.source_type, "value", config.source_type)
+    if source_type == "bitable":
+        return None
+    if not config.file_path:
+        raise CLIError(
+            "XTF_E_INPUT_REQUIRED",
+            "source.type=file requires source.file.path or --file",
+            EXIT_INPUT,
+        )
+    path = Path(config.file_path)
+    if not path.is_file():
+        raise CLIError(
+            "XTF_E_INPUT_NOT_FOUND", f"input file not found: {path}", EXIT_INPUT
+        )
+    from core.reader import DataFileReader
+
+    if not DataFileReader.is_supported(path):
+        raise CLIError(
+            "XTF_E_INPUT_FORMAT",
+            f"unsupported input format: {path.suffix}",
+            EXIT_INPUT,
+        )
+    kwargs: dict[str, Any] = {}
+    if config.excel_sheet_name is not None and path.suffix.lower() in {".xlsx", ".xls"}:
+        kwargs["sheet_name"] = config.excel_sheet_name
+    try:
+        return DataFileReader().read_file(path, **kwargs)
+    except FileNotFoundError as exc:
+        raise CLIError("XTF_E_INPUT_NOT_FOUND", str(exc), EXIT_INPUT) from exc
+    except (OSError, ValueError) as exc:
+        raise CLIError("XTF_E_INPUT_READ", str(exc), EXIT_INPUT) from exc
+
+
+def _sync(
+    args: argparse.Namespace, reporter: Reporter
+) -> tuple[int, dict[str, Any], str]:
+    resolved = resolve_config(args)
+    dataframe = _load_dataframe(resolved)
+    reporter.info("Planning synchronization...")
+
+    from core.engine import XTFSyncEngine
+
+    engine = XTFSyncEngine(resolved.config)
+    if reporter.quiet:
+        for handler in logging.getLogger("XTF").handlers:
+            if isinstance(handler, logging.StreamHandler) and not isinstance(
+                handler, logging.FileHandler
+            ):
+                handler.setLevel(logging.WARNING)
+    plan_method = getattr(engine, "plan", None)
+    execute_method = getattr(engine, "execute_plan", None)
+    if not callable(plan_method) or not callable(execute_method):
+        raise CLIError(
+            "XTF_E_CORE_PLAN_UNAVAILABLE",
+            "core planner interface is unavailable; expected XTFSyncEngine.plan/execute_plan",
+            EXIT_RUNTIME,
+        )
+    try:
+        plan = plan_method(dataframe)
+    except KeyboardInterrupt:
+        raise
+    except ValueError as exc:
+        raise CLIError("XTF_E_CONFIG_INVALID", str(exc), EXIT_CONFIG) from exc
+    except RuntimeError as exc:
+        raise CLIError(
+            "XTF_E_PLAN_INCOMPLETE",
+            str(exc),
+            EXIT_REMOTE,
+            {"config_path": str(resolved.path) if resolved.path else None},
+        ) from exc
+    except Exception as exc:
+        error = _normalize_exception(exc, phase="plan")
+        if error.details is None:
+            error.details = {
+                "config_path": str(resolved.path) if resolved.path else None
+            }
+        raise error from exc
+    plan_data = _as_dict(plan)
+    for warning in plan_data.get("warnings") or ():
+        reporter.warning(str(warning))
+    if args.dry_run:
+        return (
+            EXIT_OK,
+            {
+                "dry_run": True,
+                "config_path": str(resolved.path) if resolved.path else None,
+                "plan": plan_data,
+            },
+            "Dry-run plan created; nothing executed.",
+        )
+
+    mode = getattr(resolved.config.sync_mode, "value", resolved.config.sync_mode)
+    if (
+        mode in {"overwrite", "clone"} or _plan_is_destructive(plan)
+    ) and not args.allow_delete:
+        raise CLIError(
+            "XTF_E_DELETE_CONFIRMATION_REQUIRED",
+            "the requested mode or generated plan is destructive; rerun with --allow-delete",
+            EXIT_CONFIG,
+            {
+                "plan": plan_data,
+                "config_path": str(resolved.path) if resolved.path else None,
+                "dry_run": False,
+            },
+        )
+
+    reporter.info("Executing synchronization plan...")
+    try:
+        outcome = execute_method(plan)
+    except KeyboardInterrupt:
+        raise
+    except Exception as exc:
+        raise _normalize_exception(exc, phase="execute") from exc
+    outcome_data = _as_dict(outcome)
+    ok = bool(getattr(outcome, "ok", outcome_data.get("ok", False)))
+    if not ok:
+        raw_status = getattr(outcome, "status", outcome_data.get("status", "failed"))
+        status = str(getattr(raw_status, "value", raw_status))
+        error_data = outcome_data.get("error")
+        error_kind = (
+            str(error_data.get("kind"))
+            if isinstance(error_data, Mapping) and error_data.get("kind")
+            else "mutation"
+        )
+        exit_codes = {
+            "validation": EXIT_CONFIG,
+            "auth": EXIT_AUTH,
+            "resource": EXIT_AUTH,
+            "read": EXIT_REMOTE,
+            "mutation": EXIT_PARTIAL,
+            "verification": EXIT_VERIFICATION,
+            "internal": EXIT_RUNTIME,
+        }
+        exit_code = exit_codes.get(error_kind, EXIT_PARTIAL)
+        error_codes = {
+            "validation": "XTF_E_CONFIG_INVALID",
+            "auth": "XTF_E_AUTH",
+            "resource": "XTF_E_RESOURCE",
+            "read": "XTF_E_PLAN_INCOMPLETE",
+            "mutation": "XTF_E_MUTATION_REJECTED",
+            "verification": "XTF_E_VERIFICATION_MISMATCH",
+            "internal": "XTF_E_INTERNAL",
+        }
+        raise CLIError(
+            error_codes.get(error_kind, "XTF_E_MUTATION_REJECTED"),
+            str(
+                error_data.get("message")
+                if isinstance(error_data, Mapping) and error_data.get("message")
+                else error_data or status
+            ),
+            exit_code,
+            {
+                "outcome": outcome_data,
+                "config_path": str(resolved.path) if resolved.path else None,
+            },
+        )
+    return (
+        EXIT_OK,
+        {
+            "dry_run": False,
+            "config_path": str(resolved.path) if resolved.path else None,
+            "outcome": outcome_data,
+        },
+        "Synchronization completed.",
+    )
+
+
+def _config_validate(args: argparse.Namespace) -> tuple[int, dict[str, Any], str]:
+    resolved = resolve_config(args, require_file=True)
+    path = str(resolved.path) if resolved.path else None
+    return (
+        EXIT_OK,
+        {"valid": True, "schema_version": 2, "path": path},
+        f"Valid v2 configuration: {path}",
+    )
+
+
+def _config_show(args: argparse.Namespace) -> tuple[int, dict[str, Any], str]:
+    resolved = resolve_config(args, require_file=True)
+    values = shown_values(resolved)
+    result = {
+        "schema_version": 2,
+        "path": str(resolved.path) if resolved.path else None,
+        "values": values,
+        "sources": resolved.sources,
+    }
+    lines = [f"Configuration: {result['path']}"]
+    for name in sorted(values):
+        value = values[name]
+        if name == "selective_sync" and isinstance(value, Mapping):
+            for child, child_value in sorted(value.items()):
+                full_name = f"selective_sync.{child}"
+                lines.append(
+                    f"{full_name}: {child_value!r} [{resolved.sources.get(full_name, 'unknown')}]"
+                )
+        else:
+            lines.append(f"{name}: {value!r} [{resolved.sources.get(name, 'unknown')}]")
+    return EXIT_OK, result, "\n".join(lines)
+
+
+def _config_init(args: argparse.Namespace) -> tuple[int, dict[str, Any], str]:
+    path = Path(args.output)
+    write_template(
+        path,
+        force=args.force,
+        source_type=args.source_type,
+        target_type=args.target_type,
+    )
+    return (
+        EXIT_OK,
+        {
+            "path": str(path),
+            "schema_version": 2,
+            "source_type": args.source_type,
+            "target_type": args.target_type,
+        },
+        f"Created v2 configuration: {path}",
+    )
+
+
+def _doctor_local(
+    args: argparse.Namespace,
+) -> tuple[ResolvedConfig | None, list[dict[str, Any]]]:
+    checks: list[dict[str, Any]] = [
+        {
+            "name": "python",
+            "ok": sys.version_info >= (3, 10),
+            "detail": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+        }
+    ]
+    required_modules = ("pandas", "requests", "yaml")
+    missing_modules = [
+        name for name in required_modules if importlib.util.find_spec(name) is None
+    ]
+    checks.append(
+        {
+            "name": "dependencies",
+            "ok": not missing_modules,
+            "detail": (
+                "available"
+                if not missing_modules
+                else f"missing: {', '.join(missing_modules)}"
+            ),
+        }
+    )
+
+    from utils.excel_reader import get_available_engines
+
+    engines = get_available_engines()
+    checks.append(
+        {
+            "name": "excel_engine",
+            "ok": bool(engines["calamine"] or engines["openpyxl"]),
+            "detail": {
+                "primary": engines["primary"],
+                "fallback": engines["fallback"],
+            },
+        }
+    )
+    path = discover_config(getattr(args, "config", None))
+    resolved: ResolvedConfig | None = None
+    if path or has_cli_overrides(args):
+        resolved = resolve_config(args, require_file=bool(path))
+        checks.append(
+            {
+                "name": "config",
+                "ok": True,
+                "detail": str(path) if path else "flags",
+            }
+        )
+        source_type = getattr(
+            resolved.config.source_type, "value", resolved.config.source_type
+        )
+        if source_type == "file":
+            input_path = Path(resolved.config.file_path or "")
+            input_exists = input_path.is_file()
+            checks.append(
+                {"name": "input", "ok": input_exists, "detail": str(input_path)}
+            )
+            if input_exists:
+                from core.reader import DataFileReader
+
+                checks.append(
+                    {
+                        "name": "input_format",
+                        "ok": DataFileReader.is_supported(input_path),
+                        "detail": input_path.suffix.lower(),
+                    }
+                )
+    else:
+        checks.append(
+            {
+                "name": "config",
+                "ok": True,
+                "detail": "not present; flags-only sync is available",
+            }
+        )
+    return resolved, checks
+
+
+def _doctor_network(resolved: ResolvedConfig) -> list[dict[str, Any]]:
+    config = resolved.config
+    from api import XTFFeishuClient
+
+    client = XTFFeishuClient(
+        config.app_id,
+        config.app_secret,
+        max_retries=config.max_retries,
+        rate_limit_delay=config.rate_limit_delay,
+    )
+    checks: list[dict[str, Any]] = []
+    target_type = getattr(config.target_type, "value", config.target_type)
+    if target_type == "bitable":
+        backend = client.bitable_backend(
+            backend=config.bitable_api_backend,
+            user_id_type=config.bitable_user_id_type,
+        )
+        target_fields = backend.list_fields(
+            config.app_token or "", config.table_id or ""
+        )
+        checks.append(
+            {"name": "target_fields", "ok": True, "detail": len(target_fields)}
+        )
+        source_type = getattr(config.source_type, "value", config.source_type)
+        if source_type == "bitable":
+            source_fields = backend.list_fields(
+                config.source_app_token or "", config.source_table_id or ""
+            )
+            checks.append(
+                {"name": "source_fields", "ok": True, "detail": len(source_fields)}
+            )
+    else:
+        sheet = client.sheet(
+            start_row=config.start_row,
+            start_column=config.start_column,
+            scan_max_rows=config.sheet_scan_max_rows,
+            scan_max_cols=config.sheet_scan_max_cols,
+            write_max_rows=config.sheet_write_max_rows,
+            write_max_cols=config.sheet_write_max_cols,
+        )
+        metadata = sheet.query_sheets(config.spreadsheet_token or "")
+        found = any(item.sheet_id == config.sheet_id for item in metadata)
+        if not found:
+            raise CLIError(
+                "XTF_E_REMOTE_RESOURCE_NOT_FOUND",
+                f"sheet_id not found in spreadsheet metadata: {config.sheet_id}",
+                EXIT_AUTH,
+            )
+        checks.append({"name": "sheet_metadata", "ok": True, "detail": len(metadata)})
+    return checks
+
+
+def _doctor(
+    args: argparse.Namespace, reporter: Reporter
+) -> tuple[int, dict[str, Any], str]:
+    resolved, checks = _doctor_local(args)
+    if args.network:
+        if resolved is None:
+            resolved = resolve_config(args)
+        reporter.info("Running read-only remote metadata checks...")
+        checks.extend(_doctor_network(resolved))
+    ok = all(bool(item["ok"]) for item in checks)
+    if not ok:
+        raise CLIError(
+            "XTF_E_DOCTOR_FAILED",
+            "one or more doctor checks failed",
+            EXIT_INPUT,
+            {"checks": checks},
+        )
+    config = resolved.config if resolved is not None else None
+    return (
+        EXIT_OK,
+        {
+            "network": bool(args.network),
+            "checks": checks,
+            "config_path": (
+                str(resolved.path) if resolved is not None and resolved.path else None
+            ),
+            "source": (
+                {"type": getattr(config.source_type, "value", config.source_type)}
+                if config is not None
+                else None
+            ),
+            "target": (
+                {"type": getattr(config.target_type, "value", config.target_type)}
+                if config is not None
+                else None
+            ),
+            "requested_mode": (
+                getattr(config.sync_mode, "value", config.sync_mode)
+                if config is not None
+                else None
+            ),
+            "effective_mode": None,
+        },
+        "Doctor checks passed.",
+    )
+
+
+def _dispatch(
+    args: argparse.Namespace, reporter: Reporter
+) -> tuple[int, dict[str, Any], str]:
+    if args.command == "sync":
+        return _sync(args, reporter)
+    if args.command == "doctor":
+        return _doctor(args, reporter)
+    if args.command == "config":
+        if args.config_command == "init":
+            return _config_init(args)
+        if args.config_command == "validate":
+            return _config_validate(args)
+        if args.config_command == "show":
+            return _config_show(args)
+    raise CLIError("XTF_E_USAGE", "unsupported command", 2)
+
+
+def _normalize_exception(exc: Exception, *, phase: str = "general") -> CLIError:
+    if isinstance(exc, CLIError):
+        return exc
+    try:
+        from api import FeishuAPIError, PartialBatchError
+
+        if isinstance(exc, PartialBatchError):
+            return CLIError("XTF_E_MUTATION_PARTIAL", str(exc), EXIT_PARTIAL)
+        if isinstance(exc, FeishuAPIError):
+            auth_codes = {99991661, 99991663, 99991664, 99991668}
+            if exc.code in auth_codes or exc.http_status in {401, 403}:
+                return CLIError("XTF_E_AUTH", str(exc), EXIT_AUTH)
+            if exc.http_status == 404:
+                return CLIError("XTF_E_RESOURCE", str(exc), EXIT_AUTH)
+            if phase == "execute":
+                return CLIError("XTF_E_MUTATION_REJECTED", str(exc), EXIT_PARTIAL)
+            return CLIError("XTF_E_REMOTE", str(exc), EXIT_REMOTE)
+    except ImportError:
+        pass
+    return CLIError("XTF_E_RUNTIME", str(exc), EXIT_RUNTIME)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    started = perf_counter()
+    command_hint = next(
+        (item for item in raw_argv if item in {"sync", "config", "doctor"}), None
+    )
+    reporter = Reporter(
+        json_mode="--json" in raw_argv,
+        quiet="--quiet" in raw_argv,
+        command=command_hint,
+    )
+    captured = io.StringIO()
+
+    def duration_ms() -> int:
+        return max(0, round((perf_counter() - started) * 1000))
+
+    def flush_diagnostics() -> None:
+        diagnostics = captured.getvalue()
+        if not diagnostics:
+            return
+        if not reporter.quiet:
+            print(diagnostics, end="", file=sys.stderr)
+            return
+        important = "".join(
+            line
+            for line in diagnostics.splitlines(keepends=True)
+            if any(
+                marker in line
+                for marker in (" - WARNING - ", " - ERROR - ", " - CRITICAL - ")
+            )
+        )
+        if important:
+            print(important, end="", file=sys.stderr)
+
+    try:
+        args = parse_args(raw_argv)
+        reporter = Reporter(
+            json_mode=bool(getattr(args, "json", False)),
+            quiet=bool(getattr(args, "quiet", False)),
+            command=args.command,
+        )
+        with redirect_stdout(captured):
+            exit_code, result, human = _dispatch(args, reporter)
+        flush_diagnostics()
+        reporter.success(args.command, result, human, duration_ms())
+        return exit_code
+    except ParserSignal as signal:
+        if signal.message:
+            print(signal.message, end="")
+        return signal.status
+    except KeyboardInterrupt:
+        error = CLIError("XTF_E_INTERRUPTED", "interrupted by user", EXIT_INTERRUPTED)
+        flush_diagnostics()
+        reporter.error(error, duration_ms())
+        return error.exit_code
+    except Exception as exc:  # noqa: BLE001 - CLI boundary normalizes all failures.
+        error = _normalize_exception(exc)
+        flush_diagnostics()
+        reporter.error(error, duration_ms())
+        return error.exit_code
+
+
+__all__ = ["main"]
