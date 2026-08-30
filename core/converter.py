@@ -176,11 +176,7 @@ class DataConverter:
         """Normalize supported epoch seconds/milliseconds in 2000-2100."""
         if cls.MIN_TIMESTAMP_SECONDS <= value <= cls.MAX_TIMESTAMP_SECONDS:
             return int(value * 1000)
-        if (
-            cls.MIN_TIMESTAMP_MILLISECONDS
-            <= value
-            <= cls.MAX_TIMESTAMP_MILLISECONDS
-        ):
+        if cls.MIN_TIMESTAMP_MILLISECONDS <= value <= cls.MAX_TIMESTAMP_MILLISECONDS:
             return int(value)
         if strict:
             raise ValueError(
@@ -213,6 +209,8 @@ class DataConverter:
             value = value.to_pydatetime()
 
         if isinstance(value, dt.datetime):
+            if value.tzinfo is not None and value.utcoffset() is not None:
+                value = value.astimezone()
             return value.date().isoformat()
 
         if isinstance(value, dt.date):
@@ -224,8 +222,7 @@ class DataConverter:
             if milliseconds is None:
                 return None
             seconds = milliseconds / 1000
-            # Keep index normalization aligned with _force_to_timestamp(), which
-            # parses date strings as local wall-clock dates before writing them.
+            # ``day`` intentionally uses the host's local business date.
             return dt.datetime.fromtimestamp(seconds).date().isoformat()
 
         if isinstance(value, str):
@@ -265,6 +262,11 @@ class DataConverter:
             return self._numeric_timestamp_to_milliseconds(float(value))
         if isinstance(value, str) and value.strip().isdigit():
             return self._exact_index_timestamp_ms(int(value.strip()))
+        return self._datetime_like_to_milliseconds(value, naive_utc=True)
+
+    @staticmethod
+    def _datetime_like_to_milliseconds(value: Any, *, naive_utc: bool) -> Optional[int]:
+        """Convert datetime-like values while preserving the selected naive zone."""
         if isinstance(value, dt.date) and not isinstance(value, dt.datetime):
             value = dt.datetime.combine(value, dt.time.min)
         try:
@@ -274,10 +276,10 @@ class DataConverter:
         if pd.isna(parsed):
             return None
         if parsed.tzinfo is None:
+            if not naive_utc:
+                return int(parsed.to_pydatetime().timestamp() * 1000)
             parsed = parsed.tz_localize("UTC")
-        else:
-            parsed = parsed.tz_convert("UTC")
-        return int(parsed.timestamp() * 1000)
+        return int(parsed.tz_convert("UTC").value // 1_000_000)
 
     def _normalize_index_value(
         self,
@@ -1237,6 +1239,7 @@ class DataConverter:
 
     def _force_to_timestamp(self, value, field_name: str):
         """强制转换为时间戳"""
+        naive_utc = self.datetime_index_granularity == "exact"
         # 如果已经是数字时间戳
         if isinstance(value, (int, float)):
             try:
@@ -1275,9 +1278,15 @@ class DataConverter:
             for fmt in date_formats:
                 try:
                     dt_obj = dt.datetime.strptime(str_val, fmt)
-                    return int(dt_obj.timestamp() * 1000)
+                    return self._datetime_like_to_milliseconds(
+                        dt_obj, naive_utc=naive_utc
+                    )
                 except ValueError:
                     continue
+
+            parsed = self._datetime_like_to_milliseconds(str_val, naive_utc=naive_utc)
+            if parsed is not None:
+                return parsed
 
             # 如果都解析失败，记录警告
             self.logger.warning(
@@ -1285,9 +1294,10 @@ class DataConverter:
             )
             return None
 
-        # 处理pandas/Python时间戳
-        if hasattr(value, "timestamp"):
-            return int(value.timestamp() * 1000)
+        # exact 的 naive 值按 UTC；day 保留历史本地业务日语义。
+        parsed = self._datetime_like_to_milliseconds(value, naive_utc=naive_utc)
+        if parsed is not None:
+            return parsed
 
         self.logger.warning(
             f"字段 '{field_name}': 无法将 {type(value).__name__} '{value}' 转换为时间戳"

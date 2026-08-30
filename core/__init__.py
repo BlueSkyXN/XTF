@@ -21,6 +21,7 @@ XTF 核心模块包
         - SyncConfig: 统一同步配置数据类
         - SyncMode: 同步模式枚举（full/incremental/overwrite/clone）
         - TargetType: 目标类型枚举（bitable/sheet）
+        - SourceType: 数据源类型枚举（file/bitable）
         - ConfigManager: 配置管理器
         - create_sample_config: 创建示例配置文件
         - get_target_description: 获取目标类型描述
@@ -53,6 +54,7 @@ XTF 核心模块包
 """
 
 from .config import (
+    SourceType,
     SyncConfig,
     SyncMode,
     TargetType,
@@ -62,10 +64,12 @@ from .config import (
 )
 from .converter import DataConverter
 from .engine import XTFSyncEngine
+from .plan import ErrorKind, OutcomeStatus, PlanAction, SyncOutcome, SyncPlan
 from .reader import DataFileReader
 
 __all__ = [
     "SyncConfig",
+    "SourceType",
     "SyncMode",
     "TargetType",
     "ConfigManager",
@@ -73,5 +77,10 @@ __all__ = [
     "get_target_description",
     "DataConverter",
     "XTFSyncEngine",
+    "PlanAction",
+    "SyncPlan",
+    "SyncOutcome",
+    "OutcomeStatus",
+    "ErrorKind",
     "DataFileReader",
 ]

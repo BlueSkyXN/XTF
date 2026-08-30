@@ -46,14 +46,40 @@ class Reporter:
         self.json_mode = json_mode
         self.quiet = quiet
         self.command = command
+        self._sensitive_values: set[str] = set()
+
+    def add_sensitive_config(self, config: Any) -> None:
+        """Register configured secrets and resource tokens for output redaction."""
+        for name, value in vars(config).items():
+            if (
+                isinstance(value, str)
+                and value
+                and any(marker in name.lower() for marker in ("secret", "token"))
+            ):
+                self._sensitive_values.add(value)
+
+    def redact(self, value: str) -> str:
+        redacted = value
+        for sensitive in sorted(self._sensitive_values, key=len, reverse=True):
+            redacted = redacted.replace(sensitive, "[REDACTED]")
+        return redacted
+
+    def sanitize(self, value: Any) -> Any:
+        if isinstance(value, str):
+            return self.redact(value)
+        if isinstance(value, Mapping):
+            return {str(key): self.sanitize(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple, set)):
+            return [self.sanitize(item) for item in value]
+        return value
 
     def info(self, message: str) -> None:
         if not self.quiet and not self.json_mode:
-            print(message, file=sys.stderr)
+            print(self.redact(message), file=sys.stderr)
 
     def warning(self, message: str) -> None:
         if not self.json_mode:
-            print(f"warning: {message}", file=sys.stderr)
+            print(f"warning: {self.redact(message)}", file=sys.stderr)
 
     @staticmethod
     def _envelope(
@@ -114,12 +140,13 @@ class Reporter:
         duration_ms: int,
     ) -> None:
         if self.json_mode:
-            outcome = result.get("outcome")
+            safe_result = self.sanitize(result)
+            outcome = safe_result.get("outcome")
             outcome_status = (
                 outcome.get("status") if isinstance(outcome, Mapping) else None
             )
             status = str(
-                "planned" if result.get("dry_run") else outcome_status or "success"
+                "planned" if safe_result.get("dry_run") else outcome_status or "success"
             )
             print(
                 json.dumps(
@@ -128,14 +155,14 @@ class Reporter:
                         ok=True,
                         status=status,
                         duration_ms=duration_ms,
-                        result=result,
+                        result=safe_result,
                     ),
                     ensure_ascii=False,
                     sort_keys=True,
                 )
             )
         else:
-            print(human)
+            print(self.redact(human))
 
     def error(self, error: CLIError, duration_ms: int) -> None:
         if self.json_mode:
@@ -155,7 +182,7 @@ class Reporter:
             error_data: dict[str, Any] = {
                 "kind": error_kind,
                 "code": error.code,
-                "message": error.message,
+                "message": self.redact(error.message),
             }
             result: dict[str, Any] = {}
             if error.details:
@@ -175,12 +202,12 @@ class Reporter:
                 ok=False,
                 status="error",
                 duration_ms=duration_ms,
-                result=result,
+                result=self.sanitize(result),
                 error=error_data,
             )
             print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
         else:
-            print(f"{error.code}: {error.message}", file=sys.stderr)
+            print(f"{error.code}: {self.redact(error.message)}", file=sys.stderr)
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
@@ -249,6 +276,7 @@ def _sync(
     args: argparse.Namespace, reporter: Reporter
 ) -> tuple[int, dict[str, Any], str]:
     resolved = resolve_config(args)
+    reporter.add_sensitive_config(resolved.config)
     dataframe = _load_dataframe(resolved)
     reporter.info("Planning synchronization...")
 
@@ -290,6 +318,7 @@ def _sync(
             }
         raise error from exc
     plan_data = _as_dict(plan)
+    config_label = str(resolved.path) if resolved.path else "flags/ENV"
     for warning in plan_data.get("warnings") or ():
         reporter.warning(str(warning))
     if args.dry_run:
@@ -300,7 +329,7 @@ def _sync(
                 "config_path": str(resolved.path) if resolved.path else None,
                 "plan": plan_data,
             },
-            "Dry-run plan created; nothing executed.",
+            f"Dry-run plan created; nothing executed. Config: {config_label}.",
         )
 
     mode = getattr(resolved.config.sync_mode, "value", resolved.config.sync_mode)
@@ -375,7 +404,7 @@ def _sync(
             "config_path": str(resolved.path) if resolved.path else None,
             "outcome": outcome_data,
         },
-        "Synchronization completed.",
+        f"Synchronization completed. Config: {config_label}.",
     )
 
 
@@ -568,9 +597,12 @@ def _doctor(
     args: argparse.Namespace, reporter: Reporter
 ) -> tuple[int, dict[str, Any], str]:
     resolved, checks = _doctor_local(args)
+    if resolved is not None:
+        reporter.add_sensitive_config(resolved.config)
     if args.network:
         if resolved is None:
             resolved = resolve_config(args)
+            reporter.add_sensitive_config(resolved.config)
         reporter.info("Running read-only remote metadata checks...")
         checks.extend(_doctor_network(resolved))
     ok = all(bool(item["ok"]) for item in checks)
@@ -607,7 +639,10 @@ def _doctor(
             ),
             "effective_mode": None,
         },
-        "Doctor checks passed.",
+        (
+            "Doctor checks passed. Config: "
+            f"{str(resolved.path) if resolved is not None and resolved.path else 'flags/ENV or none'}."
+        ),
     )
 
 
@@ -667,7 +702,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return max(0, round((perf_counter() - started) * 1000))
 
     def flush_diagnostics() -> None:
-        diagnostics = captured.getvalue()
+        diagnostics = reporter.redact(captured.getvalue())
         if not diagnostics:
             return
         if not reporter.quiet:
