@@ -261,6 +261,7 @@ def test_v3_batch_wire_shapes_and_ignored_fields():
                     "data": {
                         "record_id_list": ["rec_new"],
                         "ignored_fields": [{"id": "fld_x", "reason": "readonly"}],
+                        "revision": "rev-11",
                     },
                 }
             ),
@@ -274,6 +275,7 @@ def test_v3_batch_wire_shapes_and_ignored_fields():
     )
     delete = api.batch_delete("base", "table", ["rec_missing"])
     assert create.outcome is MutationOutcome.PARTIAL
+    assert create.revision == "rev-11"
     assert update.outcome is MutationOutcome.ACCEPTED
     assert delete.record_not_found == ("rec_missing",)
     assert transport.call_api.call_args_list[1].kwargs["json"] == {

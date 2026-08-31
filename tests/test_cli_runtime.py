@@ -445,6 +445,18 @@ def test_runtime_status_and_error_kinds_map_to_stable_exit_codes(monkeypatch, ca
     assert main(BASE_FLAGS) == 5
     assert "XTF_E_RESOURCE" in capsys.readouterr().err
 
+    class StaleSnapshotOutcome(PartialOutcome):
+        applied: ClassVar[list[FakeAction]] = []
+        status = "failed"
+        error: ClassVar[dict[str, str]] = {
+            "kind": "stale_snapshot",
+            "message": "target changed after planning",
+        }
+
+    install_fake_engine(monkeypatch, outcome=StaleSnapshotOutcome())
+    assert main(BASE_FLAGS) == 5
+    assert "XTF_E_STALE_SNAPSHOT" in capsys.readouterr().err
+
     install_fake_engine(monkeypatch, plan_exception=KeyboardInterrupt())
     assert main(BASE_FLAGS) == 130
     assert "XTF_E_INTERRUPTED" in capsys.readouterr().err

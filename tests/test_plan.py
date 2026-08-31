@@ -26,9 +26,11 @@ from core.plan import (
     CreateRecordsAction,
     ExecutionPlan,
     OutcomeStatus,
+    SnapshotPrecondition,
     UpdateRecordsAction,
     WriteColumnsAction,
 )
+from core.key_policy import KeyPolicy
 
 
 def make_remote_engine(
@@ -159,6 +161,30 @@ def test_plan_serialization_omits_mutation_payload():
     assert "payload" not in serialized["actions"][0]
     assert "must-not-leak" not in repr(serialized)
     assert "private" not in repr(serialized)
+
+
+def test_public_plan_omits_snapshot_precondition():
+    action = CreateRecordsAction(
+        records=(CanonicalRecord(None, {"ID": 2}),),
+        scope={"target": "bitable"},
+        precondition=SnapshotPrecondition(
+            "bitable_records",
+            {"revision": "private-revision", "absent_keys": ("private-key",)},
+        ),
+    )
+    plan = ExecutionPlan(
+        requested_mode="incremental",
+        effective_mode="incremental",
+        source={"type": "file"},
+        target={"type": "bitable"},
+        actions=(action,),
+    )
+
+    serialized = repr(plan.to_public().to_dict())
+
+    assert "precondition" not in serialized
+    assert "private-revision" not in serialized
+    assert "private-key" not in serialized
 
 
 def test_executor_rejects_public_plan_document():
@@ -661,6 +687,324 @@ def test_unknown_mutation_without_confirmed_prefix_is_indeterminate():
     assert outcome.error["unknown"] is True
 
 
+def test_base_revision_drift_stops_before_mutation():
+    engine = make_file_bitable_engine(SyncMode.FULL)
+    key = KeyPolicy().normalize(1, 2)
+    assert key is not None
+    action = UpdateRecordsAction(
+        records=(CanonicalRecord("record-1", {"ID": 1, "Name": "updated"}),),
+        scope={"target": "bitable"},
+        precondition=SnapshotPrecondition(
+            "bitable_records",
+            {
+                "backend": "base_v3",
+                "revision": "rev-1",
+                "fingerprint": "planned",
+                "index_column": "ID",
+                "record_keys": {"record-1": key.digest},
+            },
+        ),
+    )
+    plan = ExecutionPlan(
+        requested_mode="full",
+        effective_mode="full",
+        source={"type": "file"},
+        target={"type": "bitable"},
+        actions=(action,),
+    )
+    engine.api.list_records.return_value = RecordReadResult(
+        records=(CanonicalRecord("record-1", {"ID": 1}),),
+        fields=(FieldSchema("id", "ID", FieldKind.NUMBER, raw_type="number"),),
+        complete=True,
+        backend=BitableBackendKind.BASE_V3,
+        revision="rev-2",
+    )
+    engine._execute_action = Mock(return_value=True)
+
+    outcome = engine.execute_plan(plan)
+
+    assert outcome.status is OutcomeStatus.FAILED
+    assert outcome.error["kind"] == "stale_snapshot"
+    assert "revision" in outcome.error["message"]
+    engine._execute_action.assert_not_called()
+
+
+def test_bitable_v1_record_key_drift_stops_update_before_mutation():
+    engine = make_file_bitable_engine(SyncMode.FULL)
+    engine.config.bitable_api_backend = "bitable_v1"
+    planned_key = KeyPolicy().normalize(1, 2)
+    assert planned_key is not None
+    action = UpdateRecordsAction(
+        records=(CanonicalRecord("record-1", {"Name": "updated"}),),
+        scope={"target": "bitable"},
+        precondition=SnapshotPrecondition(
+            "bitable_records",
+            {
+                "backend": "bitable_v1",
+                "revision": None,
+                "fingerprint": "planned",
+                "index_column": "ID",
+                "record_keys": {"record-1": planned_key.digest},
+            },
+        ),
+    )
+    plan = ExecutionPlan(
+        requested_mode="full",
+        effective_mode="full",
+        source={"type": "file"},
+        target={"type": "bitable"},
+        actions=(action,),
+    )
+    engine.api.list_records.return_value = RecordReadResult(
+        records=(CanonicalRecord("record-1", {"ID": 2}),),
+        fields=(FieldSchema("id", "ID", FieldKind.NUMBER, raw_type=2),),
+        complete=True,
+        backend=BitableBackendKind.BITABLE_V1,
+    )
+    engine._execute_action = Mock(return_value=True)
+
+    outcome = engine.execute_plan(plan)
+
+    assert outcome.status is OutcomeStatus.FAILED
+    assert outcome.error["kind"] == "stale_snapshot"
+    assert "映射已漂移" in outcome.error["message"]
+    engine._execute_action.assert_not_called()
+
+
+def test_bitable_v1_create_reconfirms_key_is_still_absent():
+    engine = make_file_bitable_engine(SyncMode.INCREMENTAL)
+    engine.config.bitable_api_backend = "bitable_v1"
+    new_key = KeyPolicy().normalize(2, 2)
+    assert new_key is not None
+    action = CreateRecordsAction(
+        records=(CanonicalRecord(None, {"ID": 2, "Name": "new"}),),
+        scope={"target": "bitable"},
+        precondition=SnapshotPrecondition(
+            "bitable_records",
+            {
+                "backend": "bitable_v1",
+                "revision": None,
+                "fingerprint": "planned",
+                "index_column": "ID",
+                "absent_keys": (new_key.digest,),
+            },
+        ),
+    )
+    plan = ExecutionPlan(
+        requested_mode="incremental",
+        effective_mode="incremental",
+        source={"type": "file"},
+        target={"type": "bitable"},
+        actions=(action,),
+    )
+    engine.api.list_records.return_value = RecordReadResult(
+        records=(CanonicalRecord("record-2", {"ID": 2}),),
+        fields=(FieldSchema("id", "ID", FieldKind.NUMBER, raw_type=2),),
+        complete=True,
+        backend=BitableBackendKind.BITABLE_V1,
+    )
+    engine._execute_action = Mock(return_value=True)
+
+    outcome = engine.execute_plan(plan)
+
+    assert outcome.status is OutcomeStatus.FAILED
+    assert outcome.error["kind"] == "stale_snapshot"
+    assert "已出现计划创建" in outcome.error["message"]
+    engine._execute_action.assert_not_called()
+
+
+def test_confirmed_mutation_with_failed_snapshot_refresh_is_partial_verification():
+    engine = make_file_bitable_engine(SyncMode.FULL)
+    fields = engine.api.list_fields.return_value
+    action = UpdateRecordsAction(
+        records=(CanonicalRecord("existing", {"ID": 1, "Name": "updated"}),),
+        scope={"target": "bitable"},
+        precondition=SnapshotPrecondition(
+            "bitable_records",
+            {
+                "backend": "base_v3",
+                "revision": "rev-1",
+                "index_column": "ID",
+                "record_keys": {},
+            },
+        ),
+    )
+    plan = ExecutionPlan(
+        requested_mode="full",
+        effective_mode="full",
+        source={"type": "file"},
+        target={"type": "bitable"},
+        actions=(action,),
+    )
+    engine.api.list_records.side_effect = [
+        RecordReadResult(
+            records=(CanonicalRecord("existing", {"ID": 1}),),
+            fields=fields,
+            complete=True,
+            backend=BitableBackendKind.BASE_V3,
+            revision="rev-1",
+        ),
+        RuntimeError("readback unavailable"),
+    ]
+    engine._execute_action = Mock(return_value=True)
+
+    outcome = engine.execute_plan(plan)
+
+    assert outcome.status is OutcomeStatus.PARTIAL
+    assert outcome.applied == (action.to_public(),)
+    assert outcome.error["kind"] == "verification"
+    assert "readback unavailable" in outcome.error["message"]
+    assert outcome.verification == (
+        {"kind": "update_records", "status": "failed", "ok": False},
+    )
+
+
+def test_base_receipt_revision_must_match_post_mutation_readback():
+    engine = make_file_bitable_engine(SyncMode.FULL)
+    fields = engine.api.list_fields.return_value
+    action = UpdateRecordsAction(
+        records=(CanonicalRecord("existing", {"ID": 1, "Name": "updated"}),),
+        scope={"target": "bitable"},
+        precondition=SnapshotPrecondition(
+            "bitable_records",
+            {
+                "backend": "base_v3",
+                "revision": "rev-1",
+                "index_column": "ID",
+                "record_keys": {},
+            },
+        ),
+    )
+    plan = ExecutionPlan(
+        requested_mode="full",
+        effective_mode="full",
+        source={"type": "file"},
+        target={"type": "bitable"},
+        actions=(action,),
+    )
+    engine.api.list_records.side_effect = [
+        RecordReadResult(
+            records=(CanonicalRecord("existing", {"ID": 1}),),
+            fields=fields,
+            complete=True,
+            backend=BitableBackendKind.BASE_V3,
+            revision="rev-1",
+        ),
+        RecordReadResult(
+            records=(CanonicalRecord("existing", {"ID": 1}),),
+            fields=fields,
+            complete=True,
+            backend=BitableBackendKind.BASE_V3,
+            revision="rev-3",
+        ),
+    ]
+
+    def confirmed_with_revision(_action):
+        engine._last_action_revision = "rev-2"
+        return True
+
+    engine._execute_action = Mock(side_effect=confirmed_with_revision)
+
+    outcome = engine.execute_plan(plan)
+
+    assert outcome.status is OutcomeStatus.PARTIAL
+    assert outcome.error["kind"] == "verification"
+    assert "receipt revision" in outcome.error["message"]
+
+
+def test_sheet_header_drift_stops_row_patch_before_mutation():
+    engine = make_file_sheet_engine()
+    action = WriteColumnsAction(
+        column_data={"Name": ("updated",)},
+        column_positions={"Name": 2},
+        start_row=2,
+        max_gap=0,
+        header_width=2,
+        scope={"target": "sheet"},
+        precondition=SnapshotPrecondition(
+            "sheet_mapping",
+            {
+                "fingerprint": "planned",
+                "header": ("When", "Name"),
+                "index_mapping": (("planned-key", 0),),
+                "actual_ranges": ("sheet!A1:B2",),
+                "grid": (2, 2),
+            },
+        ),
+    )
+    plan = ExecutionPlan(
+        requested_mode="full",
+        effective_mode="full",
+        source={"type": "file"},
+        target={"type": "sheet"},
+        actions=(action,),
+    )
+    engine.get_current_sheet_data = Mock(
+        return_value=pd.DataFrame({"Changed": [1], "Name": ["existing"]})
+    )
+    engine._execute_action = Mock(return_value=True)
+
+    outcome = engine.execute_plan(plan)
+
+    assert outcome.status is OutcomeStatus.FAILED
+    assert outcome.error["kind"] == "stale_snapshot"
+    engine._execute_action.assert_not_called()
+
+
+def test_sheet_inserted_row_stops_key_to_row_patch_before_mutation():
+    engine = make_file_sheet_engine()
+    planned = pd.DataFrame({"When": ["2026-08-30", "2026-08-31"], "Name": ["A", "B"]})
+    field_types = engine._sheet_index_field_types(planned, planned)
+    planned_mapping = engine.converter.build_data_index(
+        planned,
+        "When",
+        field_types,
+        allow_empty=True,
+        context="planned ",
+    )
+    action = WriteColumnsAction(
+        column_data={"Name": ("updated",)},
+        column_positions={"Name": 2},
+        start_row=2,
+        max_gap=0,
+        header_width=2,
+        scope={"target": "sheet"},
+        precondition=SnapshotPrecondition(
+            "sheet_mapping",
+            {
+                "fingerprint": "planned",
+                "header": ("When", "Name"),
+                "index_mapping": tuple(sorted(planned_mapping.items())),
+                "actual_ranges": ("sheet!A1:B3",),
+                "grid": (3, 2),
+            },
+        ),
+    )
+    plan = ExecutionPlan(
+        requested_mode="full",
+        effective_mode="full",
+        source={"type": "file"},
+        target={"type": "sheet"},
+        actions=(action,),
+    )
+    engine.get_current_sheet_data = Mock(
+        return_value=pd.DataFrame(
+            {
+                "When": ["2026-08-29", "2026-08-30", "2026-08-31"],
+                "Name": ["inserted", "A", "B"],
+            }
+        )
+    )
+    engine._execute_action = Mock(return_value=True)
+
+    outcome = engine.execute_plan(plan)
+
+    assert outcome.status is OutcomeStatus.FAILED
+    assert outcome.error["kind"] == "stale_snapshot"
+    assert "key-row mapping" in outcome.error["message"]
+    engine._execute_action.assert_not_called()
+
+
 def test_execute_auth_error_keeps_auth_kind():
     engine = make_file_bitable_engine(SyncMode.INCREMENTAL)
     action = CreateRecordsAction(
@@ -847,11 +1191,36 @@ def test_file_bitable_planner_covers_modes_without_mutation(
     plan = engine.plan(pd.DataFrame({"ID": [1, 2], "Name": ["old", "new"]}))
 
     assert [action.kind for action in plan.actions] == expected_kinds
+    assert all(action.precondition is not None for action in plan.actions)
     assert plan.destructive is destructive
     engine.api.create_field.assert_not_called()
     engine.api.batch_create.assert_not_called()
     engine.api.batch_update.assert_not_called()
     engine.api.batch_delete.assert_not_called()
+
+
+def test_generated_base_plan_carries_revision_and_key_preconditions():
+    engine = make_file_bitable_engine(SyncMode.FULL)
+    fields = engine.api.list_fields.return_value
+    engine.api.list_records.return_value = RecordReadResult(
+        records=(CanonicalRecord("existing", {"ID": 1}),),
+        fields=fields,
+        complete=True,
+        backend=BitableBackendKind.BASE_V3,
+        revision="rev-1",
+    )
+
+    plan = engine.plan(pd.DataFrame({"ID": [1, 2], "Name": ["old", "new"]}))
+
+    update, create = plan.actions
+    assert update.precondition is not None
+    assert update.precondition.kind == "bitable_records"
+    assert update.precondition.expected["revision"] == "rev-1"
+    assert update.precondition.expected["record_keys"]["existing"]
+    assert create.precondition is not None
+    assert create.precondition.kind == "bitable_records"
+    assert len(create.precondition.expected["absent_keys"]) == 1
+    assert "rev-1" not in repr(plan.to_public().to_dict())
 
 
 def test_file_bitable_planner_uses_predicted_new_index_without_remote_match_read():
@@ -993,20 +1362,36 @@ def test_empty_sheet_keeps_full_mode_instead_of_implicit_clone(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("mode", "expected_kinds", "destructive"),
+    ("mode", "expected_kinds", "expected_preconditions", "destructive"),
     [
-        (SyncMode.FULL, ["write_range", "append_rows"], False),
-        (SyncMode.INCREMENTAL, ["append_rows"], False),
-        (SyncMode.OVERWRITE, ["write_range"], True),
+        (
+            SyncMode.FULL,
+            ["write_range", "append_rows"],
+            ["sheet_content", "sheet_mapping"],
+            False,
+        ),
+        (
+            SyncMode.INCREMENTAL,
+            ["append_rows"],
+            ["sheet_mapping"],
+            False,
+        ),
+        (
+            SyncMode.OVERWRITE,
+            ["write_range"],
+            ["sheet_content"],
+            True,
+        ),
         (
             SyncMode.CLONE,
             ["clear_range", "write_range", "apply_sheet_config"],
+            ["sheet_content", "sheet_empty", None],
             True,
         ),
     ],
 )
 def test_file_sheet_planner_covers_modes_without_mutation(
-    monkeypatch, mode, expected_kinds, destructive
+    monkeypatch, mode, expected_kinds, expected_preconditions, destructive
 ):
     engine = XTFSyncEngine.__new__(XTFSyncEngine)
     engine.config = SyncConfig(
@@ -1037,7 +1422,36 @@ def test_file_sheet_planner_covers_modes_without_mutation(
     plan = engine.plan(pd.DataFrame({"ID": [1, 2], "Name": ["new", "added"]}))
 
     assert [action.kind for action in plan.actions] == expected_kinds
+    assert [
+        action.precondition.kind if action.precondition is not None else None
+        for action in plan.actions
+    ] == expected_preconditions
     assert plan.destructive is destructive
     engine.api.clear_values.assert_not_called()
     engine.api.write_values.assert_not_called()
     engine.api.append_values.assert_not_called()
+
+
+def test_generated_selective_sheet_actions_carry_mapping_preconditions(monkeypatch):
+    engine = make_file_sheet_engine(mode=SyncMode.FULL)
+    engine.config.index_column = "ID"
+    engine.config.selective_sync.enabled = True
+    engine.config.selective_sync.columns = ["Name"]
+    current = pd.DataFrame({"ID": [1], "Name": ["old"]})
+    monkeypatch.setattr(
+        engine,
+        "get_sheet_data_with_validation",
+        Mock(return_value=(current, None, set())),
+    )
+
+    plan = engine.plan(pd.DataFrame({"ID": [1, 2], "Name": ["new", "added"]}))
+
+    assert [action.kind for action in plan.actions] == [
+        "write_columns",
+        "write_columns",
+    ]
+    assert all(
+        action.precondition is not None and action.precondition.kind == "sheet_mapping"
+        for action in plan.actions
+    )
+    assert "precondition" not in repr(plan.to_public().to_dict())

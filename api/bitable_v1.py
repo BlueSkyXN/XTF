@@ -1,19 +1,15 @@
-"""Typed adapter for the existing Feishu Bitable v1 wire API.
-
-This module deliberately keeps the v1 page-token and payload shapes separate
-from Base v3.  ``BitableAPI`` remains the public legacy facade; this adapter
-uses its authenticated transport and business-code retry implementation.
-"""
+"""Typed Bitable v1 backend with direct ownership of its wire contract."""
 
 from __future__ import annotations
 
 import datetime as dt
+import logging
+import time
 import uuid
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from .auth import FeishuAuth
 from .base import RetryableAPIClient
-from .bitable import BitableAPI
 from .bitable_backend import (
     BitableBackendKind,
     CanonicalRecord,
@@ -29,17 +25,18 @@ from .bitable_backend import (
     field_kind_from_type,
     as_user_id_type,
 )
-from .sdk import FeishuAPIError, Paginator
+from .sdk import FeishuAPIError, FeishuResponseParser, Page, Paginator
 from .url import encode_path_segment
 
 
 class BitableV1Backend:
-    """Typed v1 client that composes the existing ``BitableAPI`` transport."""
+    """Typed v1 client owning pagination, business retry, and wire parsing."""
 
     api_family = BitableBackendKind.BITABLE_V1
-    max_batch_create_size = BitableAPI.MAX_BATCH_CREATE_SIZE
-    max_batch_update_size = BitableAPI.MAX_BATCH_UPDATE_SIZE
-    max_batch_delete_size = BitableAPI.MAX_BATCH_DELETE_SIZE
+    max_page_size = 100
+    max_batch_create_size = 1000
+    max_batch_update_size = 1000
+    max_batch_delete_size = 500
     max_batch_get_size = 100
 
     def __init__(
@@ -48,13 +45,86 @@ class BitableV1Backend:
         api_client: Optional[RetryableAPIClient] = None,
         *,
         user_id_type: UserIDType | str = UserIDType.OPEN_ID,
-        legacy_api: Optional[BitableAPI] = None,
     ) -> None:
         self.auth = auth
         self.api_client = api_client or auth.api_client
         self.user_id_type = as_user_id_type(user_id_type)
-        self.legacy_api = legacy_api or BitableAPI(auth, self.api_client)
+        self.logger = logging.getLogger("XTF.bitable_v1")
         self._field_cache: dict[tuple[str, str], tuple[FieldSchema, ...]] = {}
+
+    def _call(
+        self,
+        method: str,
+        url: str,
+        *,
+        retry_transport: bool = True,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        """Call one v1 endpoint; transport and business retry budgets do not nest."""
+        max_retries = getattr(self.api_client, "max_retries", 3)
+        if not isinstance(max_retries, int):
+            max_retries = 3
+        max_retries = max(0, max_retries)
+        for attempt in range(max_retries + 1):
+            response = self.api_client.call_api(
+                method,
+                url,
+                headers=self.auth.get_auth_headers(),
+                retry_transport=retry_transport,
+                **kwargs,
+            )
+            try:
+                result = FeishuResponseParser.parse(response)
+            except FeishuAPIError as error:
+                retryable_business_error = (
+                    error.http_status is not None
+                    and error.http_status < 400
+                    and error.code in FeishuResponseParser.RETRYABLE_BIZ_CODES
+                )
+                if not retryable_business_error or attempt >= max_retries:
+                    raise
+                wait_time = (
+                    error.retry_after
+                    if error.retry_after is not None
+                    else float(2**attempt)
+                )
+                self.logger.warning(
+                    "飞书 v1 业务错误码 %s，等待 %ss 后重试",
+                    error.code,
+                    wait_time,
+                )
+                time.sleep(wait_time)
+                continue
+            if not isinstance(result, dict):
+                raise FeishuAPIError(
+                    -1, "v1 response must be an object", kind="invalid_response"
+                )
+            return result
+        raise RuntimeError("v1 business retry loop exited unexpectedly")
+
+    @staticmethod
+    def _page_data(result: Mapping[str, Any]) -> Dict[str, Any]:
+        data = result.get("data")
+        if not isinstance(data, dict):
+            raise FeishuAPIError(
+                -1, "v1 page data must be an object", kind="invalid_response"
+            )
+        items = data.get("items", [])
+        has_more = data.get("has_more", False)
+        page_token = data.get("page_token")
+        if not isinstance(items, list):
+            raise FeishuAPIError(
+                -1, "v1 page items must be a list", kind="invalid_response"
+            )
+        if not isinstance(has_more, bool):
+            raise FeishuAPIError(
+                -1, "v1 page has_more must be boolean", kind="invalid_response"
+            )
+        if page_token is not None and not isinstance(page_token, str):
+            raise FeishuAPIError(
+                -1, "v1 page_token must be a string or null", kind="invalid_response"
+            )
+        return data
 
     @staticmethod
     def _field_schema(field: Dict[str, Any]) -> FieldSchema:
@@ -157,9 +227,30 @@ class BitableV1Backend:
         )
 
     def list_fields(self, app_token: str, table_id: str) -> tuple[FieldSchema, ...]:
+        app = encode_path_segment(app_token)
+        table = encode_path_segment(table_id)
+        url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app}/tables/{table}/fields"
+
+        def fetch(page_token: Optional[str]) -> Page[Dict[str, Any]]:
+            params: Dict[str, Any] = {"page_size": self.max_page_size}
+            if page_token:
+                params["page_token"] = page_token
+            data = self._page_data(self._call("GET", url, params=params))
+            items = data.get("items", [])
+            if any(not isinstance(item, dict) for item in items):
+                raise FeishuAPIError(
+                    -1, "v1 field items must be objects", kind="invalid_response"
+                )
+            return Page(
+                items=items,
+                next_page_token=data.get("page_token"),
+                has_more=data.get("has_more", False),
+                raw=data,
+            )
+
         schemas = tuple(
             self._field_schema(item)
-            for item in self.legacy_api.list_fields(app_token, table_id)
+            for item in Paginator[Dict[str, Any]]().collect(fetch)
         )
         self._field_cache[(app_token, table_id)] = schemas
         return schemas
@@ -266,10 +357,10 @@ class BitableV1Backend:
         table = encode_path_segment(table_id)
         url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app}/tables/{table}/fields"
         try:
-            _, result = self.legacy_api._call_api_with_biz_retry(
+            result = self._call(
                 "POST",
                 url,
-                headers=self.auth.get_auth_headers(),
+                retry_transport=False,
                 json={"field_name": field_name, "type": field_type},
             )
         except FeishuAPIError as exc:
@@ -282,6 +373,7 @@ class BitableV1Backend:
             backend=self.api_family,
             requested_count=1,
             accepted_count=1,
+            unit="field",
             outcome=MutationOutcome.ACCEPTED,
             raw_metadata=result.get("data", {}) if isinstance(result, dict) else {},
         )
@@ -292,15 +384,31 @@ class BitableV1Backend:
         table_id: str,
         field_names: Optional[List[str]],
     ) -> List[Dict[str, Any]]:
-        def fetch(token: Optional[str]):
-            return self.legacy_api._search_records_page(
-                app_token,
-                table_id,
-                page_token=token,
-                field_names=field_names,
+        app = encode_path_segment(app_token)
+        table = encode_path_segment(table_id)
+        url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app}/tables/{table}/records/search"
+
+        def fetch(token: Optional[str]) -> Page[Dict[str, Any]]:
+            params: Dict[str, Any] = {"page_size": self.max_page_size}
+            if token:
+                params["page_token"] = token
+            body: Dict[str, Any] = {}
+            if field_names is not None:
+                body["field_names"] = field_names
+            data = self._page_data(self._call("POST", url, params=params, json=body))
+            items = data.get("items", [])
+            if any(not isinstance(item, dict) for item in items):
+                raise FeishuAPIError(
+                    -1, "v1 record items must be objects", kind="invalid_response"
+                )
+            return Page(
+                items=items,
+                next_page_token=data.get("page_token"),
+                has_more=data.get("has_more", False),
+                raw=data,
             )
 
-        return Paginator().collect(fetch)
+        return Paginator[Dict[str, Any]]().collect(fetch)
 
     def list_records(
         self,
@@ -356,10 +464,9 @@ class BitableV1Backend:
             "record_ids": list(record_ids),
             "user_id_type": self.user_id_type.value,
         }
-        _, envelope = self.legacy_api._call_api_with_biz_retry(
+        envelope = self._call(
             "POST",
             url,
-            headers=self.auth.get_auth_headers(),
             json=body,
         )
         data = envelope.get("data")
@@ -454,10 +561,9 @@ class BitableV1Backend:
             params["client_token"] = str(uuid.uuid4())
             params["ignore_consistency_check"] = "true"
         try:
-            _, result = self.legacy_api._call_api_with_biz_retry(
+            result = self._call(
                 "POST",
                 url,
-                headers=self.auth.get_auth_headers(),
                 params=params,
                 json=body,
             )
@@ -492,14 +598,23 @@ class BitableV1Backend:
         accepted = (
             len(record_ids) if operation == "batch_create" and record_ids else requested
         )
+        revision = data.get("revision", data.get("rev"))
+        if revision is not None and not isinstance(revision, (int, str)):
+            raise FeishuAPIError(
+                -1,
+                "v1 mutation revision must be int or string",
+                kind="invalid_response",
+            )
         return MutationReceipt(
             operation=operation,
             backend=self.api_family,
             requested_count=requested,
             accepted_count=accepted,
+            unit="record",
             record_ids=tuple(record_ids),
             ignored_fields=tuple(item for item in ignored if isinstance(item, dict)),
             record_not_found=tuple(item for item in not_found if isinstance(item, str)),
+            revision=revision,
             outcome=outcome,
             raw_metadata=data,
         )

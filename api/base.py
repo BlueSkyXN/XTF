@@ -81,7 +81,7 @@
 import time
 import logging
 import random
-from typing import Optional
+from typing import Any, Optional
 
 import requests  # type: ignore[import-untyped]
 
@@ -117,8 +117,9 @@ class RetryableAPIClient:
         self,
         max_retries: int = 3,
         rate_limiter: Optional[RateLimiter] = None,
-        use_global_controller: bool = True,
+        use_global_controller: bool = False,
         jitter_ratio: float = 0.1,
+        controller: Optional[Any] = None,
     ):
         """
         初始化API客户端
@@ -130,29 +131,14 @@ class RetryableAPIClient:
         """
         self.max_retries = max_retries
         self.rate_limiter = rate_limiter or RateLimiter()
-        self.use_global_controller = use_global_controller
+        if use_global_controller and controller is None:
+            raise ValueError("controller must be injected explicitly")
+        self.use_global_controller = controller is not None
         self.jitter_ratio = max(0.0, jitter_ratio)
         self.logger = logging.getLogger("XTF.base")
 
-        # 尝试获取全局控制器
-        self._controller = None
-        if self.use_global_controller:
-            try:
-                from core.control import GlobalRequestController
-
-                global_controller = GlobalRequestController()
-                controller = global_controller.get_controller()
-                if controller:
-                    # 避免循环引用，直接使用控制器而不是API客户端
-                    self._controller = controller
-                else:
-                    self.use_global_controller = False
-            except ImportError:
-                self.logger.warning("无法导入GlobalRequestController，回退到传统模式")
-                self.use_global_controller = False
-            except Exception as e:
-                self.logger.warning(f"初始化全局控制器失败，回退到传统模式: {e}")
-                self.use_global_controller = False
+        # Controller is an explicit bootstrap dependency.  API code never imports core.
+        self._controller = controller
 
     def call_api(
         self, method: str, url: str, *, retry_transport: bool = True, **kwargs

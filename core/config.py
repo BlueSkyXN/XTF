@@ -903,14 +903,10 @@ class ConfigManager:
     @staticmethod
     def create_request_controller(config: SyncConfig):
         """从配置创建请求控制器"""
-        # 检查是否启用高级控制
         if not config.enable_advanced_control:
-            from .control import GlobalRequestController
+            return None
 
-            GlobalRequestController().clear()
-            return None  # 返回None表示使用传统控制方式
-
-        from .control import GlobalRequestController
+        from .control import build_request_controller
 
         # 准备重试配置
         retry_config = {
@@ -928,8 +924,7 @@ class ConfigManager:
             "max_requests": config.rate_limit_max_requests,
         }
 
-        # 创建全局控制器
-        return GlobalRequestController.create_from_config(
+        return build_request_controller(
             retry_type=config.retry_strategy_type,
             retry_config=retry_config,
             rate_limit_type=config.rate_limit_strategy_type,

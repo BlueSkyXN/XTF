@@ -454,7 +454,74 @@ class EnhancedAPIClient:
 
 
 # ============================================================================
-# 全局控制器单例
+# Explicit controller construction
+# ============================================================================
+
+
+def build_request_controller(
+    retry_type: str = "exponential_backoff",
+    retry_config: Optional[dict[str, Any]] = None,
+    rate_limit_type: str = "fixed_wait",
+    rate_limit_config: Optional[dict[str, Any]] = None,
+) -> RequestController:
+    """Build one request controller without mutating process-global state."""
+    retry_values = retry_config or {"initial_delay": 0.5, "max_retries": 3}
+    base_retry_config = RetryConfig(
+        **{
+            key: value
+            for key, value in retry_values.items()
+            if key in {"initial_delay", "max_retries", "max_wait_time"}
+        }
+    )
+    retry_strategy: Optional[RetryStrategy]
+    if retry_type == "exponential_backoff":
+        retry_strategy = ExponentialBackoffRetry(
+            base_retry_config, retry_values.get("multiplier", 2.0)
+        )
+    elif retry_type == "linear_growth":
+        retry_strategy = LinearGrowthRetry(
+            base_retry_config, retry_values.get("increment", 0.5)
+        )
+    elif retry_type == "fixed_wait":
+        retry_strategy = FixedWaitRetry(base_retry_config)
+    else:
+        raise ValueError(f"unsupported retry strategy: {retry_type}")
+
+    rate_values = rate_limit_config or {"delay": 0.1}
+    rate_limit_strategy: Optional[RateLimitStrategy]
+    if rate_limit_type == "fixed_wait":
+        rate_limit_strategy = FixedWaitRateLimit(
+            FixedWaitRateConfig(
+                **{key: value for key, value in rate_values.items() if key == "delay"}
+            )
+        )
+    elif rate_limit_type == "sliding_window":
+        rate_limit_strategy = SlidingWindowRateLimit(
+            SlidingWindowRateConfig(
+                **{
+                    key: value
+                    for key, value in rate_values.items()
+                    if key in {"window_size", "max_requests"}
+                }
+            )
+        )
+    elif rate_limit_type == "fixed_window":
+        rate_limit_strategy = FixedWindowRateLimit(
+            FixedWindowRateConfig(
+                **{
+                    key: value
+                    for key, value in rate_values.items()
+                    if key in {"window_size", "max_requests"}
+                }
+            )
+        )
+    else:
+        raise ValueError(f"unsupported rate-limit strategy: {rate_limit_type}")
+    return RequestController(retry_strategy, rate_limit_strategy)
+
+
+# ============================================================================
+# Legacy global controller (removed at the final cutover)
 # ============================================================================
 
 
@@ -501,59 +568,12 @@ class GlobalRequestController:
     ):
         """从配置创建全局控制器"""
 
-        # 创建重试策略
-        retry_strategy: Optional[RetryStrategy] = None
-        if retry_config is None:
-            retry_config = {"initial_delay": 0.5, "max_retries": 3}
-
-        base_retry_config = RetryConfig(
-            **{
-                k: v
-                for k, v in retry_config.items()
-                if k in ["initial_delay", "max_retries", "max_wait_time"]
-            }
+        controller = build_request_controller(
+            retry_type=retry_type,
+            retry_config=retry_config,
+            rate_limit_type=rate_limit_type,
+            rate_limit_config=rate_limit_config,
         )
-
-        if retry_type == "exponential_backoff":
-            multiplier = retry_config.get("multiplier", 2.0)
-            retry_strategy = ExponentialBackoffRetry(base_retry_config, multiplier)
-        elif retry_type == "linear_growth":
-            increment = retry_config.get("increment", 0.5)
-            retry_strategy = LinearGrowthRetry(base_retry_config, increment)
-        elif retry_type == "fixed_wait":
-            retry_strategy = FixedWaitRetry(base_retry_config)
-
-        # 创建频控策略
-        rate_limit_strategy: Optional[RateLimitStrategy] = None
-        if rate_limit_config is None:
-            rate_limit_config = {"delay": 0.1}
-
-        if rate_limit_type == "fixed_wait":
-            fixed_wait_config = FixedWaitRateConfig(
-                **{k: v for k, v in rate_limit_config.items() if k in ["delay"]}
-            )
-            rate_limit_strategy = FixedWaitRateLimit(fixed_wait_config)
-        elif rate_limit_type == "sliding_window":
-            sliding_window_config = SlidingWindowRateConfig(
-                **{
-                    k: v
-                    for k, v in rate_limit_config.items()
-                    if k in ["window_size", "max_requests"]
-                }
-            )
-            rate_limit_strategy = SlidingWindowRateLimit(sliding_window_config)
-        elif rate_limit_type == "fixed_window":
-            fixed_window_config = FixedWindowRateConfig(
-                **{
-                    k: v
-                    for k, v in rate_limit_config.items()
-                    if k in ["window_size", "max_requests"]
-                }
-            )
-            rate_limit_strategy = FixedWindowRateLimit(fixed_window_config)
-
-        # 创建控制器
-        controller = RequestController(retry_strategy, rate_limit_strategy)
 
         # 配置全局实例
         global_controller = cls()

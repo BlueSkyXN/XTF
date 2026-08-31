@@ -29,7 +29,7 @@ XTF 默认使用简单的固定延迟和固定重试机制。当需要更精细�
 **架构**：
 
 ```
-AdvancedController (线程安全单例)
+RequestController (由当前 runtime 的 bootstrap 显式创建)
   │
   ├─→ RetryStrategy (重试策略)
   │     选择一种：指数退避 / 线性增长 / 固定等待
@@ -37,6 +37,11 @@ AdvancedController (线程安全单例)
   └─→ RateLimitStrategy (频控策略)
         选择一种：固定等待 / 滑动窗口 / 固定窗口
 ```
+
+controller 不存储在进程全局 singleton 中，也不会由 `api/` 反向导入 `core.control`。
+`core.bootstrap.bootstrap_runtime()` 根据当前配置构造独立 controller，并注入共享的
+`RetryableAPIClient`；未启用高级控制时不构造 controller，仍使用 transport 自身的
+固定间隔和重试设置。
 
 **启用方式**：
 

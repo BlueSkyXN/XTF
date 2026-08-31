@@ -267,6 +267,7 @@ class XTFFeishuClient:
         max_retries: int = 3,
         rate_limit_delay: float = 0.5,
         api_client: Optional["RetryableAPIClient"] = None,
+        controller: Optional[Any] = None,
     ):
         """创建统一 client；传入 api_client 时重试和频控参数由该实例负责。"""
         from .auth import FeishuAuth
@@ -275,6 +276,7 @@ class XTFFeishuClient:
         self.api_client = api_client or RetryableAPIClient(
             max_retries=max_retries,
             rate_limiter=RateLimiter(rate_limit_delay),
+            controller=controller,
         )
         self.auth: FeishuAuth = FeishuAuth(
             app_id,

@@ -75,7 +75,7 @@ from core.config import (
     create_sample_config,
     get_target_description,
 )
-from core.control import GlobalRequestController
+from core.control import RequestController
 
 
 class TestEnums:
@@ -678,17 +678,19 @@ class TestConfigManager:
             assert secret not in output
         assert output.count("<已配置>") >= len(secret_values)
 
-    def test_disabling_advanced_control_clears_previous_global_controller(
+    def test_request_controller_is_built_explicitly_only_when_enabled(
         self, sample_bitable_config
     ):
-        global_controller = GlobalRequestController.create_from_config()
-        assert global_controller.get_controller() is not None
         sample_bitable_config.enable_advanced_control = False
 
         result = ConfigManager.create_request_controller(sample_bitable_config)
 
         assert result is None
-        assert global_controller.get_controller() is None
+
+        sample_bitable_config.enable_advanced_control = True
+        result = ConfigManager.create_request_controller(sample_bitable_config)
+
+        assert isinstance(result, RequestController)
 
 
 class TestCreateSampleConfig:

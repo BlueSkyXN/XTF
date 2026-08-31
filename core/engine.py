@@ -86,12 +86,18 @@ import pandas as pd
 import logging
 import numbers
 import sys
+from dataclasses import replace
 from datetime import date, datetime
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Mapping, Union, Tuple, cast
 
 from .config import MatchStrategy, SourceType, SyncConfig, SyncMode, TargetType
 from .converter import DataConverter
+from .bootstrap import bootstrap_runtime
+from .compiler import BitablePlanCompiler, SheetPlanCompiler
+from .key_policy import KeyPolicy
+from .mode_policy import ModeDecision, ModePolicy
+from .reconcile import Reconciler
 from .plan import (
     AppendRowsAction,
     ApplySheetConfigAction,
@@ -104,12 +110,15 @@ from .plan import (
     ExecutionPlan,
     OutcomeStatus,
     PlanActionDocument,
+    SnapshotPrecondition,
     SyncResult,
     UpdateRecordsAction,
     VerificationPolicy,
     WriteColumnsAction,
     WriteRangeAction,
 )
+from .runtime_config import RuntimeConfig
+from .snapshot import BitableSnapshot, SheetSnapshot, SourceTable, content_fingerprint
 from api import (
     A1Range,
     BitableBackend,
@@ -120,9 +129,9 @@ from api import (
     MutationOutcome,
     MutationReceipt,
     ReadbackStatus,
+    RecordReadResult,
     PartialBatchError,
     SheetAPI,
-    XTFFeishuClient,
     run_batches,
 )
 
@@ -138,48 +147,23 @@ class XTFSyncEngine:
             config: 统一同步配置对象
         """
         self.config = config
+        self.runtime_config = RuntimeConfig.from_sync_config(config)
         self._last_action_error_kind = ErrorKind.MUTATION
         self._last_action_applied_count = 0
         self._last_action_accepted_units = 0
         self._last_action_applied_rows: set[int] = set()
         self._last_action_mutation_complete = False
         self._last_action_remote_outcome: Optional[str] = None
+        self._last_action_revision: int | str | None = None
 
         # 设置日志（必须先设置，因为其他初始化可能需要日志）
         self.setup_logging()
         self.logger = logging.getLogger("XTF.engine")
 
-        # 初始化全局请求控制器（如果配置了高级重试和频控策略）
-        self._init_global_controller()
-
-        # 通过兼容式 SDK client 装配认证和目标 API；原 API 类保持不变。
-        self.sdk = XTFFeishuClient(
-            config.app_id,
-            config.app_secret,
-            max_retries=config.max_retries,
-            rate_limit_delay=config.rate_limit_delay,
-        )
-        self.api_client = self.sdk.api_client
-        self.auth = self.sdk.auth
-
-        # 根据目标类型选择API客户端
-        self.api: Union[BitableBackend, SheetAPI]
-        if config.target_type == TargetType.BITABLE:
-            self.api = self.sdk.bitable_backend(
-                backend=config.bitable_api_backend,
-                user_id_type=config.bitable_user_id_type,
-            )
-        else:  # SHEET
-            self.api = self.sdk.sheet(
-                start_row=self.config.start_row,
-                start_column=self.config.start_column,
-                scan_max_rows=self.config.sheet_scan_max_rows,
-                scan_max_cols=self.config.sheet_scan_max_cols,
-                write_max_rows=self.config.sheet_write_max_rows,
-                write_max_cols=self.config.sheet_write_max_cols,
-                value_render_option=self.config.sheet_value_render_option,
-                datetime_render_option=self.config.sheet_datetime_render_option,
-            )
+        dependencies = bootstrap_runtime(config)
+        self.api_client = dependencies.transport
+        self.auth = dependencies.auth
+        self.api: Union[BitableBackend, SheetAPI] = dependencies.target
         # 初始化数据转换器
         self.converter = DataConverter(
             config.target_type,
@@ -190,26 +174,17 @@ class XTFSyncEngine:
         self._sheet_grid_cache: Optional[Tuple[int, int]] = None
         self._sheet_grid_cache_key: Optional[Tuple[str, str]] = None
         self._sheet_read_complete = True
-
-    def _init_global_controller(self):
-        """初始化全局请求控制器"""
-        try:
-            from .config import ConfigManager
-
-            # 使用配置管理器创建全局控制器
-            global_controller = ConfigManager.create_request_controller(self.config)
-            if global_controller:
-                self.logger.info(
-                    f"已初始化全局请求控制器 - 重试策略: {self.config.retry_strategy_type}, "
-                    f"频控策略: {self.config.rate_limit_strategy_type}"
-                )
-            else:
-                self.logger.info(
-                    f"使用传统控制模式 - 重试次数: {self.config.max_retries}, "
-                    f"频控间隔: {self.config.rate_limit_delay}s"
-                )
-        except Exception as e:
-            self.logger.warning(f"初始化全局控制器失败，回退到传统模式: {e}")
+        self._last_sheet_read_range: Optional[str] = None
+        self._last_bitable_read_result: Optional[RecordReadResult] = None
+        self._planned_target_snapshot: Optional[
+            Union[BitableSnapshot, SheetSnapshot]
+        ] = None
+        self._planned_bitable_schema_fingerprint: Optional[str] = None
+        self._expected_bitable_revision: int | str | None = None
+        self._expected_bitable_snapshot: Optional[BitableSnapshot] = None
+        self._expected_sheet_snapshot: Optional[SheetSnapshot] = None
+        self._last_action_failure_message: Optional[str] = None
+        self._mode_decision: Optional[ModeDecision] = None
 
     def setup_logging(self):
         """设置日志"""
@@ -254,6 +229,23 @@ class XTFSyncEngine:
     def _bitable_backend(self) -> BitableBackend:
         return cast(BitableBackend, self.api)
 
+    @staticmethod
+    def _schema_fingerprint(fields: Tuple[FieldSchema, ...]) -> str:
+        return content_fingerprint(
+            [
+                {
+                    "id": field.id,
+                    "name": field.name,
+                    "kind": field.kind.value,
+                    "multiple": field.multiple,
+                    "writable": field.writable,
+                    "raw_type": field.raw_type,
+                    "raw_properties": field.raw_properties,
+                }
+                for field in fields
+            ]
+        )
+
     def get_field_types(self) -> Dict[str, FieldSchema]:
         """获取多维表格字段类型映射"""
         if self.config.target_type != TargetType.BITABLE:
@@ -292,6 +284,9 @@ class XTFSyncEngine:
         existing_fields = self._bitable_backend().list_fields(
             self.config.app_token, self.config.table_id
         )
+        self._planned_bitable_schema_fingerprint = self._schema_fingerprint(
+            tuple(existing_fields)
+        )
         field_types = {field.name: field for field in existing_fields}
         missing_fields = [name for name in df.columns if name not in field_types]
         if missing_fields and not self.config.create_missing_fields:
@@ -313,9 +308,9 @@ class XTFSyncEngine:
             )
             suggested_type = int(analysis["suggested_feishu_type"])
             actions.append(
-                CreateFieldAction(
-                    field_name=field_name,
-                    suggested_type=suggested_type,
+                BitablePlanCompiler.create_field(
+                    field_name,
+                    suggested_type,
                     scope={"target": "bitable", "field": field_name},
                 )
             )
@@ -377,6 +372,8 @@ class XTFSyncEngine:
             raise RuntimeError("多维表格读取不完整，拒绝继续同步")
         if result.ignored_fields:
             raise RuntimeError("多维表格读取存在 ignored_fields，拒绝继续同步")
+        self._last_bitable_read_result = result
+        self._planned_target_snapshot = BitableSnapshot.from_result(result)
         return [
             {"record_id": record.record_id, "fields": dict(record.fields)}
             for record in result.records
@@ -604,6 +601,7 @@ class XTFSyncEngine:
         ):
             if not result.complete or result.ignored_fields or result.record_not_found:
                 raise RuntimeError(f"{table_name}读取不完整，拒绝继续写入")
+        self._planned_target_snapshot = BitableSnapshot.from_result(target_result)
 
         index_schema = target_by_name[index_column]
         self._build_strict_bitable_index(
@@ -673,16 +671,16 @@ class XTFSyncEngine:
         actions: List[ExecutionAction] = []
         if records_to_update:
             actions.append(
-                UpdateRecordsAction(
-                    records=tuple(records_to_update),
+                BitablePlanCompiler.update_records(
+                    records_to_update,
                     scope={"target": "bitable"},
                     clears_values=clears_values,
                 )
             )
         if records_to_create:
             actions.append(
-                CreateRecordsAction(
-                    records=tuple(records_to_create),
+                BitablePlanCompiler.create_records(
+                    records_to_create,
                     scope={"target": "bitable"},
                 )
             )
@@ -1313,6 +1311,7 @@ class XTFSyncEngine:
     def get_current_sheet_data(self) -> pd.DataFrame:
         """获取当前电子表格数据"""
         self._sheet_read_complete = True
+        self._last_sheet_read_range = None
         if self.config.target_type != TargetType.SHEET:
             return pd.DataFrame()
 
@@ -1360,6 +1359,7 @@ class XTFSyncEngine:
             )
 
         self.logger.info(f"尝试从范围读取数据: {read_range}")
+        self._last_sheet_read_range = read_range
 
         try:
             if not isinstance(self.api, SheetAPI):
@@ -1467,10 +1467,12 @@ class XTFSyncEngine:
         original_datetime_option = self.config.sheet_datetime_render_option
         original_api_value_option = self.api.value_render_option
         original_api_datetime_option = self.api.datetime_render_option
+        self._last_sheet_read_range = (
+            f"{self.config.sheet_id}!{self.config.start_column}{self.config.start_row}:"
+            f"{end_col}{end_row}"
+        )
         try:
             # 强制使用 Formula 模式读取
-            self.config.sheet_value_render_option = "Formula"
-            self.config.sheet_datetime_render_option = None
             self.api.value_render_option = "Formula"
             self.api.datetime_render_option = None
 
@@ -1488,8 +1490,6 @@ class XTFSyncEngine:
             self.logger.warning(f"读取公式数据失败: {e}")
             return self.get_current_sheet_data(), None, None
         finally:
-            self.config.sheet_value_render_option = original_value_option
-            self.config.sheet_datetime_render_option = original_datetime_option
             self.api.value_render_option = original_api_value_option
             self.api.datetime_render_option = original_api_datetime_option
 
@@ -1497,14 +1497,10 @@ class XTFSyncEngine:
         self.logger.info("  📊 读取计算结果数据...")
         try:
             # 使用配置的读取选项（或 FormattedValue 作为默认）
-            self.config.sheet_value_render_option = (
-                original_value_option or "FormattedValue"
-            )
-            self.config.sheet_datetime_render_option = (
+            self.api.value_render_option = original_value_option or "FormattedValue"
+            self.api.datetime_render_option = (
                 original_datetime_option or "FormattedString"
             )
-            self.api.value_render_option = self.config.sheet_value_render_option
-            self.api.datetime_render_option = self.config.sheet_datetime_render_option
 
             result_values = self.api.get_sheet_data_chunked(
                 self.config.spreadsheet_token,
@@ -1520,8 +1516,6 @@ class XTFSyncEngine:
             self.logger.warning(f"读取结果数据失败: {e}")
             return self.get_current_sheet_data(), None, None
         finally:
-            self.config.sheet_value_render_option = original_value_option
-            self.config.sheet_datetime_render_option = original_datetime_option
             self.api.value_render_option = original_api_value_option
             self.api.datetime_render_option = original_api_datetime_option
 
@@ -2939,6 +2933,116 @@ class XTFSyncEngine:
         sources = getattr(self.config, "config_sources", {})
         return dict(sources) if isinstance(sources, Mapping) else {}
 
+    def _bitable_snapshot_key(
+        self, record: CanonicalRecord, schema: FieldSchema
+    ) -> Optional[str]:
+        policy = KeyPolicy(
+            datetime_granularity=self.config.datetime_index_granularity,
+            datetime_timezone=self.config.datetime_index_timezone,
+        )
+        field_type = self.converter._field_schema_type_code(schema)
+        key = policy.normalize(record.fields.get(schema.name), field_type)
+        return key.digest if key is not None else None
+
+    def _attach_snapshot_preconditions(
+        self, actions: List[ExecutionAction], effective_mode: SyncMode
+    ) -> List[ExecutionAction]:
+        snapshot = getattr(self, "_planned_target_snapshot", None)
+        attached: List[ExecutionAction] = []
+        for position, action in enumerate(actions):
+            precondition: SnapshotPrecondition | None = None
+            if isinstance(action, CreateFieldAction):
+                fingerprint = getattr(self, "_planned_bitable_schema_fingerprint", None)
+                if fingerprint:
+                    precondition = SnapshotPrecondition(
+                        "bitable_schema", {"fingerprint": fingerprint}
+                    )
+            elif isinstance(snapshot, BitableSnapshot):
+                expected: Dict[str, Any] = {
+                    "backend": snapshot.backend.value,
+                    "revision": snapshot.revision,
+                    "fingerprint": snapshot.fingerprint,
+                    "index_column": self.config.index_column,
+                }
+                index_schema = next(
+                    (
+                        field
+                        for field in snapshot.schema
+                        if field.name == self.config.index_column
+                    ),
+                    None,
+                )
+                if index_schema is not None:
+                    record_keys = {
+                        record.record_id: key
+                        for record in snapshot.records
+                        if record.record_id
+                        and (key := self._bitable_snapshot_key(record, index_schema))
+                    }
+                    if isinstance(action, CreateRecordsAction) and (
+                        effective_mode is not SyncMode.CLONE
+                    ):
+                        expected["absent_keys"] = tuple(
+                            key
+                            for record in action.records
+                            if (key := self._bitable_snapshot_key(record, index_schema))
+                        )
+                    elif isinstance(action, (UpdateRecordsAction, DeleteRecordsAction)):
+                        ids = (
+                            tuple(record.record_id for record in action.records)
+                            if isinstance(action, UpdateRecordsAction)
+                            else action.record_ids
+                        )
+                        expected["record_keys"] = {
+                            record_id: record_keys.get(record_id)
+                            for record_id in ids
+                            if record_id
+                        }
+                precondition = SnapshotPrecondition("bitable_records", expected)
+            elif (
+                isinstance(action, CreateRecordsAction)
+                and self.config.match_strategy is MatchStrategy.BY_KEY
+                and self.config.index_column
+            ):
+                precondition = SnapshotPrecondition(
+                    "bitable_absent_keys",
+                    {
+                        "backend": self.config.bitable_api_backend,
+                        "index_column": self.config.index_column,
+                        "absent_values": tuple(
+                            record.fields.get(self.config.index_column)
+                            for record in action.records
+                        ),
+                    },
+                )
+            elif isinstance(snapshot, SheetSnapshot) and not isinstance(
+                action, ApplySheetConfigAction
+            ):
+                expected = {
+                    "fingerprint": snapshot.content_fingerprint,
+                    "header": snapshot.header,
+                    "index_mapping": snapshot.index_mapping,
+                    "actual_ranges": snapshot.actual_ranges,
+                    "grid": snapshot.grid,
+                }
+                if (
+                    effective_mode is SyncMode.CLONE
+                    and isinstance(action, WriteRangeAction)
+                    and position > 0
+                ):
+                    kind = "sheet_empty"
+                elif isinstance(action, (WriteColumnsAction, AppendRowsAction)):
+                    kind = "sheet_mapping"
+                else:
+                    kind = "sheet_content"
+                precondition = SnapshotPrecondition(kind, expected)
+            attached.append(
+                replace(action, precondition=precondition)
+                if precondition is not None
+                else action
+            )
+        return attached
+
     def _make_plan(
         self,
         *,
@@ -2949,6 +3053,7 @@ class XTFSyncEngine:
         actions: List[ExecutionAction],
         warnings: Optional[List[str]] = None,
     ) -> ExecutionPlan:
+        actions = self._attach_snapshot_preconditions(actions, effective_mode)
         plan_warnings = list(warnings or ())
         plan_warnings.extend(self.converter.consume_key_warnings())
         return ExecutionPlan(
@@ -3024,6 +3129,18 @@ class XTFSyncEngine:
         creates: List[CanonicalRecord] = []
         updates: List[CanonicalRecord] = []
         deletes: List[str] = []
+        source_rows = tuple(row for _, row in df.iterrows())
+        reconciliation = (
+            Reconciler.by_key(
+                source_rows,
+                existing_index,
+                source_key=lambda row: self.converter.get_index_value_hash(
+                    row, index_column, field_types
+                ),
+            )
+            if match_strategy is MatchStrategy.BY_KEY
+            else None
+        )
 
         if mode is SyncMode.CLONE:
             deletes = [
@@ -3041,51 +3158,45 @@ class XTFSyncEngine:
         elif mode is SyncMode.OVERWRITE:
             if not index_column:
                 raise ValueError("覆盖同步模式需要指定索引列")
-            for _, row in df.iterrows():
-                index_hash = self.converter.get_index_value_hash(
-                    row, index_column, field_types
-                )
-                if index_hash and index_hash in existing_index:
-                    record_id = existing_index[index_hash].get("record_id")
-                    if record_id:
-                        deletes.append(str(record_id))
+            assert reconciliation is not None
+            for _, _, target_record in reconciliation.matched:
+                record_id = target_record.get("record_id")
+                if record_id:
+                    deletes.append(str(record_id))
             creates = self._canonical_records(
                 self.converter.df_to_records(df, field_types)
             )
         else:
-            for _, row in df.iterrows():
-                index_hash = self.converter.get_index_value_hash(
-                    row, index_column, field_types
-                )
+            assert reconciliation is not None
+            if mode is SyncMode.FULL:
+                for _, row, target_record in reconciliation.matched:
+                    fields = self._row_to_canonical_fields(row, field_types)
+                    record_id = target_record.get("record_id")
+                    if not record_id:
+                        raise RuntimeError("目标记录缺少 record_id")
+                    updates.append(CanonicalRecord(str(record_id), fields))
+            for row in reconciliation.missing:
                 fields = self._row_to_canonical_fields(row, field_types)
-                if index_hash and index_hash in existing_index:
-                    if mode is SyncMode.FULL:
-                        record_id = existing_index[index_hash].get("record_id")
-                        if not record_id:
-                            raise RuntimeError("目标记录缺少 record_id")
-                        updates.append(CanonicalRecord(str(record_id), fields))
-                else:
-                    creates.append(CanonicalRecord(None, fields))
+                creates.append(CanonicalRecord(None, fields))
 
         if deletes:
             actions.append(
-                DeleteRecordsAction(
-                    record_ids=tuple(deletes),
+                BitablePlanCompiler.delete_records(
+                    deletes,
                     scope={"target": "bitable"},
-                    destructive=True,
                 )
             )
         if updates:
             actions.append(
-                UpdateRecordsAction(
-                    records=tuple(updates),
+                BitablePlanCompiler.update_records(
+                    updates,
                     scope={"target": "bitable"},
                 )
             )
         if creates:
             actions.append(
-                CreateRecordsAction(
-                    records=tuple(creates),
+                BitablePlanCompiler.create_records(
+                    creates,
                     scope={"target": "bitable"},
                 )
             )
@@ -3101,25 +3212,22 @@ class XTFSyncEngine:
         clear_range = self._build_sheet_full_range()
         if not clear_range:
             raise RuntimeError("无法获取工作表网格范围")
-        return ClearRangeAction(
-            a1_range=clear_range,
+        return SheetPlanCompiler.clear(
+            clear_range,
             scope={"target": "sheet", "range": clear_range},
-            destructive=True,
-            clears_values=True,
         )
 
     def _sheet_write_action(self, df: pd.DataFrame) -> WriteRangeAction:
         values = self.converter.df_to_values(df)
-        return WriteRangeAction(
-            values=tuple(tuple(row) for row in values),
+        return SheetPlanCompiler.write(
+            values,
             scope={"target": "sheet", "columns": len(df.columns)},
-            clears_values=True,
         )
 
     def _sheet_append_action(self, df: pd.DataFrame) -> AppendRowsAction:
         values = self.converter.df_to_values(df, include_headers=False)
-        return AppendRowsAction(
-            values=tuple(tuple(row) for row in values),
+        return SheetPlanCompiler.append(
+            values,
             header_width=len(df.columns),
             scope={"target": "sheet", "columns": len(df.columns)},
         )
@@ -3162,7 +3270,7 @@ class XTFSyncEngine:
             if self.config.selective_sync.optimize_ranges
             else 0
         )
-        return WriteColumnsAction(
+        return SheetPlanCompiler.columns(
             column_data={name: tuple(values) for name, values in column_data.items()},
             column_positions=dict(positions),
             start_row=start_row,
@@ -3192,19 +3300,18 @@ class XTFSyncEngine:
         index_field_types: Mapping[str, Any],
     ) -> List[ExecutionAction]:
         update_data_map: Dict[int, Dict[str, Any]] = {}
-        new_rows: List[pd.Series] = []
-        for _, row in df.iterrows():
-            index_hash = self.converter.get_index_value_hash(
+        reconciliation = Reconciler.by_key(
+            (row for _, row in df.iterrows()),
+            current_index,
+            source_key=lambda row: self.converter.get_index_value_hash(
                 row, self.config.index_column, dict(index_field_types)
-            )
-            if index_hash and index_hash in current_index:
-                if mode in {SyncMode.FULL, SyncMode.OVERWRITE}:
-                    row_index = current_index[index_hash]
-                    update_data_map[row_index] = {
-                        column: row[column] for column in columns if column in row
-                    }
-            else:
-                new_rows.append(row)
+            ),
+        )
+        if mode in {SyncMode.FULL, SyncMode.OVERWRITE}:
+            for _, row, row_index in reconciliation.matched:
+                update_data_map[row_index] = {
+                    column: row[column] for column in columns if column in row
+                }
 
         actions: List[ExecutionAction] = []
         if update_data_map:
@@ -3218,8 +3325,8 @@ class XTFSyncEngine:
             )
             if action:
                 actions.append(action)
-        if new_rows:
-            new_df = pd.DataFrame(new_rows)
+        if reconciliation.missing:
+            new_df = pd.DataFrame(reconciliation.missing)
             action = self._sheet_columns_action(
                 new_df,
                 current_df,
@@ -3305,6 +3412,25 @@ class XTFSyncEngine:
             return {index_column: 5}
         return {}
 
+    def _capture_sheet_snapshot(
+        self,
+        frame: pd.DataFrame,
+        *,
+        index_mapping: Mapping[str, int],
+        formula_columns: Optional[set[Union[str, int]]] = None,
+    ) -> SheetSnapshot:
+        read_range = getattr(self, "_last_sheet_read_range", None)
+        snapshot = SheetSnapshot.from_dataframe(
+            frame,
+            actual_ranges=((read_range,) if read_range else ()),
+            grid=getattr(self, "_sheet_grid_cache", None),
+            index_mapping=index_mapping,
+            formula_columns=tuple(str(item) for item in (formula_columns or ())),
+            complete=getattr(self, "_sheet_read_complete", True),
+        )
+        self._planned_target_snapshot = snapshot
+        return snapshot
+
     def _plan_file_sheet(self, df: pd.DataFrame) -> ExecutionPlan:
         requested_mode = self.config.sync_mode
         source = {"type": "file", "rows": len(df), "columns": len(df.columns)}
@@ -3327,15 +3453,15 @@ class XTFSyncEngine:
             current_df = self.get_current_sheet_data()
         if not self._require_complete_sheet_read("同步计划"):
             raise RuntimeError("Sheet 读取不完整，拒绝生成写计划")
+        self._capture_sheet_snapshot(
+            current_df,
+            index_mapping={},
+            formula_columns=formula_columns,
+        )
 
         if requested_mode is SyncMode.CLONE:
             actions = [self._sheet_clear_action(), self._sheet_write_action(df)]
-            actions.append(
-                ApplySheetConfigAction(
-                    frame=df.copy(),
-                    scope={"target": "sheet"},
-                )
-            )
+            actions.append(SheetPlanCompiler.enrichment(df))
             return self._make_plan(
                 requested_mode=requested_mode,
                 effective_mode=SyncMode.CLONE,
@@ -3368,6 +3494,11 @@ class XTFSyncEngine:
                 )
             except ValueError as error:
                 raise RuntimeError(f"目标 Sheet 索引不安全: {error}") from error
+        self._capture_sheet_snapshot(
+            current_df,
+            index_mapping=current_index,
+            formula_columns=formula_columns,
+        )
 
         sync_df = df
         selected_columns: Optional[List[str]] = None
@@ -3402,22 +3533,18 @@ class XTFSyncEngine:
             )
 
         if requested_mode is SyncMode.OVERWRITE:
-            new_hashes = {
-                index_hash
-                for _, row in sync_df.iterrows()
-                if (
-                    index_hash := self.converter.get_index_value_hash(
-                        row, self.config.index_column, index_field_types
-                    )
-                )
-            }
+            reconciliation = Reconciler.by_key(
+                (row for _, row in sync_df.iterrows()),
+                current_index,
+                source_key=lambda row: self.converter.get_index_value_hash(
+                    row, self.config.index_column, index_field_types
+                ),
+            )
+            matched_rows = {row_index for _, _, row_index in reconciliation.matched}
             rows = [
                 row
-                for _, row in current_df.iterrows()
-                if self.converter.get_index_value_hash(
-                    row, self.config.index_column, index_field_types
-                )
-                not in new_hashes
+                for row_index, row in current_df.iterrows()
+                if row_index not in matched_rows
             ]
             rows.extend(row for _, row in sync_df.iterrows())
             merged = pd.DataFrame(rows)
@@ -3428,8 +3555,8 @@ class XTFSyncEngine:
             )
             first = actions[0]
             if isinstance(first, WriteRangeAction):
-                actions[0] = WriteRangeAction(
-                    values=first.values,
+                actions[0] = SheetPlanCompiler.write(
+                    first.values,
                     scope=first.scope,
                     destructive=True,
                     clears_values=True,
@@ -3442,30 +3569,28 @@ class XTFSyncEngine:
                 actions=actions,
             )
 
-        updates: List[Tuple[int, pd.Series]] = []
-        new_rows: List[pd.Series] = []
-        for _, row in sync_df.iterrows():
-            index_hash = self.converter.get_index_value_hash(
+        reconciliation = Reconciler.by_key(
+            (row for _, row in sync_df.iterrows()),
+            current_index,
+            source_key=lambda row: self.converter.get_index_value_hash(
                 row, self.config.index_column, index_field_types
-            )
-            if index_hash and index_hash in current_index:
-                if requested_mode is SyncMode.FULL:
-                    updates.append((current_index[index_hash], row))
-            else:
-                new_rows.append(row)
+            ),
+        )
 
         actions = []
-        if updates:
+        if requested_mode is SyncMode.FULL and reconciliation.matched:
             updated = current_df.copy()
-            for row_index, row in updates:
+            for _, row, row_index in reconciliation.matched:
                 for column in sync_df.columns:
                     if column in updated.columns:
                         updated.iloc[row_index, updated.columns.get_loc(column)] = row[
                             column
                         ]
             actions.append(self._sheet_write_action(updated))
-        if new_rows:
-            actions.append(self._sheet_append_action(pd.DataFrame(new_rows)))
+        if reconciliation.missing:
+            actions.append(
+                self._sheet_append_action(pd.DataFrame(reconciliation.missing))
+            )
         return self._make_plan(
             requested_mode=requested_mode,
             effective_mode=requested_mode,
@@ -3476,26 +3601,225 @@ class XTFSyncEngine:
 
     def plan(self, df: Optional[pd.DataFrame] = None) -> ExecutionPlan:
         """Build a complete mutation plan using reads and local classification only."""
-        if (
-            self.config.sync_mode is not SyncMode.CLONE
-            and self.config.match_strategy is MatchStrategy.BY_KEY
-            and not self.config.index_column
-        ):
-            raise ValueError("by_key 模式必须配置 index_column")
+        self._planned_target_snapshot = None
+        self._planned_bitable_schema_fingerprint = None
+        self._mode_decision = ModePolicy.decide(
+            mode=self.config.sync_mode,
+            strategy=self.config.match_strategy,
+            index_column=self.config.index_column,
+            source_type=self.config.source_type,
+            selective_enabled=self.config.selective_sync.enabled,
+        )
         if self.config.source_type is SourceType.BITABLE:
             if df is not None:
                 raise ValueError("source_type=bitable 不接受本地 DataFrame")
             return self._plan_bitable_source()
         if df is None:
             raise ValueError("source_type=file 必须提供 DataFrame")
+        source_table = SourceTable.from_dataframe(df)
+        source_frame = source_table.to_dataframe()
         planned_df = (
-            self._apply_selective_filter(df)
+            self._apply_selective_filter(source_frame)
             if self.config.selective_sync.enabled
-            else df.copy()
+            else source_frame
         )
         if self.config.target_type is TargetType.BITABLE:
             return self._plan_file_bitable(planned_df)
         return self._plan_file_sheet(planned_df)
+
+    def _read_current_bitable_snapshot(self) -> BitableSnapshot:
+        if not self.config.app_token or not self.config.table_id:
+            raise RuntimeError("目标 Bitable 配置不完整")
+        field_names = [self.config.index_column] if self.config.index_column else None
+        result = self._bitable_backend().list_records(
+            self.config.app_token,
+            self.config.table_id,
+            field_names=field_names,
+        )
+        if not result.complete or result.ignored_fields or result.record_not_found:
+            raise RuntimeError("目标 Bitable freshness read 不完整")
+        return BitableSnapshot.from_result(result)
+
+    def _snapshot_record_keys(
+        self, snapshot: BitableSnapshot, index_column: str
+    ) -> Dict[str, str]:
+        schema = next(
+            (field for field in snapshot.schema if field.name == index_column), None
+        )
+        if schema is None:
+            raise RuntimeError(
+                f"目标 Bitable freshness read 缺少索引列 '{index_column}'"
+            )
+        return {
+            record.record_id: key
+            for record in snapshot.records
+            if record.record_id
+            and (key := self._bitable_snapshot_key(record, schema)) is not None
+        }
+
+    def _current_sheet_snapshot(self) -> SheetSnapshot:
+        frame = self.get_current_sheet_data()
+        if not self._require_complete_sheet_read("snapshot freshness"):
+            raise RuntimeError("目标 Sheet freshness read 不完整")
+        mapping: Mapping[str, int] = {}
+        if self.config.index_column:
+            if self.config.index_column not in frame.columns and not frame.empty:
+                raise RuntimeError("目标 Sheet freshness read 的表头已变化")
+            if self.config.index_column in frame.columns:
+                field_types = self._sheet_index_field_types(frame, frame)
+                mapping = self.converter.build_data_index(
+                    frame,
+                    self.config.index_column,
+                    field_types,
+                    allow_empty=True,
+                    context=f"目标 Sheet 索引列 '{self.config.index_column}' ",
+                )
+        read_range = getattr(self, "_last_sheet_read_range", None)
+        return SheetSnapshot.from_dataframe(
+            frame,
+            actual_ranges=((read_range,) if read_range else ()),
+            grid=getattr(self, "_sheet_grid_cache", None),
+            index_mapping=mapping,
+            complete=True,
+        )
+
+    def _check_action_precondition(self, action: ExecutionAction) -> bool:
+        precondition = action.precondition
+        if precondition is None:
+            return True
+        try:
+            if precondition.kind == "bitable_schema":
+                if not self.config.app_token or not self.config.table_id:
+                    raise RuntimeError("目标 Bitable 配置不完整")
+                fields = self._bitable_backend().list_fields(
+                    self.config.app_token, self.config.table_id
+                )
+                if self._schema_fingerprint(tuple(fields)) != precondition.expected.get(
+                    "fingerprint"
+                ):
+                    raise RuntimeError("目标 Bitable schema 在计划后发生变化")
+                return True
+            if precondition.kind in {"bitable_records", "bitable_absent_keys"}:
+                current = self._read_current_bitable_snapshot()
+                expected_backend = precondition.expected.get("backend")
+                if current.backend.value != expected_backend:
+                    raise RuntimeError("目标 Bitable backend 与计划不一致")
+                expected_revision = (
+                    self._expected_bitable_revision
+                    if self._expected_bitable_snapshot is not None
+                    else precondition.expected.get("revision")
+                )
+                if (
+                    precondition.kind == "bitable_records"
+                    and current.backend is BitableBackendKind.BASE_V3
+                    and expected_revision != current.revision
+                ):
+                    raise RuntimeError("目标 Base revision 在计划后发生变化")
+                index_column = precondition.expected.get("index_column")
+                if isinstance(index_column, str) and index_column:
+                    current_keys = self._snapshot_record_keys(current, index_column)
+                    expected_record_keys = precondition.expected.get("record_keys")
+                    if isinstance(expected_record_keys, Mapping):
+                        for record_id, expected_key in expected_record_keys.items():
+                            if current_keys.get(str(record_id)) != expected_key:
+                                raise RuntimeError(
+                                    "目标 Bitable record ID 到 key 的映射已漂移"
+                                )
+                    absent_keys = precondition.expected.get("absent_keys", ())
+                    if set(absent_keys) & set(current_keys.values()):
+                        raise RuntimeError("目标 Bitable 已出现计划创建的 key")
+                    absent_values = precondition.expected.get("absent_values", ())
+                    if absent_values:
+                        schema = next(
+                            field
+                            for field in current.schema
+                            if field.name == index_column
+                        )
+                        policy = KeyPolicy(
+                            datetime_granularity=self.config.datetime_index_granularity,
+                            datetime_timezone=self.config.datetime_index_timezone,
+                        )
+                        field_type = self.converter._field_schema_type_code(schema)
+                        desired = {
+                            key.digest
+                            for value in absent_values
+                            if (key := policy.normalize(value, field_type)) is not None
+                        }
+                        if desired & set(current_keys.values()):
+                            raise RuntimeError("目标 Bitable 已出现计划创建的 key")
+                elif self._expected_bitable_snapshot is None and (
+                    current.fingerprint != precondition.expected.get("fingerprint")
+                ):
+                    raise RuntimeError("目标 Bitable 内容在计划后发生变化")
+                self._expected_bitable_snapshot = current
+                self._expected_bitable_revision = current.revision
+                return True
+            if precondition.kind.startswith("sheet_"):
+                current_sheet = self._current_sheet_snapshot()
+                baseline = self._expected_sheet_snapshot
+                if precondition.kind == "sheet_empty":
+                    if current_sheet.header or current_sheet.index_mapping:
+                        raise RuntimeError("目标 Sheet 在 clear 后不再为空")
+                elif precondition.kind == "sheet_mapping":
+                    expected_header = (
+                        baseline.header
+                        if baseline is not None
+                        else tuple(precondition.expected.get("header", ()))
+                    )
+                    expected_mapping = (
+                        baseline.index_mapping
+                        if baseline is not None
+                        else tuple(precondition.expected.get("index_mapping", ()))
+                    )
+                    if (
+                        current_sheet.header != expected_header
+                        or current_sheet.index_mapping != expected_mapping
+                    ):
+                        raise RuntimeError(
+                            "目标 Sheet header 或 key-row mapping 已漂移"
+                        )
+                else:
+                    expected_fingerprint = (
+                        baseline.content_fingerprint
+                        if baseline is not None
+                        else precondition.expected.get("fingerprint")
+                    )
+                    if current_sheet.content_fingerprint != expected_fingerprint:
+                        raise RuntimeError("目标 Sheet 关键范围在计划后发生变化")
+                self._expected_sheet_snapshot = current_sheet
+                return True
+        except Exception as error:
+            self._last_action_error_kind = ErrorKind.STALE_SNAPSHOT
+            self._last_action_failure_message = str(error)
+            return False
+        return True
+
+    def _advance_snapshot_after_mutation(self, action: ExecutionAction) -> bool:
+        precondition = action.precondition
+        if precondition is None or precondition.kind == "bitable_schema":
+            return True
+        try:
+            if precondition.kind in {"bitable_records", "bitable_absent_keys"}:
+                current = self._read_current_bitable_snapshot()
+                if (
+                    current.backend is BitableBackendKind.BASE_V3
+                    and self._last_action_revision is not None
+                    and current.revision != self._last_action_revision
+                ):
+                    raise RuntimeError(
+                        "mutation receipt revision 与后续 Base readback 不一致"
+                    )
+                self._expected_bitable_snapshot = current
+                self._expected_bitable_revision = current.revision
+            elif precondition.kind.startswith("sheet_"):
+                self._expected_sheet_snapshot = self._current_sheet_snapshot()
+            return True
+        except Exception as error:
+            self._last_action_error_kind = ErrorKind.VERIFICATION
+            self._last_action_failure_message = (
+                f"mutation 后无法推进 snapshot freshness: {error}"
+            )
+            return False
 
     def _reset_action_execution_state(self) -> None:
         self._last_action_error_kind = ErrorKind.MUTATION
@@ -3504,6 +3828,8 @@ class XTFSyncEngine:
         self._last_action_applied_rows = set()
         self._last_action_mutation_complete = False
         self._last_action_remote_outcome = None
+        self._last_action_revision = None
+        self._last_action_failure_message = None
 
     def _record_action_receipt(self, receipt: MutationReceipt) -> None:
         if not hasattr(self, "_last_action_accepted_units"):
@@ -3520,6 +3846,8 @@ class XTFSyncEngine:
         else:
             self._last_action_applied_count += accepted
         self._last_action_remote_outcome = receipt.outcome.value
+        if receipt.revision is not None:
+            self._last_action_revision = receipt.revision
 
     def _mark_action_failure(self, kind: ErrorKind) -> bool:
         self._last_action_error_kind = kind
@@ -3573,6 +3901,7 @@ class XTFSyncEngine:
         )
 
     def _action_error(self, action: ExecutionAction, message: str) -> Mapping[str, Any]:
+        message = self._last_action_failure_message or message
         error: Dict[str, Any] = {
             "kind": self._last_action_error_kind.value,
             "message": message,
@@ -3708,6 +4037,9 @@ class XTFSyncEngine:
         if not isinstance(plan, ExecutionPlan):
             raise TypeError("executor only accepts an internal ExecutionPlan")
         public_plan = plan.to_public()
+        self._expected_bitable_snapshot = None
+        self._expected_bitable_revision = None
+        self._expected_sheet_snapshot = None
         applied: List[PlanActionDocument] = []
         verification: List[Mapping[str, Any]] = []
         result_warnings = list(plan.warnings)
@@ -3804,7 +4136,9 @@ class XTFSyncEngine:
                 )
                 continue
             try:
-                success = self._execute_action(action)
+                success = self._check_action_precondition(
+                    action
+                ) and self._execute_action(action)
             except Exception as error:
                 if self._is_auth_error(error):
                     self._last_action_error_kind = ErrorKind.AUTH
@@ -3872,6 +4206,21 @@ class XTFSyncEngine:
                     verification=tuple(verification),
                     warnings=tuple(result_warnings),
                     error=self._action_error(action, f"action failed: {action.kind}"),
+                )
+            if not self._advance_snapshot_after_mutation(action):
+                applied.append(action.to_public())
+                verification.append(
+                    {"kind": action.kind, "status": "failed", "ok": False}
+                )
+                return SyncResult(
+                    OutcomeStatus.PARTIAL,
+                    public_plan,
+                    applied=tuple(applied),
+                    verification=tuple(verification),
+                    warnings=tuple(result_warnings),
+                    error=self._action_error(
+                        action, "snapshot verification failed after mutation"
+                    ),
                 )
             applied.append(action.to_public())
             if isinstance(action, CreateFieldAction):

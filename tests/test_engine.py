@@ -62,34 +62,25 @@ def make_sheet_engine(**config_overrides):
 
 
 @patch("core.engine.DataConverter")
-@patch("core.engine.XTFFeishuClient")
+@patch("core.engine.bootstrap_runtime")
 @patch.object(XTFSyncEngine, "setup_logging")
-@patch.object(XTFSyncEngine, "_init_global_controller")
-def test_engine_uses_unified_sdk_client(
-    mock_controller,
+def test_engine_uses_explicit_runtime_bootstrap(
     mock_logging,
-    mock_sdk_class,
+    mock_bootstrap,
     mock_converter,
     sample_bitable_config,
 ):
-    sdk = mock_sdk_class.return_value
-    api = sdk.bitable_backend.return_value
+    dependencies = mock_bootstrap.return_value
+    dependencies.transport = Mock()
+    dependencies.auth = Mock()
+    dependencies.target = Mock(spec=BitableBackend)
 
     engine = XTFSyncEngine(sample_bitable_config)
 
-    mock_sdk_class.assert_called_once_with(
-        sample_bitable_config.app_id,
-        sample_bitable_config.app_secret,
-        max_retries=sample_bitable_config.max_retries,
-        rate_limit_delay=sample_bitable_config.rate_limit_delay,
-    )
-    assert engine.sdk is sdk
-    assert engine.api_client is sdk.api_client
-    assert engine.auth is sdk.auth
-    assert engine.api is api
-    sdk.bitable_backend.assert_called_once_with(
-        backend="base_v3", user_id_type="open_id"
-    )
+    mock_bootstrap.assert_called_once_with(sample_bitable_config)
+    assert engine.api_client is dependencies.transport
+    assert engine.auth is dependencies.auth
+    assert engine.api is dependencies.target
 
 
 def make_bitable_source_engine(sync_mode=SyncMode.FULL):
@@ -151,6 +142,39 @@ def test_bitable_source_full_only_writes_changed_and_missing_records():
                 CanonicalRecord("dst4", {"ID": 4, "Name": "unchanged"}),
             ]
         ),
+        remote_read(
+            [
+                CanonicalRecord("dst1", {"ID": 1}),
+                CanonicalRecord("dst3", {"ID": 3}),
+                CanonicalRecord("dst4", {"ID": 4}),
+            ],
+            fields=(schemas[0],),
+        ),
+        remote_read(
+            [
+                CanonicalRecord("dst1", {"ID": 1}),
+                CanonicalRecord("dst3", {"ID": 3}),
+                CanonicalRecord("dst4", {"ID": 4}),
+            ],
+            fields=(schemas[0],),
+        ),
+        remote_read(
+            [
+                CanonicalRecord("dst1", {"ID": 1}),
+                CanonicalRecord("dst3", {"ID": 3}),
+                CanonicalRecord("dst4", {"ID": 4}),
+            ],
+            fields=(schemas[0],),
+        ),
+        remote_read(
+            [
+                CanonicalRecord("dst1", {"ID": 1}),
+                CanonicalRecord("dst2", {"ID": 2}),
+                CanonicalRecord("dst3", {"ID": 3}),
+                CanonicalRecord("dst4", {"ID": 4}),
+            ],
+            fields=(schemas[0],),
+        ),
     ]
     updated = []
     created = []
@@ -194,6 +218,14 @@ def test_bitable_source_incremental_skips_existing_changed_record():
             ]
         ),
         remote_read([CanonicalRecord("dst1", {"ID": 1})], fields=(schemas[0],)),
+        remote_read([CanonicalRecord("dst1", {"ID": 1})], fields=(schemas[0],)),
+        remote_read(
+            [
+                CanonicalRecord("dst1", {"ID": 1}),
+                CanonicalRecord("dst2", {"ID": 2}),
+            ],
+            fields=(schemas[0],),
+        ),
     ]
     created = []
 
