@@ -1,72 +1,68 @@
-"""Serializable synchronization plans and execution outcomes.
-
-The public dictionaries deliberately describe *what* will happen without
-including record values, worksheet matrices, credentials, or other mutation
-payloads.  Payloads stay process-local on :class:`PlanAction` and are consumed
-only by ``XTFSyncEngine.execute_plan``.
-"""
+"""Internal typed execution plans and public, non-replayable plan documents."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Mapping, Sequence
+from typing import Any, ClassVar, Mapping, Protocol, Sequence, TypeAlias
 
-ACTION_KINDS = frozenset(
-    {
-        "create_fields",
-        "create_records",
-        "update_records",
-        "delete_records",
-        "clear_range",
-        "write_range",
-        "append_rows",
-        "write_columns",
-        "apply_sheet_config",
-    }
-)
+import pandas as pd
+
+from api.bitable_backend import CanonicalRecord
+
+
+class ActionUnit(str, Enum):
+    FIELD = "field"
+    RECORD = "record"
+    ROW = "row"
+    COLUMN = "column"
+    RANGE = "range"
+
+
+class VerificationPolicy(str, Enum):
+    REQUIRED = "required"
+    BEST_EFFORT = "best_effort"
 
 
 class OutcomeStatus(str, Enum):
-    """Terminal status for one plan execution."""
-
     SUCCESS = "success"
     NOOP = "noop"
     PARTIAL = "partial"
     FAILED = "failed"
+    INDETERMINATE = "indeterminate"
 
 
 class ErrorKind(str, Enum):
-    """Stable, high-level execution error categories."""
-
     VALIDATION = "validation"
     AUTH = "auth"
     RESOURCE = "resource"
     READ = "read"
     MUTATION = "mutation"
     VERIFICATION = "verification"
+    STALE_SNAPSHOT = "stale_snapshot"
     INTERNAL = "internal"
 
 
 @dataclass(frozen=True)
-class PlanAction:
-    """One ordered, reviewable unit of remote work.
-
-    ``payload`` is intentionally excluded from ``to_dict`` and from repr/equality.
-    It may contain canonical records, Sheet matrices, or local DataFrames needed
-    to execute the action, but it is never part of the serialized plan contract.
-    """
+class SnapshotPrecondition:
+    """Internal expected target state checked immediately before mutation."""
 
     kind: str
-    count: int = 0
+    expected: Mapping[str, Any] = field(default_factory=dict, repr=False)
+
+
+@dataclass(frozen=True)
+class PlanActionDocument:
+    """Public description of one action; it contains no mutation payload."""
+
+    kind: str
+    count: int
+    unit: ActionUnit
     scope: Mapping[str, Any] = field(default_factory=dict)
     destructive: bool = False
     clears_values: bool = False
-    payload: Any = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        if self.kind not in ACTION_KINDS:
-            raise ValueError(f"unsupported plan action kind: {self.kind}")
         if self.count < 0:
             raise ValueError("plan action count cannot be negative")
 
@@ -74,21 +70,197 @@ class PlanAction:
         return {
             "kind": self.kind,
             "count": self.count,
+            "unit": self.unit.value,
             "scope": dict(self.scope),
             "destructive": self.destructive,
             "clears_values": self.clears_values,
         }
 
 
+class TypedAction(Protocol):
+    kind: ClassVar[str]
+    unit: ClassVar[ActionUnit]
+    scope: Mapping[str, Any]
+    destructive: bool
+    clears_values: bool
+    precondition: SnapshotPrecondition | None
+    verification_policy: VerificationPolicy
+
+    @property
+    def count(self) -> int: ...
+
+    def to_public(self) -> PlanActionDocument: ...
+
+
+@dataclass(frozen=True, kw_only=True)
+class _ActionBase:
+    scope: Mapping[str, Any] = field(default_factory=dict)
+    destructive: bool = False
+    clears_values: bool = False
+    precondition: SnapshotPrecondition | None = field(
+        default=None, repr=False, compare=False
+    )
+    verification_policy: VerificationPolicy = field(
+        default=VerificationPolicy.REQUIRED, repr=False
+    )
+
+    kind: ClassVar[str]
+    unit: ClassVar[ActionUnit]
+
+    @property
+    def count(self) -> int:
+        raise NotImplementedError
+
+    def to_public(self) -> PlanActionDocument:
+        return PlanActionDocument(
+            kind=self.kind,
+            count=self.count,
+            unit=self.unit,
+            scope=dict(self.scope),
+            destructive=self.destructive,
+            clears_values=self.clears_values,
+        )
+
+
 @dataclass(frozen=True)
-class SyncPlan:
-    """A complete ordered plan produced without remote mutations."""
+class CreateFieldAction(_ActionBase):
+    field_name: str
+    suggested_type: int
+
+    kind: ClassVar[str] = "create_fields"
+    unit: ClassVar[ActionUnit] = ActionUnit.FIELD
+
+    @property
+    def count(self) -> int:
+        return 1
+
+
+@dataclass(frozen=True)
+class CreateRecordsAction(_ActionBase):
+    records: tuple[CanonicalRecord, ...]
+
+    kind: ClassVar[str] = "create_records"
+    unit: ClassVar[ActionUnit] = ActionUnit.RECORD
+
+    @property
+    def count(self) -> int:
+        return len(self.records)
+
+
+@dataclass(frozen=True)
+class UpdateRecordsAction(_ActionBase):
+    records: tuple[CanonicalRecord, ...]
+
+    kind: ClassVar[str] = "update_records"
+    unit: ClassVar[ActionUnit] = ActionUnit.RECORD
+
+    @property
+    def count(self) -> int:
+        return len(self.records)
+
+
+@dataclass(frozen=True)
+class DeleteRecordsAction(_ActionBase):
+    record_ids: tuple[str, ...]
+
+    kind: ClassVar[str] = "delete_records"
+    unit: ClassVar[ActionUnit] = ActionUnit.RECORD
+
+    @property
+    def count(self) -> int:
+        return len(self.record_ids)
+
+
+@dataclass(frozen=True)
+class ClearRangeAction(_ActionBase):
+    a1_range: str
+
+    kind: ClassVar[str] = "clear_range"
+    unit: ClassVar[ActionUnit] = ActionUnit.RANGE
+
+    @property
+    def count(self) -> int:
+        return 1
+
+
+@dataclass(frozen=True)
+class WriteRangeAction(_ActionBase):
+    values: tuple[tuple[Any, ...], ...] = field(repr=False, compare=False)
+
+    kind: ClassVar[str] = "write_range"
+    unit: ClassVar[ActionUnit] = ActionUnit.ROW
+
+    @property
+    def count(self) -> int:
+        return len(self.values)
+
+
+@dataclass(frozen=True)
+class AppendRowsAction(_ActionBase):
+    values: tuple[tuple[Any, ...], ...] = field(repr=False, compare=False)
+    header_width: int
+
+    kind: ClassVar[str] = "append_rows"
+    unit: ClassVar[ActionUnit] = ActionUnit.ROW
+
+    @property
+    def count(self) -> int:
+        return len(self.values)
+
+
+@dataclass(frozen=True)
+class WriteColumnsAction(_ActionBase):
+    column_data: Mapping[str, tuple[Any, ...]] = field(repr=False, compare=False)
+    column_positions: Mapping[str, int]
+    start_row: int
+    max_gap: int
+    header_width: int
+
+    kind: ClassVar[str] = "write_columns"
+    unit: ClassVar[ActionUnit] = ActionUnit.COLUMN
+
+    @property
+    def count(self) -> int:
+        return len(self.column_data)
+
+
+@dataclass(frozen=True)
+class ApplySheetConfigAction(_ActionBase):
+    frame: pd.DataFrame = field(repr=False, compare=False)
+    verification_policy: VerificationPolicy = field(
+        default=VerificationPolicy.BEST_EFFORT, init=False, repr=False
+    )
+
+    kind: ClassVar[str] = "apply_sheet_config"
+    unit: ClassVar[ActionUnit] = ActionUnit.COLUMN
+
+    @property
+    def count(self) -> int:
+        return len(self.frame.columns)
+
+
+ExecutionAction: TypeAlias = (
+    CreateFieldAction
+    | CreateRecordsAction
+    | UpdateRecordsAction
+    | DeleteRecordsAction
+    | ClearRangeAction
+    | WriteRangeAction
+    | AppendRowsAction
+    | WriteColumnsAction
+    | ApplySheetConfigAction
+)
+
+
+@dataclass(frozen=True)
+class PlanDocument:
+    """Public, reviewable plan. It is deliberately not accepted by executors."""
 
     requested_mode: str
     effective_mode: str
     source: Mapping[str, Any]
     target: Mapping[str, Any]
-    actions: Sequence[PlanAction] = ()
+    actions: Sequence[PlanActionDocument] = ()
     warnings: Sequence[str] = ()
     destructive: bool = False
     clears_values: bool = False
@@ -111,12 +283,40 @@ class SyncPlan:
 
 
 @dataclass(frozen=True)
-class SyncOutcome:
-    """Execution result retaining the successfully applied action prefix."""
+class ExecutionPlan:
+    """Process-local plan containing typed mutation payloads and preconditions."""
+
+    requested_mode: str
+    effective_mode: str
+    source: Mapping[str, Any]
+    target: Mapping[str, Any]
+    actions: Sequence[ExecutionAction] = ()
+    warnings: Sequence[str] = ()
+    destructive: bool = False
+    clears_values: bool = False
+    config_sources: Mapping[str, str] = field(default_factory=dict)
+
+    def to_public(self) -> PlanDocument:
+        return PlanDocument(
+            requested_mode=self.requested_mode,
+            effective_mode=self.effective_mode,
+            source=dict(self.source),
+            target=dict(self.target),
+            actions=tuple(action.to_public() for action in self.actions),
+            warnings=tuple(self.warnings),
+            destructive=self.destructive,
+            clears_values=self.clears_values,
+            config_sources=dict(self.config_sources),
+        )
+
+
+@dataclass(frozen=True)
+class SyncResult:
+    """Execution result retaining only confirmed, public applied-prefix evidence."""
 
     status: OutcomeStatus
-    plan: SyncPlan
-    applied: Sequence[PlanAction] = ()
+    plan: PlanDocument
+    applied: Sequence[PlanActionDocument] = ()
     verification: Sequence[Mapping[str, Any]] = ()
     warnings: Sequence[str] = ()
     error: Mapping[str, Any] | None = None
@@ -135,3 +335,26 @@ class SyncOutcome:
             "warnings": list(self.warnings),
             "error": dict(self.error) if self.error is not None else None,
         }
+
+
+__all__ = [
+    "ActionUnit",
+    "AppendRowsAction",
+    "ApplySheetConfigAction",
+    "ClearRangeAction",
+    "CreateFieldAction",
+    "CreateRecordsAction",
+    "DeleteRecordsAction",
+    "ErrorKind",
+    "ExecutionAction",
+    "ExecutionPlan",
+    "OutcomeStatus",
+    "PlanActionDocument",
+    "PlanDocument",
+    "SnapshotPrecondition",
+    "SyncResult",
+    "UpdateRecordsAction",
+    "VerificationPolicy",
+    "WriteColumnsAction",
+    "WriteRangeAction",
+]

@@ -19,7 +19,16 @@ from api.bitable_backend import (
 from core.config import MatchStrategy, SourceType, SyncConfig, SyncMode, TargetType
 from core.converter import DataConverter
 from core.engine import XTFSyncEngine
-from core.plan import OutcomeStatus, PlanAction, SyncPlan
+from core.plan import (
+    AppendRowsAction,
+    ApplySheetConfigAction,
+    CreateFieldAction,
+    CreateRecordsAction,
+    ExecutionPlan,
+    OutcomeStatus,
+    UpdateRecordsAction,
+    WriteColumnsAction,
+)
 
 
 def make_remote_engine(
@@ -122,13 +131,16 @@ def read_result(records, fields):
 
 
 def test_plan_serialization_omits_mutation_payload():
-    action = PlanAction(
-        "create_records",
-        1,
-        {"target": "bitable"},
-        payload={"secret": "must-not-leak", "fields": {"Name": "private"}},
+    action = CreateRecordsAction(
+        records=(
+            CanonicalRecord(
+                None,
+                {"secret": "must-not-leak", "fields": {"Name": "private"}},
+            ),
+        ),
+        scope={"target": "bitable"},
     )
-    plan = SyncPlan(
+    plan = ExecutionPlan(
         requested_mode="full",
         effective_mode="full",
         source={"type": "file"},
@@ -137,13 +149,29 @@ def test_plan_serialization_omits_mutation_payload():
         config_sources={"sync_mode": "cli"},
     )
 
-    serialized = plan.to_dict()
+    assert not hasattr(plan, "to_dict")
+    serialized = plan.to_public().to_dict()
 
     assert serialized["schema_version"] == 1
     assert serialized["config_sources"] == {"sync_mode": "cli"}
+    assert serialized["actions"][0]["unit"] == "record"
+    assert "verification_policy" not in serialized["actions"][0]
     assert "payload" not in serialized["actions"][0]
     assert "must-not-leak" not in repr(serialized)
     assert "private" not in repr(serialized)
+
+
+def test_executor_rejects_public_plan_document():
+    engine = make_remote_engine()
+    plan = ExecutionPlan(
+        requested_mode="full",
+        effective_mode="full",
+        source={"type": "file"},
+        target={"type": "bitable"},
+    )
+
+    with pytest.raises(TypeError, match="internal ExecutionPlan"):
+        engine.execute_plan(plan.to_public())
 
 
 def test_datetime_index_exact_does_not_match_different_time_same_day():
@@ -168,7 +196,7 @@ def test_datetime_index_exact_does_not_match_different_time_same_day():
 
     assert [action.kind for action in plan.actions] == ["create_records"]
     assert plan.actions[0].count == 1
-    serialized = repr(plan.to_dict())
+    serialized = repr(plan.to_public().to_dict())
     assert "source_app" not in serialized
     assert "target_app" not in serialized
 
@@ -279,15 +307,31 @@ def test_remote_plan_marks_empty_update_as_clearing_values():
 
 def test_execute_plan_stops_on_first_error_and_keeps_applied_prefix():
     engine = make_remote_engine()
-    plan = SyncPlan(
+    create_field = CreateFieldAction(
+        field_name="Name",
+        suggested_type=1,
+        scope={"target": "bitable", "field": "Name"},
+    )
+    plan = ExecutionPlan(
         requested_mode="full",
         effective_mode="full",
         source={"type": "file"},
         target={"type": "bitable"},
         actions=(
-            PlanAction("create_fields", 1, {"target": "bitable"}),
-            PlanAction("update_records", 2, {"target": "bitable"}),
-            PlanAction("create_records", 3, {"target": "bitable"}),
+            create_field,
+            UpdateRecordsAction(
+                records=(
+                    CanonicalRecord("record-1", {"Name": "one"}),
+                    CanonicalRecord("record-2", {"Name": "two"}),
+                ),
+                scope={"target": "bitable"},
+            ),
+            CreateRecordsAction(
+                records=tuple(
+                    CanonicalRecord(None, {"Name": str(index)}) for index in range(3)
+                ),
+                scope={"target": "bitable"},
+            ),
         ),
     )
     engine._execute_action = Mock(side_effect=[True, False, True])
@@ -305,14 +349,20 @@ def test_execute_plan_stops_on_first_error_and_keeps_applied_prefix():
 
 def test_execute_plan_reports_verification_not_requested_when_disabled():
     engine = make_remote_engine()
-    plan = SyncPlan(
+    plan = ExecutionPlan(
         requested_mode="full",
         effective_mode="full",
         source={"type": "file"},
         target={"type": "bitable"},
         actions=(
-            PlanAction("update_records", 1, {"target": "bitable"}),
-            PlanAction("create_records", 1, {"target": "bitable"}),
+            UpdateRecordsAction(
+                records=(CanonicalRecord("record-1", {"Name": "updated"}),),
+                scope={"target": "bitable"},
+            ),
+            CreateRecordsAction(
+                records=(CanonicalRecord(None, {"Name": "new"}),),
+                scope={"target": "bitable"},
+            ),
         ),
     )
     engine._execute_action = Mock(return_value=True)
@@ -329,19 +379,16 @@ def test_execute_plan_reports_verification_not_requested_when_disabled():
 
 def test_execute_plan_stops_after_created_field_schema_mismatch():
     engine = make_remote_engine()
-    create_field = PlanAction(
-        "create_fields",
-        1,
-        {"target": "bitable", "field": "Name"},
-        payload={"field_name": "Name", "suggested_type": 1},
+    create_field = CreateFieldAction(
+        field_name="Name",
+        suggested_type=1,
+        scope={"target": "bitable", "field": "Name"},
     )
-    create_records = PlanAction(
-        "create_records",
-        1,
-        {"target": "bitable"},
-        payload=[CanonicalRecord(None, {"Name": "value"})],
+    create_records = CreateRecordsAction(
+        records=(CanonicalRecord(None, {"Name": "value"}),),
+        scope={"target": "bitable"},
     )
-    plan = SyncPlan(
+    plan = ExecutionPlan(
         requested_mode="full",
         effective_mode="full",
         source={"type": "file"},
@@ -356,26 +403,23 @@ def test_execute_plan_stops_after_created_field_schema_mismatch():
     outcome = engine.execute_plan(plan)
 
     assert outcome.status is OutcomeStatus.PARTIAL
-    assert outcome.applied == (create_field,)
+    assert outcome.applied == (create_field.to_public(),)
     assert outcome.error["kind"] == "verification"
     assert engine._execute_action.call_count == 1
 
 
 def test_execute_plan_keeps_auth_kind_when_created_field_refresh_is_denied():
     engine = make_remote_engine()
-    create_field = PlanAction(
-        "create_fields",
-        1,
-        {"target": "bitable", "field": "Name"},
-        payload={"field_name": "Name", "suggested_type": 1},
+    create_field = CreateFieldAction(
+        field_name="Name",
+        suggested_type=1,
+        scope={"target": "bitable", "field": "Name"},
     )
-    create_records = PlanAction(
-        "create_records",
-        1,
-        {"target": "bitable"},
-        payload=[CanonicalRecord(None, {"Name": "value"})],
+    create_records = CreateRecordsAction(
+        records=(CanonicalRecord(None, {"Name": "value"}),),
+        scope={"target": "bitable"},
     )
-    plan = SyncPlan(
+    plan = ExecutionPlan(
         requested_mode="full",
         effective_mode="full",
         source={"type": "file"},
@@ -390,20 +434,19 @@ def test_execute_plan_keeps_auth_kind_when_created_field_refresh_is_denied():
     outcome = engine.execute_plan(plan)
 
     assert outcome.status is OutcomeStatus.PARTIAL
-    assert outcome.applied == (create_field,)
+    assert outcome.applied == (create_field.to_public(),)
     assert outcome.error["kind"] == "auth"
     assert engine._execute_action.call_count == 1
 
 
 def test_execute_plan_verifies_created_fields_even_without_record_actions():
     engine = make_remote_engine()
-    create_field = PlanAction(
-        "create_fields",
-        1,
-        {"target": "bitable", "field": "Name"},
-        payload={"field_name": "Name", "suggested_type": 1},
+    create_field = CreateFieldAction(
+        field_name="Name",
+        suggested_type=1,
+        scope={"target": "bitable", "field": "Name"},
     )
-    plan = SyncPlan(
+    plan = ExecutionPlan(
         requested_mode="full",
         effective_mode="full",
         source={"type": "file"},
@@ -418,7 +461,7 @@ def test_execute_plan_verifies_created_fields_even_without_record_actions():
     outcome = engine.execute_plan(plan)
 
     assert outcome.status is OutcomeStatus.PARTIAL
-    assert outcome.applied == (create_field,)
+    assert outcome.applied == (create_field.to_public(),)
     assert outcome.error["kind"] == "verification"
     engine._refresh_and_verify_created_fields.assert_called_once_with([create_field])
 
@@ -427,13 +470,11 @@ def test_bitable_readback_mismatch_is_verification_failure():
     engine = make_file_bitable_engine(SyncMode.FULL)
     engine.config.verify_remote_writes = True
     record = CanonicalRecord("record-1", {"Name": "updated"})
-    action = PlanAction(
-        "update_records",
-        1,
-        {"target": "bitable"},
-        payload=[record],
+    action = UpdateRecordsAction(
+        records=(record,),
+        scope={"target": "bitable"},
     )
-    plan = SyncPlan(
+    plan = ExecutionPlan(
         requested_mode="full",
         effective_mode="full",
         source={"type": "file"},
@@ -447,21 +488,33 @@ def test_bitable_readback_mismatch_is_verification_failure():
 
     assert outcome.status is OutcomeStatus.PARTIAL
     assert outcome.error["kind"] == "verification"
-    assert outcome.applied == (action,)
+    assert outcome.applied == (action.to_public(),)
     assert outcome.verification == (
         {"kind": "update_records", "status": "failed", "ok": False},
     )
 
 
 @pytest.mark.parametrize(
-    ("failure_outcome", "accepted_in_failure", "expected_count", "unknown"),
+    (
+        "failure_outcome",
+        "accepted_in_failure",
+        "expected_count",
+        "unknown",
+        "expected_status",
+    ),
     [
-        (MutationOutcome.PARTIAL, 1, 3, False),
-        (MutationOutcome.UNKNOWN_OUTCOME, 0, 2, True),
+        (MutationOutcome.PARTIAL, 1, 3, False, OutcomeStatus.PARTIAL),
+        (
+            MutationOutcome.UNKNOWN_OUTCOME,
+            0,
+            2,
+            True,
+            OutcomeStatus.INDETERMINATE,
+        ),
     ],
 )
 def test_bitable_batch_failure_retains_confirmed_action_prefix(
-    failure_outcome, accepted_in_failure, expected_count, unknown
+    failure_outcome, accepted_in_failure, expected_count, unknown, expected_status
 ):
     engine = make_file_bitable_engine(SyncMode.INCREMENTAL)
     engine.config.batch_size = 2
@@ -480,13 +533,11 @@ def test_bitable_batch_failure_retains_confirmed_action_prefix(
     )
     engine.api.batch_create.side_effect = [accepted, failed]
     records = [CanonicalRecord(None, {"ID": value}) for value in range(4)]
-    action = PlanAction(
-        "create_records",
-        4,
-        {"target": "bitable"},
-        payload=records,
+    action = CreateRecordsAction(
+        records=tuple(records),
+        scope={"target": "bitable"},
     )
-    plan = SyncPlan(
+    plan = ExecutionPlan(
         requested_mode="incremental",
         effective_mode="incremental",
         source={"type": "file"},
@@ -496,7 +547,7 @@ def test_bitable_batch_failure_retains_confirmed_action_prefix(
 
     outcome = engine.execute_plan(plan)
 
-    assert outcome.status is OutcomeStatus.PARTIAL
+    assert outcome.status is expected_status
     assert len(outcome.applied) == 1
     assert outcome.applied[0].count == expected_count
     assert outcome.applied[0].scope["partial"] is True
@@ -530,19 +581,15 @@ def test_sheet_range_failure_retains_confirmed_prefix():
             ),
         ]
     )
-    action = PlanAction(
-        "write_columns",
-        2,
-        {"target": "sheet", "columns": 2},
-        payload={
-            "column_data": {"A": ["first"], "B": ["second"]},
-            "column_positions": {"A": 1, "B": 2},
-            "start_row": 2,
-            "max_gap": 0,
-            "header_width": 2,
-        },
+    action = WriteColumnsAction(
+        column_data={"A": ("first",), "B": ("second",)},
+        column_positions={"A": 1, "B": 2},
+        start_row=2,
+        max_gap=0,
+        header_width=2,
+        scope={"target": "sheet", "columns": 2},
     )
-    plan = SyncPlan(
+    plan = ExecutionPlan(
         requested_mode="full",
         effective_mode="full",
         source={"type": "file"},
@@ -558,7 +605,7 @@ def test_sheet_range_failure_retains_confirmed_prefix():
     assert outcome.error["remote_outcome"] == "partial"
 
 
-def test_sheet_accepted_append_with_unknown_scope_is_partial():
+def test_sheet_accepted_append_with_unknown_scope_is_indeterminate():
     engine = make_file_sheet_engine()
     engine.api = SheetAPI(Mock(), Mock(), start_row=1, start_column="A")
     engine.api.append_values = Mock(
@@ -571,13 +618,12 @@ def test_sheet_accepted_append_with_unknown_scope_is_partial():
             readback=ReadbackStatus.UNKNOWN,
         )
     )
-    action = PlanAction(
-        "append_rows",
-        1,
-        {"target": "sheet", "columns": 1},
-        payload={"values": [["value"]], "header_width": 1},
+    action = AppendRowsAction(
+        values=(("value",),),
+        header_width=1,
+        scope={"target": "sheet", "columns": 1},
     )
-    plan = SyncPlan(
+    plan = ExecutionPlan(
         requested_mode="incremental",
         effective_mode="incremental",
         source={"type": "file"},
@@ -587,21 +633,46 @@ def test_sheet_accepted_append_with_unknown_scope_is_partial():
 
     outcome = engine.execute_plan(plan)
 
-    assert outcome.status is OutcomeStatus.PARTIAL
-    assert outcome.applied == (action,)
+    assert outcome.status is OutcomeStatus.INDETERMINATE
+    assert outcome.applied == (action.to_public(),)
     assert outcome.error["remote_outcome"] == "unknown_outcome"
+    assert outcome.error["unknown"] is True
+
+
+def test_unknown_mutation_without_confirmed_prefix_is_indeterminate():
+    engine = make_file_bitable_engine(SyncMode.INCREMENTAL)
+    action = CreateRecordsAction(
+        records=(CanonicalRecord(None, {"ID": 1}),),
+        scope={"target": "bitable"},
+    )
+    plan = ExecutionPlan(
+        requested_mode="incremental",
+        effective_mode="incremental",
+        source={"type": "file"},
+        target={"type": "bitable"},
+        actions=(action,),
+    )
+
+    def lose_response(_action):
+        engine._last_action_remote_outcome = MutationOutcome.UNKNOWN_OUTCOME.value
+        return engine._mark_action_failure(engine._last_action_error_kind)
+
+    engine._execute_action = Mock(side_effect=lose_response)
+
+    outcome = engine.execute_plan(plan)
+
+    assert outcome.status is OutcomeStatus.INDETERMINATE
+    assert outcome.applied == ()
     assert outcome.error["unknown"] is True
 
 
 def test_execute_auth_error_keeps_auth_kind():
     engine = make_file_bitable_engine(SyncMode.INCREMENTAL)
-    action = PlanAction(
-        "create_records",
-        1,
-        {"target": "bitable"},
-        payload=[CanonicalRecord(None, {"ID": 1})],
+    action = CreateRecordsAction(
+        records=(CanonicalRecord(None, {"ID": 1}),),
+        scope={"target": "bitable"},
     )
-    plan = SyncPlan(
+    plan = ExecutionPlan(
         requested_mode="incremental",
         effective_mode="incremental",
         source={"type": "file"},
@@ -620,13 +691,11 @@ def test_execute_auth_error_keeps_auth_kind():
 
 def test_execute_missing_resource_keeps_resource_kind():
     engine = make_file_bitable_engine(SyncMode.INCREMENTAL)
-    action = PlanAction(
-        "create_records",
-        1,
-        {"target": "bitable"},
-        payload=[CanonicalRecord(None, {"ID": 1})],
+    action = CreateRecordsAction(
+        records=(CanonicalRecord(None, {"ID": 1}),),
+        scope={"target": "bitable"},
     )
-    plan = SyncPlan(
+    plan = ExecutionPlan(
         requested_mode="incremental",
         effective_mode="incremental",
         source={"type": "file"},
@@ -646,13 +715,11 @@ def test_execute_missing_resource_keeps_resource_kind():
 def test_apply_sheet_config_is_not_reported_as_verified_without_readback():
     engine = make_file_sheet_engine()
     engine.config.verify_remote_writes = True
-    action = PlanAction(
-        "apply_sheet_config",
-        1,
-        {"target": "sheet"},
-        payload=pd.DataFrame({"When": ["2026-08-30"]}),
+    action = ApplySheetConfigAction(
+        frame=pd.DataFrame({"When": ["2026-08-30"]}),
+        scope={"target": "sheet"},
     )
-    plan = SyncPlan(
+    plan = ExecutionPlan(
         requested_mode="clone",
         effective_mode="clone",
         source={"type": "file"},
@@ -666,6 +733,31 @@ def test_apply_sheet_config_is_not_reported_as_verified_without_readback():
     assert outcome.verification == (
         {"kind": "apply_sheet_config", "status": "not_supported", "ok": True},
     )
+
+
+def test_best_effort_sheet_config_failure_only_adds_warning():
+    engine = make_file_sheet_engine()
+    action = ApplySheetConfigAction(
+        frame=pd.DataFrame({"When": ["2026-08-30"]}),
+        scope={"target": "sheet"},
+    )
+    plan = ExecutionPlan(
+        requested_mode="clone",
+        effective_mode="clone",
+        source={"type": "file"},
+        target={"type": "sheet"},
+        actions=(action,),
+    )
+    engine._execute_action = Mock(return_value=False)
+
+    outcome = engine.execute_plan(plan)
+
+    assert outcome.status is OutcomeStatus.SUCCESS
+    assert outcome.applied == ()
+    assert outcome.verification == (
+        {"kind": "apply_sheet_config", "status": "best_effort_failed", "ok": True},
+    )
+    assert any("best-effort" in warning for warning in outcome.warnings)
 
 
 @pytest.mark.parametrize(

@@ -33,6 +33,7 @@ BASE_FLAGS = [
 class FakeAction:
     kind: str
     count: int = 1
+    unit: str = "record"
     scope: str = "test"
     destructive: bool = False
     clears_values: bool = False
@@ -41,6 +42,7 @@ class FakeAction:
         return {
             "kind": self.kind,
             "count": self.count,
+            "unit": self.unit,
             "scope": self.scope,
             "destructive": self.destructive,
             "clears_values": self.clears_values,
@@ -64,6 +66,9 @@ class FakePlan:
             "actions": [item.to_dict() for item in self.actions],
             "warnings": self.warnings,
         }
+
+    def to_public(self):
+        return self
 
 
 class FakeOutcome:
@@ -350,7 +355,7 @@ def test_input_failure_uses_exit_3_and_stable_code(capsys):
     assert "XTF_E_INPUT_NOT_FOUND" in captured.err
 
 
-def test_runtime_auth_remote_partial_and_interrupt_exit_codes(monkeypatch, capsys):
+def test_runtime_status_and_error_kinds_map_to_stable_exit_codes(monkeypatch, capsys):
     install_fake_engine(monkeypatch, plan_exception=RuntimeError("broken"))
     assert main(BASE_FLAGS) == 5
     assert "XTF_E_PLAN_INCOMPLETE" in capsys.readouterr().err
@@ -375,7 +380,7 @@ def test_runtime_auth_remote_partial_and_interrupt_exit_codes(monkeypatch, capsy
         monkeypatch,
         plan_exception=FeishuAPIError(40400, "missing", http_status=404),
     )
-    assert main(BASE_FLAGS) == 4
+    assert main(BASE_FLAGS) == 5
     assert "XTF_E_RESOURCE" in capsys.readouterr().err
 
     class PartialOutcome:
@@ -395,6 +400,17 @@ def test_runtime_auth_remote_partial_and_interrupt_exit_codes(monkeypatch, capsy
     install_fake_engine(monkeypatch, outcome=PartialOutcome())
     assert main(BASE_FLAGS) == 6
     assert "XTF_E_MUTATION_REJECTED" in capsys.readouterr().err
+
+    class IndeterminateOutcome(PartialOutcome):
+        status = "indeterminate"
+        error: ClassVar[dict[str, str]] = {
+            "kind": "mutation",
+            "message": "response lost after request was sent",
+        }
+
+    install_fake_engine(monkeypatch, outcome=IndeterminateOutcome())
+    assert main(BASE_FLAGS) == 8
+    assert "XTF_E_INDETERMINATE" in capsys.readouterr().err
 
     class VerificationOutcome(PartialOutcome):
         applied: ClassVar[list[FakeAction]] = []
@@ -426,7 +442,7 @@ def test_runtime_auth_remote_partial_and_interrupt_exit_codes(monkeypatch, capsy
         }
 
     install_fake_engine(monkeypatch, outcome=ResourceOutcome())
-    assert main(BASE_FLAGS) == 4
+    assert main(BASE_FLAGS) == 5
     assert "XTF_E_RESOURCE" in capsys.readouterr().err
 
     install_fake_engine(monkeypatch, plan_exception=KeyboardInterrupt())

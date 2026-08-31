@@ -277,14 +277,17 @@ mode/strategy/index 组合会在零 mutation 阶段直接失败。
 
 | Code | 含义 |
 |---:|---|
-| `0` | 完整成功或成功生成 plan |
+| `0` | `success` / `noop`，或成功生成 dry-run plan |
 | `1` | 未分类内部异常 |
 | `2` | CLI usage 错误 |
 | `3` | 配置、本地输入或输出错误 |
-| `4` | 认证、权限或资源不可访问 |
-| `5` | 远端读取不完整，无法形成安全计划 |
-| `6` | mutation rejected/partial/unknown |
-| `7` | 写后读回不一致 |
+| `4` | 认证或权限错误 |
+| `5` | 远端资源、读取、计划不完整或 stale snapshot |
+| `6` | 已知 mutation failure / known partial |
+| `7` | verification failure / 写后读回不一致 |
+| `8` | 已发送 mutation 的远端结果未知（`indeterminate`） |
 | `130` | 用户中断 |
 
-human 最终摘要写 stdout，progress/warning/error 写 stderr。`--json` 对成功和失败都只在 stdout 输出一个 JSON document，进程退出码仍按上表返回。
+human 最终摘要写 stdout，progress/warning/error 写 stderr。`--json` 对成功和失败都只在 stdout 输出一个 JSON document，进程退出码仍按上表返回。结果状态的 wire value 固定为 `success`、`noop`、`failed`、`partial` 或 `indeterminate`；精确状态和稳定错误码以 JSON 为准。
+
+dry-run 的 `plan` 是 `schema_version: 1` 的公开 `PlanDocument`。每个 action 只公开 `kind`、`count`、`unit`、`scope`、`destructive` 和 `clears_values`；mutation payload、凭据、snapshot precondition 和 verification policy 只存在于进程内 `ExecutionPlan`，公开 plan 不能直接重放。

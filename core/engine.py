@@ -92,7 +92,24 @@ from typing import Optional, Dict, Any, List, Mapping, Union, Tuple, cast
 
 from .config import MatchStrategy, SourceType, SyncConfig, SyncMode, TargetType
 from .converter import DataConverter
-from .plan import ErrorKind, OutcomeStatus, PlanAction, SyncOutcome, SyncPlan
+from .plan import (
+    AppendRowsAction,
+    ApplySheetConfigAction,
+    ClearRangeAction,
+    CreateFieldAction,
+    CreateRecordsAction,
+    DeleteRecordsAction,
+    ErrorKind,
+    ExecutionAction,
+    ExecutionPlan,
+    OutcomeStatus,
+    PlanActionDocument,
+    SyncResult,
+    UpdateRecordsAction,
+    VerificationPolicy,
+    WriteColumnsAction,
+    WriteRangeAction,
+)
 from api import (
     A1Range,
     BitableBackend,
@@ -263,7 +280,7 @@ class XTFSyncEngine:
 
     def plan_fields(
         self, df: pd.DataFrame
-    ) -> Tuple[List[PlanAction], Dict[str, FieldSchema]]:
+    ) -> Tuple[List[ExecutionAction], Dict[str, FieldSchema]]:
         """Read target schemas and plan missing fields without mutating Feishu."""
         if self.config.target_type is not TargetType.BITABLE:
             return [], {}
@@ -285,7 +302,7 @@ class XTFSyncEngine:
         if not missing_fields:
             return [], field_types
 
-        actions = []
+        actions: List[ExecutionAction] = []
         for raw_name in missing_fields:
             field_name = str(raw_name)
             analysis = self.converter.analyze_excel_column_data_enhanced(
@@ -295,16 +312,11 @@ class XTFSyncEngine:
                 self.config,
             )
             suggested_type = int(analysis["suggested_feishu_type"])
-            payload = {
-                "field_name": field_name,
-                "suggested_type": suggested_type,
-            }
             actions.append(
-                PlanAction(
-                    kind="create_fields",
-                    count=1,
+                CreateFieldAction(
+                    field_name=field_name,
+                    suggested_type=suggested_type,
                     scope={"target": "bitable", "field": field_name},
-                    payload=payload,
                 )
             )
             kind = field_kind_from_type(suggested_type)
@@ -328,12 +340,13 @@ class XTFSyncEngine:
                 return True, field_types
             backend = self._bitable_backend()
             for action in actions:
-                payload = cast(Mapping[str, Any], action.payload)
+                if not isinstance(action, CreateFieldAction):
+                    raise TypeError(f"unexpected field action: {type(action).__name__}")
                 receipt = backend.create_field(
                     cast(str, self.config.app_token),
                     cast(str, self.config.table_id),
-                    str(payload["field_name"]),
-                    cast(int, payload["suggested_type"]),
+                    action.field_name,
+                    action.suggested_type,
                 )
                 if receipt.outcome is not MutationOutcome.ACCEPTED:
                     return False, field_types
@@ -484,7 +497,7 @@ class XTFSyncEngine:
             == cls._base_v3_write_shape(target_schema)
         )
 
-    def _plan_bitable_source(self) -> SyncPlan:
+    def _plan_bitable_source(self) -> ExecutionPlan:
         """Plan source-Bitable differences without mutating the target.
 
         ``full`` 只更新发生变化的字段并新增缺失记录；``incremental``
@@ -657,24 +670,20 @@ class XTFSyncEngine:
             f"跳过未变化/已存在 {unchanged} 条；目标表多余记录保持不变"
         )
 
-        actions: List[PlanAction] = []
+        actions: List[ExecutionAction] = []
         if records_to_update:
             actions.append(
-                PlanAction(
-                    "update_records",
-                    len(records_to_update),
-                    {"target": "bitable"},
+                UpdateRecordsAction(
+                    records=tuple(records_to_update),
+                    scope={"target": "bitable"},
                     clears_values=clears_values,
-                    payload=records_to_update,
                 )
             )
         if records_to_create:
             actions.append(
-                PlanAction(
-                    "create_records",
-                    len(records_to_create),
-                    {"target": "bitable"},
-                    payload=records_to_create,
+                CreateRecordsAction(
+                    records=tuple(records_to_create),
+                    scope={"target": "bitable"},
                 )
             )
         warnings = (
@@ -2915,12 +2924,12 @@ class XTFSyncEngine:
         effective_mode: SyncMode,
         source: Mapping[str, Any],
         target: Mapping[str, Any],
-        actions: List[PlanAction],
+        actions: List[ExecutionAction],
         warnings: Optional[List[str]] = None,
-    ) -> SyncPlan:
+    ) -> ExecutionPlan:
         plan_warnings = list(warnings or ())
         plan_warnings.extend(self.converter.consume_key_warnings())
-        return SyncPlan(
+        return ExecutionPlan(
             requested_mode=requested_mode.value,
             effective_mode=effective_mode.value,
             source=source,
@@ -2950,7 +2959,7 @@ class XTFSyncEngine:
                 fields[name] = converted
         return fields
 
-    def _plan_file_bitable(self, df: pd.DataFrame) -> SyncPlan:
+    def _plan_file_bitable(self, df: pd.DataFrame) -> ExecutionPlan:
         mode = self.config.sync_mode
         match_strategy = self.config.match_strategy
         actions, field_types = self.plan_fields(df)
@@ -2958,9 +2967,9 @@ class XTFSyncEngine:
         target = {"type": "bitable"}
         index_column = self.config.index_column
         planned_fields = {
-            str(cast(Mapping[str, Any], action.payload)["field_name"])
+            action.field_name
             for action in actions
-            if action.kind == "create_fields"
+            if isinstance(action, CreateFieldAction)
         }
 
         fetch_fields = self._get_bitable_fetch_field_names(df, mode.value)
@@ -3038,30 +3047,24 @@ class XTFSyncEngine:
 
         if deletes:
             actions.append(
-                PlanAction(
-                    "delete_records",
-                    len(deletes),
-                    {"target": "bitable"},
+                DeleteRecordsAction(
+                    record_ids=tuple(deletes),
+                    scope={"target": "bitable"},
                     destructive=True,
-                    payload=deletes,
                 )
             )
         if updates:
             actions.append(
-                PlanAction(
-                    "update_records",
-                    len(updates),
-                    {"target": "bitable"},
-                    payload=updates,
+                UpdateRecordsAction(
+                    records=tuple(updates),
+                    scope={"target": "bitable"},
                 )
             )
         if creates:
             actions.append(
-                PlanAction(
-                    "create_records",
-                    len(creates),
-                    {"target": "bitable"},
-                    payload=creates,
+                CreateRecordsAction(
+                    records=tuple(creates),
+                    scope={"target": "bitable"},
                 )
             )
         return self._make_plan(
@@ -3072,36 +3075,31 @@ class XTFSyncEngine:
             actions=actions,
         )
 
-    def _sheet_clear_action(self) -> PlanAction:
+    def _sheet_clear_action(self) -> ClearRangeAction:
         clear_range = self._build_sheet_full_range()
         if not clear_range:
             raise RuntimeError("无法获取工作表网格范围")
-        return PlanAction(
-            "clear_range",
-            1,
-            {"target": "sheet", "range": clear_range},
+        return ClearRangeAction(
+            a1_range=clear_range,
+            scope={"target": "sheet", "range": clear_range},
             destructive=True,
             clears_values=True,
-            payload=clear_range,
         )
 
-    def _sheet_write_action(self, df: pd.DataFrame) -> PlanAction:
+    def _sheet_write_action(self, df: pd.DataFrame) -> WriteRangeAction:
         values = self.converter.df_to_values(df)
-        return PlanAction(
-            "write_range",
-            max(len(values), 0),
-            {"target": "sheet", "columns": len(df.columns)},
+        return WriteRangeAction(
+            values=tuple(tuple(row) for row in values),
+            scope={"target": "sheet", "columns": len(df.columns)},
             clears_values=True,
-            payload={"values": values, "header_width": len(df.columns)},
         )
 
-    def _sheet_append_action(self, df: pd.DataFrame) -> PlanAction:
+    def _sheet_append_action(self, df: pd.DataFrame) -> AppendRowsAction:
         values = self.converter.df_to_values(df, include_headers=False)
-        return PlanAction(
-            "append_rows",
-            len(values),
-            {"target": "sheet", "columns": len(df.columns)},
-            payload={"values": values, "header_width": len(df.columns)},
+        return AppendRowsAction(
+            values=tuple(tuple(row) for row in values),
+            header_width=len(df.columns),
+            scope={"target": "sheet", "columns": len(df.columns)},
         )
 
     def _sheet_columns_action(
@@ -3113,7 +3111,7 @@ class XTFSyncEngine:
         start_row: int,
         preserve_rows: bool,
         update_data_map: Optional[Dict[int, Dict[str, Any]]] = None,
-    ) -> Optional[PlanAction]:
+    ) -> Optional[WriteColumnsAction]:
         if not columns:
             return None
         if preserve_rows:
@@ -3142,22 +3140,24 @@ class XTFSyncEngine:
             if self.config.selective_sync.optimize_ranges
             else 0
         )
-        return PlanAction(
-            "write_columns",
-            len(df) if not preserve_rows else len(update_data_map or {}),
-            {"target": "sheet", "columns": len(columns)},
+        return WriteColumnsAction(
+            column_data={name: tuple(values) for name, values in column_data.items()},
+            column_positions=dict(positions),
+            start_row=start_row,
+            max_gap=max_gap,
+            header_width=len(current_df.columns) or len(columns),
+            scope={
+                "target": "sheet",
+                "columns": len(columns),
+                "affected_rows": (
+                    len(df) if not preserve_rows else len(update_data_map or {})
+                ),
+            },
             clears_values=any(
                 self.converter._is_empty_value(value)
                 for values in column_data.values()
                 for value in values
             ),
-            payload={
-                "column_data": column_data,
-                "column_positions": positions,
-                "start_row": start_row,
-                "max_gap": max_gap,
-                "header_width": len(current_df.columns) or len(columns),
-            },
         )
 
     def _plan_sheet_selective(
@@ -3168,7 +3168,7 @@ class XTFSyncEngine:
         columns: List[str],
         current_index: Mapping[str, int],
         index_field_types: Mapping[str, Any],
-    ) -> List[PlanAction]:
+    ) -> List[ExecutionAction]:
         update_data_map: Dict[int, Dict[str, Any]] = {}
         new_rows: List[pd.Series] = []
         for _, row in df.iterrows():
@@ -3184,7 +3184,7 @@ class XTFSyncEngine:
             else:
                 new_rows.append(row)
 
-        actions: List[PlanAction] = []
+        actions: List[ExecutionAction] = []
         if update_data_map:
             action = self._sheet_columns_action(
                 df,
@@ -3283,11 +3283,12 @@ class XTFSyncEngine:
             return {index_column: 5}
         return {}
 
-    def _plan_file_sheet(self, df: pd.DataFrame) -> SyncPlan:
+    def _plan_file_sheet(self, df: pd.DataFrame) -> ExecutionPlan:
         requested_mode = self.config.sync_mode
         source = {"type": "file", "rows": len(df), "columns": len(df.columns)}
         target = {"type": "sheet"}
         warnings: List[str] = []
+        actions: List[ExecutionAction]
         if self.config.match_strategy is MatchStrategy.APPEND_ONLY:
             actions = [self._sheet_append_action(df)] if not df.empty else []
             return self._make_plan(
@@ -3308,11 +3309,9 @@ class XTFSyncEngine:
         if requested_mode is SyncMode.CLONE:
             actions = [self._sheet_clear_action(), self._sheet_write_action(df)]
             actions.append(
-                PlanAction(
-                    "apply_sheet_config",
-                    len(df.columns),
-                    {"target": "sheet"},
-                    payload=df.copy(),
+                ApplySheetConfigAction(
+                    frame=df.copy(),
+                    scope={"target": "sheet"},
                 )
             )
             return self._make_plan(
@@ -3405,14 +3404,14 @@ class XTFSyncEngine:
                 if not merged.empty
                 else [self._sheet_clear_action()]
             )
-            actions[0] = PlanAction(
-                actions[0].kind,
-                actions[0].count,
-                actions[0].scope,
-                destructive=True,
-                clears_values=True,
-                payload=actions[0].payload,
-            )
+            first = actions[0]
+            if isinstance(first, WriteRangeAction):
+                actions[0] = WriteRangeAction(
+                    values=first.values,
+                    scope=first.scope,
+                    destructive=True,
+                    clears_values=True,
+                )
             return self._make_plan(
                 requested_mode=requested_mode,
                 effective_mode=requested_mode,
@@ -3453,7 +3452,7 @@ class XTFSyncEngine:
             actions=actions,
         )
 
-    def plan(self, df: Optional[pd.DataFrame] = None) -> SyncPlan:
+    def plan(self, df: Optional[pd.DataFrame] = None) -> ExecutionPlan:
         """Build a complete mutation plan using reads and local classification only."""
         if (
             self.config.sync_mode is not SyncMode.CLONE
@@ -3519,9 +3518,11 @@ class XTFSyncEngine:
 
         return isinstance(error, FeishuAPIError) and error.http_status == 404
 
-    def _applied_action_prefix(self, action: PlanAction) -> Optional[PlanAction]:
+    def _applied_action_prefix(
+        self, action: ExecutionAction
+    ) -> Optional[PlanActionDocument]:
         if self._last_action_mutation_complete:
-            return action
+            return action.to_public()
         if (
             self._last_action_applied_count <= 0
             and self._last_action_accepted_units <= 0
@@ -3540,15 +3541,16 @@ class XTFSyncEngine:
         )
         if self._last_action_remote_outcome:
             scope["remote_outcome"] = self._last_action_remote_outcome
-        return PlanAction(
-            action.kind,
-            count,
-            scope,
+        return PlanActionDocument(
+            kind=action.kind,
+            count=count,
+            unit=action.unit,
+            scope=scope,
             destructive=action.destructive,
             clears_values=action.clears_values,
         )
 
-    def _action_error(self, action: PlanAction, message: str) -> Mapping[str, Any]:
+    def _action_error(self, action: ExecutionAction, message: str) -> Mapping[str, Any]:
         error: Dict[str, Any] = {
             "kind": self._last_action_error_kind.value,
             "message": message,
@@ -3564,23 +3566,24 @@ class XTFSyncEngine:
             )
         return error
 
-    def _execute_action(self, action: PlanAction) -> bool:
-        if action.kind == "create_fields":
-            payload = cast(Mapping[str, Any], action.payload)
+    def _execute_action(self, action: ExecutionAction) -> bool:
+        if isinstance(action, CreateFieldAction):
             receipt = self._bitable_backend().create_field(
                 cast(str, self.config.app_token),
                 cast(str, self.config.table_id),
-                str(payload["field_name"]),
-                cast(int, payload["suggested_type"]),
+                action.field_name,
+                action.suggested_type,
             )
             self._record_action_receipt(receipt)
             if receipt.outcome is not MutationOutcome.ACCEPTED:
                 return self._mark_action_failure(ErrorKind.MUTATION)
             self._last_action_mutation_complete = True
             return True
-        if action.kind in {"create_records", "update_records"}:
-            records = cast(List[CanonicalRecord], action.payload)
-            operation = "create" if action.kind == "create_records" else "update"
+        if isinstance(action, (CreateRecordsAction, UpdateRecordsAction)):
+            records = list(action.records)
+            operation = (
+                "create" if isinstance(action, CreateRecordsAction) else "update"
+            )
             processor = (
                 self._bitable_backend().batch_create
                 if operation == "create"
@@ -3600,8 +3603,8 @@ class XTFSyncEngine:
             if not verified:
                 return self._mark_action_failure(ErrorKind.VERIFICATION)
             return True
-        if action.kind == "delete_records":
-            record_ids = cast(List[str], action.payload)
+        if isinstance(action, DeleteRecordsAction):
+            record_ids = list(action.record_ids)
             success, receipts = self.process_typed_bitable_batches(
                 record_ids,
                 self._bitable_backend().batch_delete,
@@ -3618,28 +3621,25 @@ class XTFSyncEngine:
             if not verified:
                 return self._mark_action_failure(ErrorKind.VERIFICATION)
             return True
-        if action.kind == "clear_range":
-            return self._typed_sheet_clear(cast(str, action.payload))
-        if action.kind == "write_range":
-            payload = cast(Mapping[str, Any], action.payload)
-            return self._typed_sheet_write(cast(List[List[Any]], payload["values"]))
-        if action.kind == "append_rows":
-            payload = cast(Mapping[str, Any], action.payload)
+        if isinstance(action, ClearRangeAction):
+            return self._typed_sheet_clear(action.a1_range)
+        if isinstance(action, WriteRangeAction):
+            return self._typed_sheet_write([list(row) for row in action.values])
+        if isinstance(action, AppendRowsAction):
             return self._typed_sheet_append(
-                cast(List[List[Any]], payload["values"]),
-                header_width=int(payload["header_width"]),
+                [list(row) for row in action.values],
+                header_width=action.header_width,
             )
-        if action.kind == "write_columns":
-            payload = cast(Mapping[str, Any], action.payload)
+        if isinstance(action, WriteColumnsAction):
             return self._typed_sheet_selective_write(
-                cast(Dict[str, List[Any]], payload["column_data"]),
-                cast(Dict[str, int], payload["column_positions"]),
-                start_row=int(payload["start_row"]),
-                max_gap=int(payload["max_gap"]),
-                header_width=int(payload["header_width"]),
+                {name: list(values) for name, values in action.column_data.items()},
+                dict(action.column_positions),
+                start_row=action.start_row,
+                max_gap=action.max_gap,
+                header_width=action.header_width,
             )
-        if action.kind == "apply_sheet_config":
-            success = self._setup_sheet_intelligence(cast(pd.DataFrame, action.payload))
+        if isinstance(action, ApplySheetConfigAction):
+            success = self._setup_sheet_intelligence(action.frame)
             if success:
                 self._last_action_applied_count = action.count
                 self._last_action_accepted_units = action.count
@@ -3648,7 +3648,7 @@ class XTFSyncEngine:
         raise ValueError(f"未知 plan action: {action.kind}")
 
     def _refresh_and_verify_created_fields(
-        self, actions: List[PlanAction]
+        self, actions: List[CreateFieldAction]
     ) -> Tuple[bool, str]:
         """Refresh backend schema cache and validate every planned field."""
         if not self.config.app_token or not self.config.table_id:
@@ -3661,9 +3661,8 @@ class XTFSyncEngine:
         by_name = {field.name: field for field in fields}
         backend_kind = BitableBackendKind(self.config.bitable_api_backend)
         for action in actions:
-            payload = cast(Mapping[str, Any], action.payload)
-            name = str(payload["field_name"])
-            suggested_type = int(payload["suggested_type"])
+            name = action.field_name
+            suggested_type = action.suggested_type
             actual = by_name.get(name)
             if actual is None:
                 return False, f"字段 '{name}' 创建后未出现在服务端 schema 中"
@@ -3682,17 +3681,21 @@ class XTFSyncEngine:
                 return False, f"字段 '{name}' 创建后的 raw_type 与计划不一致"
         return True, ""
 
-    def execute_plan(self, plan: SyncPlan) -> SyncOutcome:
+    def execute_plan(self, plan: ExecutionPlan) -> SyncResult:
         """Execute ordered actions, stopping at the first failed action."""
-        applied: List[PlanAction] = []
+        if not isinstance(plan, ExecutionPlan):
+            raise TypeError("executor only accepts an internal ExecutionPlan")
+        public_plan = plan.to_public()
+        applied: List[PlanActionDocument] = []
         verification: List[Mapping[str, Any]] = []
-        created_field_actions: List[PlanAction] = []
+        result_warnings = list(plan.warnings)
+        created_field_actions: List[CreateFieldAction] = []
         fields_refreshed = False
         if not plan.actions:
-            return SyncOutcome(
+            return SyncResult(
                 OutcomeStatus.NOOP,
-                plan,
-                warnings=tuple(plan.warnings),
+                public_plan,
+                warnings=tuple(result_warnings),
             )
         for action in plan.actions:
             if (
@@ -3715,12 +3718,12 @@ class XTFSyncEngine:
                             error_kind = ErrorKind.AUTH
                         elif self._is_resource_error(refresh_error):
                             error_kind = ErrorKind.RESOURCE
-                    return SyncOutcome(
+                    return SyncResult(
                         OutcomeStatus.PARTIAL,
-                        plan,
+                        public_plan,
                         applied=tuple(applied),
                         verification=tuple(verification),
-                        warnings=tuple(plan.warnings),
+                        warnings=tuple(result_warnings),
                         error={
                             "kind": error_kind.value,
                             "message": message,
@@ -3729,22 +3732,55 @@ class XTFSyncEngine:
                     )
                 fields_refreshed = True
                 if self.config.verify_remote_writes:
-                    created_ids = {id(item) for item in created_field_actions}
                     verification = [
                         (
                             {
-                                "kind": applied_action.kind,
+                                "kind": verification_item["kind"],
                                 "status": "verified",
                                 "ok": True,
                             }
-                            if id(applied_action) in created_ids
+                            if verification_item.get("kind") == "create_fields"
                             else verification_item
                         )
-                        for verification_item, applied_action in zip(
-                            verification, applied
-                        )
+                        for verification_item in verification
                     ]
             self._reset_action_execution_state()
+            if action.verification_policy is VerificationPolicy.BEST_EFFORT:
+                try:
+                    best_effort_success = self._execute_action(action)
+                except Exception:
+                    best_effort_success = False
+                if not best_effort_success:
+                    prefix = self._applied_action_prefix(action)
+                    if prefix is not None:
+                        applied.append(prefix)
+                    warning = (
+                        "Sheet best-effort 字段配置失败；"
+                        "已确认的数据写入状态保持不变"
+                    )
+                    self.logger.warning(warning)
+                    result_warnings.append(warning)
+                    verification.append(
+                        {
+                            "kind": action.kind,
+                            "status": "best_effort_failed",
+                            "ok": True,
+                        }
+                    )
+                    continue
+                applied.append(action.to_public())
+                verification.append(
+                    {
+                        "kind": action.kind,
+                        "status": (
+                            "not_supported"
+                            if self.config.verify_remote_writes
+                            else "not_requested"
+                        ),
+                        "ok": True,
+                    }
+                )
+                continue
             try:
                 success = self._execute_action(action)
             except Exception as error:
@@ -3759,21 +3795,28 @@ class XTFSyncEngine:
                     verification.append(
                         {"kind": action.kind, "status": "failed", "ok": False}
                     )
-                uncertain = self._last_action_remote_outcome in {
-                    MutationOutcome.PARTIAL.value,
-                    MutationOutcome.UNKNOWN_OUTCOME.value,
-                }
-                status = (
-                    OutcomeStatus.PARTIAL
-                    if applied or uncertain
-                    else OutcomeStatus.FAILED
+                unknown = (
+                    self._last_action_remote_outcome
+                    == MutationOutcome.UNKNOWN_OUTCOME.value
                 )
-                return SyncOutcome(
+                partial = (
+                    self._last_action_remote_outcome == MutationOutcome.PARTIAL.value
+                )
+                status = (
+                    OutcomeStatus.INDETERMINATE
+                    if unknown
+                    else (
+                        OutcomeStatus.PARTIAL
+                        if applied or partial
+                        else OutcomeStatus.FAILED
+                    )
+                )
+                return SyncResult(
                     status,
-                    plan,
+                    public_plan,
                     applied=tuple(applied),
                     verification=tuple(verification),
-                    warnings=tuple(plan.warnings),
+                    warnings=tuple(result_warnings),
                     error=self._action_error(action, str(error)),
                 )
             if not success:
@@ -3784,25 +3827,32 @@ class XTFSyncEngine:
                     verification.append(
                         {"kind": action.kind, "status": "failed", "ok": False}
                     )
-                uncertain = self._last_action_remote_outcome in {
-                    MutationOutcome.PARTIAL.value,
-                    MutationOutcome.UNKNOWN_OUTCOME.value,
-                }
-                status = (
-                    OutcomeStatus.PARTIAL
-                    if applied or uncertain
-                    else OutcomeStatus.FAILED
+                unknown = (
+                    self._last_action_remote_outcome
+                    == MutationOutcome.UNKNOWN_OUTCOME.value
                 )
-                return SyncOutcome(
+                partial = (
+                    self._last_action_remote_outcome == MutationOutcome.PARTIAL.value
+                )
+                status = (
+                    OutcomeStatus.INDETERMINATE
+                    if unknown
+                    else (
+                        OutcomeStatus.PARTIAL
+                        if applied or partial
+                        else OutcomeStatus.FAILED
+                    )
+                )
+                return SyncResult(
                     status,
-                    plan,
+                    public_plan,
                     applied=tuple(applied),
                     verification=tuple(verification),
-                    warnings=tuple(plan.warnings),
+                    warnings=tuple(result_warnings),
                     error=self._action_error(action, f"action failed: {action.kind}"),
                 )
-            applied.append(action)
-            if action.kind == "create_fields":
+            applied.append(action.to_public())
+            if isinstance(action, CreateFieldAction):
                 created_field_actions.append(action)
             verification.append(
                 {
@@ -3837,12 +3887,12 @@ class XTFSyncEngine:
                         error_kind = ErrorKind.AUTH
                     elif self._is_resource_error(refresh_error):
                         error_kind = ErrorKind.RESOURCE
-                return SyncOutcome(
+                return SyncResult(
                     OutcomeStatus.PARTIAL,
-                    plan,
+                    public_plan,
                     applied=tuple(applied),
                     verification=tuple(verification),
-                    warnings=tuple(plan.warnings),
+                    warnings=tuple(result_warnings),
                     error={
                         "kind": error_kind.value,
                         "message": message,
@@ -3850,21 +3900,24 @@ class XTFSyncEngine:
                     },
                 )
             if self.config.verify_remote_writes:
-                created_ids = {id(item) for item in created_field_actions}
                 verification = [
                     (
-                        {"kind": item.kind, "status": "verified", "ok": True}
-                        if id(item) in created_ids
+                        {
+                            "kind": verification_item["kind"],
+                            "status": "verified",
+                            "ok": True,
+                        }
+                        if verification_item.get("kind") == "create_fields"
                         else verification_item
                     )
-                    for verification_item, item in zip(verification, applied)
+                    for verification_item in verification
                 ]
-        return SyncOutcome(
+        return SyncResult(
             OutcomeStatus.SUCCESS,
-            plan,
+            public_plan,
             applied=tuple(applied),
             verification=tuple(verification),
-            warnings=tuple(plan.warnings),
+            warnings=tuple(result_warnings),
         )
 
     def sync(self, df: pd.DataFrame) -> bool:

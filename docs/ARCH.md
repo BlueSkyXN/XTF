@@ -39,7 +39,7 @@
 
 ### 1.1 系统定位
 
-XTF 2.0 是一个 flags-first、可审计的同步 CLI，将本地 Excel/CSV 或另一张 Bitable 的数据同步到飞书 Bitable/Sheet。同步先形成只读 `SyncPlan`，再由 executor 按 action 顺序执行并返回结构化 `SyncOutcome`。
+XTF 2.0 是一个 flags-first、可审计的同步 CLI，将本地 Excel/CSV 或另一张 Bitable 的数据同步到飞书 Bitable/Sheet。同步先形成进程内 `ExecutionPlan`，dry-run 只公开不可重放的 `PlanDocument`；executor 按 typed action 顺序执行并返回结构化 `SyncResult`。
 
 ### 1.2 设计哲学
 
@@ -64,7 +64,7 @@ XTF 2.0 是一个 flags-first、可审计的同步 CLI，将本地 Excel/CSV 或
 │   xtf_cli — parser、config v2、dispatch、human/JSON 输出   │
 ├─────────────────────────────────────────────────────────┤
 │                    计划/引擎层 (Core)                     │
-│   core/plan.py      — SyncPlan / PlanAction / Outcome     │
+│   core/plan.py      — ExecutionPlan / PlanDocument / Result│
 │   core/engine.py    — read-only planner + executor        │
 │   core/converter.py — DataConverter 数据转换器             │
 │   core/control.py   — 高级重试与频控控制器                  │
@@ -91,10 +91,10 @@ XTF.py (薄入口)
         │     ├─→ YAML v2
         │     └─→ target defaults
         ├─→ XTFSyncEngine.plan(...)
-        │     └─→ ordered PlanAction（零 mutation）
-        ├─→ --dry-run → renderer
+        │     └─→ ordered typed action（零 mutation）
+        ├─→ --dry-run → PlanDocument → renderer
         └─→ execute_plan(plan)
-              └─→ SyncOutcome → human / JSON renderer
+              └─→ SyncResult → human / JSON renderer
   │
 XTFSyncEngine(config)
   │     ├─→ RetryableAPIClient (共享重试、频控)
@@ -266,15 +266,15 @@ app_secret: CLI → XTF_APP_SECRET → YAML → missing error
 
 | 方法 | 签名 | 说明 |
 |------|------|------|
-| `plan()` | `(df: Optional[DataFrame]) → SyncPlan` | 只读生成 ordered actions；禁止 mutation |
-| `execute_plan()` | `(plan: SyncPlan) → SyncOutcome` | 按计划执行，首错停止并保留 applied prefix |
+| `plan()` | `(df: Optional[DataFrame]) → ExecutionPlan` | 只读生成进程内 typed actions；禁止 mutation |
+| `execute_plan()` | `(plan: ExecutionPlan) → SyncResult` | 按计划执行，首错停止并保留公开 applied prefix |
 | `sync()` | `(df: DataFrame) → bool` | 主入口，根据 sync_mode 分发 |
 | `sync_bitable_source()` | `() → bool` | 从源 Bitable 读取并差异写入既有目标表 |
 | `sync_full()` | `(df: DataFrame) → bool` | 全量同步 |
 | `sync_incremental()` | `(df: DataFrame) → bool` | 增量同步 |
 | `sync_overwrite()` | `(df: DataFrame) → bool` | 覆盖同步 |
 | `sync_clone()` | `(df: DataFrame) → bool` | 克隆同步 |
-| `plan_fields()` | `(df: DataFrame) → PlanAction` | 只读分析缺失字段和预测 schema |
+| `plan_fields()` | `(df: DataFrame) → List[ExecutionAction]` | 只读分析缺失字段和预测 schema |
 | `ensure_fields_exist()` | `(df: DataFrame) → Tuple[bool, Dict]` | 兼容 wrapper；正式执行时创建字段 |
 | `get_all_bitable_records()` | `() → List[Dict]` | 获取全部 Bitable 记录 |
 | `get_current_sheet_data()` | `() → DataFrame` | 获取当前 Sheet 数据 |
@@ -485,13 +485,13 @@ Sheet 元数据不可用时可以用配置化窗口做有界诊断读取，但�
   ├─ DataConverter 分析 DataFrame 列类型
   ├─ 生成缺失字段 action（不创建）
   ├─ 分类 create/update/delete/clear/write actions
-  └─ 生成 SyncPlan；dry-run 到此结束
+  └─ 生成 ExecutionPlan；dry-run 仅输出 PlanDocument 后结束
 
 第5步：计划执行
   ├─ destructive gate 检查 --allow-delete
   ├─ 按 action 顺序 mutation
   ├─ 首错停止并保留 applied prefix
-  └─ 生成 SyncOutcome 与 verification
+  └─ 生成 SyncResult、applied prefix 与 verification
 
 第6步：输出
   ├─ human：最终 stdout，诊断 stderr
@@ -568,7 +568,7 @@ XTF/
 ├── xtf_cli/                  # parser、v2 resolver、dispatch、renderer、version
 ├── core/
 │   ├── config.py             # SyncConfig 与业务组合验证
-│   ├── plan.py               # SyncPlan / PlanAction / SyncOutcome
+│   ├── plan.py               # ExecutionPlan / PlanDocument / SyncResult
 │   ├── engine.py             # planner + executor
 │   ├── converter.py          # 数据转换：类型分析、转换、统计报告
 │   └── control.py            # 高级控制：重试策略、频控策略

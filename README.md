@@ -185,7 +185,7 @@ XTF/
 ├── xtf_cli/                  # parser、config v2、命令、输出与退出码
 ├── core/
 │   ├── config.py             # 配置管理
-│   ├── plan.py               # SyncPlan / PlanAction / SyncOutcome
+│   ├── plan.py               # ExecutionPlan / PlanDocument / SyncResult
 │   ├── engine.py             # planner + executor（四种模式、选择性同步、公式保护）
 │   ├── converter.py          # 数据转换（类型分析、转换、统计报告）
 │   └── control.py            # 高级控制（重试策略、频控策略）
@@ -235,7 +235,9 @@ HTTP `429/5xx` 和网络异常由 transport 统一重试；HTTP 200 中的飞书
 
 写后公式验证使用独立的 `target.sheet.verify_formulas: true`，只校验 typed receipt 能证明的
 成功写入范围；它不会由公式保护自动开启，也不会为新增行生成或复制公式。append 缺少
-实际落点、Sheet AI 返回 partial/errors 或仍有更多结果时，同步失败关闭。
+实际落点、Sheet AI 返回 partial/errors 或仍有更多结果时，同步失败关闭。任何已发送
+mutation 的结果未知时返回 `indeterminate`（exit `8`）；自动下拉和显示格式等
+best-effort enrichment 失败只产生 warning，不覆盖已确认的数据成功状态。
 
 **Q: 字段类型推荐不准确？**
 降级到 `base` 策略确保稳定，或调整 Intelligence 策略的置信度阈值。详见 [docs/FIELD_TYPES.md](docs/FIELD_TYPES.md)。

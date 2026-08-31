@@ -66,7 +66,27 @@ from .config import (
 from .converter import DataConverter
 from .engine import XTFSyncEngine
 from .key_policy import CanonicalKey, KeyIndex, KeyPolicy
-from .plan import ErrorKind, OutcomeStatus, PlanAction, SyncOutcome, SyncPlan
+from .plan import (
+    ActionUnit,
+    AppendRowsAction,
+    ApplySheetConfigAction,
+    ClearRangeAction,
+    CreateFieldAction,
+    CreateRecordsAction,
+    DeleteRecordsAction,
+    ErrorKind,
+    ExecutionAction,
+    ExecutionPlan,
+    OutcomeStatus,
+    PlanActionDocument,
+    PlanDocument,
+    SnapshotPrecondition,
+    SyncResult,
+    UpdateRecordsAction,
+    VerificationPolicy,
+    WriteColumnsAction,
+    WriteRangeAction,
+)
 from .reader import DataFileReader
 
 __all__ = [
@@ -83,9 +103,23 @@ __all__ = [
     "KeyIndex",
     "KeyPolicy",
     "XTFSyncEngine",
-    "PlanAction",
-    "SyncPlan",
-    "SyncOutcome",
+    "ActionUnit",
+    "AppendRowsAction",
+    "ApplySheetConfigAction",
+    "ClearRangeAction",
+    "CreateFieldAction",
+    "CreateRecordsAction",
+    "DeleteRecordsAction",
+    "ExecutionAction",
+    "ExecutionPlan",
+    "PlanActionDocument",
+    "PlanDocument",
+    "SnapshotPrecondition",
+    "SyncResult",
+    "UpdateRecordsAction",
+    "VerificationPolicy",
+    "WriteColumnsAction",
+    "WriteRangeAction",
     "OutcomeStatus",
     "ErrorKind",
     "DataFileReader",

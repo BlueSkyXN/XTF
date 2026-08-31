@@ -26,6 +26,7 @@ from .errors import (
     EXIT_AUTH,
     EXIT_CONFIG,
     EXIT_INPUT,
+    EXIT_INDETERMINATE,
     EXIT_INTERRUPTED,
     EXIT_OK,
     EXIT_PARTIAL,
@@ -38,7 +39,7 @@ from .errors import (
 from .parser import parse_args
 
 if TYPE_CHECKING:
-    from core.plan import SyncPlan
+    from core.plan import ExecutionPlan
 
 
 class Reporter:
@@ -174,6 +175,7 @@ class Reporter:
                 5: "read",
                 6: "mutation",
                 7: "verification",
+                8: "indeterminate",
                 130: "interrupt",
             }
             error_kind = kinds.get(error.exit_code, "internal")
@@ -197,10 +199,14 @@ class Reporter:
                 config_path = error.details.get("config_path")
                 if config_path is not None:
                     result["config_path"] = config_path
+            outcome_status = None
+            outcome = result.get("outcome")
+            if isinstance(outcome, Mapping):
+                outcome_status = outcome.get("status")
             payload = self._envelope(
                 command=self.command,
                 ok=False,
-                status="error",
+                status=str(outcome_status or "error"),
                 duration_ms=duration_ms,
                 result=self.sanitize(result),
                 error=error_data,
@@ -220,7 +226,7 @@ def _as_dict(value: Any) -> dict[str, Any]:
     return {"value": value}
 
 
-def _plan_is_destructive(plan: SyncPlan | Mapping[str, Any]) -> bool:
+def _plan_is_destructive(plan: ExecutionPlan | Mapping[str, Any]) -> bool:
     if bool(getattr(plan, "destructive", False)):
         return True
     actions = getattr(plan, "actions", None)
@@ -317,7 +323,9 @@ def _sync(
                 "config_path": str(resolved.path) if resolved.path else None
             }
         raise error from exc
-    plan_data = _as_dict(plan)
+    to_public = getattr(plan, "to_public", None)
+    public_plan = to_public() if callable(to_public) else plan
+    plan_data = _as_dict(public_plan)
     config_label = str(resolved.path) if resolved.path else "flags/ENV"
     for warning in plan_data.get("warnings") or ():
         reporter.warning(str(warning))
@@ -368,24 +376,34 @@ def _sync(
         exit_codes = {
             "validation": EXIT_CONFIG,
             "auth": EXIT_AUTH,
-            "resource": EXIT_AUTH,
+            "resource": EXIT_REMOTE,
             "read": EXIT_REMOTE,
+            "stale_snapshot": EXIT_REMOTE,
             "mutation": EXIT_PARTIAL,
             "verification": EXIT_VERIFICATION,
             "internal": EXIT_RUNTIME,
         }
-        exit_code = exit_codes.get(error_kind, EXIT_PARTIAL)
+        exit_code = (
+            EXIT_INDETERMINATE
+            if status == "indeterminate"
+            else exit_codes.get(error_kind, EXIT_PARTIAL)
+        )
         error_codes = {
             "validation": "XTF_E_CONFIG_INVALID",
             "auth": "XTF_E_AUTH",
             "resource": "XTF_E_RESOURCE",
             "read": "XTF_E_PLAN_INCOMPLETE",
+            "stale_snapshot": "XTF_E_STALE_SNAPSHOT",
             "mutation": "XTF_E_MUTATION_REJECTED",
             "verification": "XTF_E_VERIFICATION_MISMATCH",
             "internal": "XTF_E_INTERNAL",
         }
         raise CLIError(
-            error_codes.get(error_kind, "XTF_E_MUTATION_REJECTED"),
+            (
+                "XTF_E_INDETERMINATE"
+                if status == "indeterminate"
+                else error_codes.get(error_kind, "XTF_E_MUTATION_REJECTED")
+            ),
             str(
                 error_data.get("message")
                 if isinstance(error_data, Mapping) and error_data.get("message")
@@ -676,7 +694,7 @@ def _normalize_exception(exc: Exception, *, phase: str = "general") -> CLIError:
             if exc.code in auth_codes or exc.http_status in {401, 403}:
                 return CLIError("XTF_E_AUTH", str(exc), EXIT_AUTH)
             if exc.http_status == 404:
-                return CLIError("XTF_E_RESOURCE", str(exc), EXIT_AUTH)
+                return CLIError("XTF_E_RESOURCE", str(exc), EXIT_REMOTE)
             if phase == "execute":
                 return CLIError("XTF_E_MUTATION_REJECTED", str(exc), EXIT_PARTIAL)
             return CLIError("XTF_E_REMOTE", str(exc), EXIT_REMOTE)
