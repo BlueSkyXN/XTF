@@ -106,7 +106,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Dict, Any, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import Dict, Any, Iterator, List, Mapping, Optional, Sequence, Tuple, Union
 
 from .auth import FeishuAuth
 from .base import RetryableAPIClient
@@ -181,6 +181,119 @@ class A1Range:
         for char in value:
             result = result * 26 + ord(char) - ord("A") + 1
         return result
+
+
+@dataclass(frozen=True)
+class RangeChunk:
+    """One bounded A1 range and its matching rectangular matrix."""
+
+    a1_range: A1Range
+    values: Tuple[Tuple[Any, ...], ...]
+
+    def as_lists(self) -> List[List[Any]]:
+        return [list(row) for row in self.values]
+
+
+class RangeChunker:
+    """Single source of truth for bounded Sheet range and matrix slicing."""
+
+    def __init__(self, max_rows: int, max_cols: int):
+        for name, value in (("max_rows", max_rows), ("max_cols", max_cols)):
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
+        self.max_rows = max_rows
+        self.max_cols = max_cols
+
+    @staticmethod
+    def copy_matrix(values: Sequence[Sequence[Any]]) -> Tuple[Tuple[Any, ...], ...]:
+        if not isinstance(values, (list, tuple)) or not values:
+            raise ValueError("typed Sheet values must be a non-empty matrix")
+        if any(not isinstance(row, (list, tuple)) or not row for row in values):
+            raise ValueError("typed Sheet values must have non-empty rows")
+        width = len(values[0])
+        if any(len(row) != width for row in values):
+            raise ValueError("typed Sheet values must be rectangular")
+        return tuple(tuple(row) for row in values)
+
+    @staticmethod
+    def require_shape(a1_range: A1Range, values: Sequence[Sequence[Any]]) -> None:
+        if len(values) != a1_range.row_count or len(values[0]) != a1_range.col_count:
+            raise ValueError(
+                "typed Sheet matrix shape does not match A1 range "
+                f"{a1_range.text}: expected "
+                f"{a1_range.row_count}x{a1_range.col_count}"
+            )
+
+    def chunk_count(self, a1_range: A1Range) -> int:
+        row_chunks = (a1_range.row_count + self.max_rows - 1) // self.max_rows
+        col_chunks = (a1_range.col_count + self.max_cols - 1) // self.max_cols
+        return row_chunks * col_chunks
+
+    def split(
+        self, a1_range: A1Range, values: Sequence[Sequence[Any]]
+    ) -> Iterator[RangeChunk]:
+        self.require_shape(a1_range, values)
+        for col_start in range(a1_range.start_col, a1_range.end_col + 1, self.max_cols):
+            col_end = min(col_start + self.max_cols - 1, a1_range.end_col)
+            col_offset = col_start - a1_range.start_col
+            width = col_end - col_start + 1
+            for row_start in range(
+                a1_range.start_row, a1_range.end_row + 1, self.max_rows
+            ):
+                row_end = min(row_start + self.max_rows - 1, a1_range.end_row)
+                row_offset = row_start - a1_range.start_row
+                height = row_end - row_start + 1
+                chunk_values = tuple(
+                    tuple(row[col_offset : col_offset + width])
+                    for row in values[row_offset : row_offset + height]
+                )
+                yield RangeChunk(
+                    A1Range(
+                        a1_range.sheet_id,
+                        row_start,
+                        row_end,
+                        col_start,
+                        col_end,
+                    ),
+                    chunk_values,
+                )
+
+    def empty(self, a1_range: A1Range) -> Iterator[RangeChunk]:
+        """Yield bounded empty matrices lazily instead of allocating the full grid."""
+        for col_start in range(a1_range.start_col, a1_range.end_col + 1, self.max_cols):
+            col_end = min(col_start + self.max_cols - 1, a1_range.end_col)
+            width = col_end - col_start + 1
+            for row_start in range(
+                a1_range.start_row, a1_range.end_row + 1, self.max_rows
+            ):
+                row_end = min(row_start + self.max_rows - 1, a1_range.end_row)
+                height = row_end - row_start + 1
+                yield RangeChunk(
+                    A1Range(
+                        a1_range.sheet_id,
+                        row_start,
+                        row_end,
+                        col_start,
+                        col_end,
+                    ),
+                    tuple(tuple("" for _ in range(width)) for _ in range(height)),
+                )
+
+    @staticmethod
+    def fixed_band(
+        actual_anchor: A1Range, *, column_offset: int, width: int
+    ) -> A1Range:
+        """Map a source column band onto rows allocated by an append response."""
+        if column_offset < 0 or width <= 0:
+            raise ValueError("column_offset and width must describe a non-empty band")
+        start_col = actual_anchor.start_col + column_offset
+        return A1Range(
+            actual_anchor.sheet_id,
+            actual_anchor.start_row,
+            actual_anchor.end_row,
+            start_col,
+            start_col + width - 1,
+        )
 
 
 @dataclass(frozen=True)
@@ -277,32 +390,16 @@ class SheetAPI:
         return result or "A"
 
     @staticmethod
-    def _typed_matrix(values: Sequence[Sequence[Any]]) -> List[List[Any]]:
+    def _typed_matrix(values: Sequence[Sequence[Any]]) -> Tuple[Tuple[Any, ...], ...]:
         """Validate and copy a non-empty rectangular matrix before mutation."""
-        if not isinstance(values, (list, tuple)) or not values:
-            raise ValueError("typed Sheet values must be a non-empty matrix")
-        if any(not isinstance(row, (list, tuple)) or not row for row in values):
-            raise ValueError("typed Sheet values must have non-empty rows")
-        width = len(values[0])
-        if any(len(row) != width for row in values):
-            raise ValueError("typed Sheet values must be rectangular")
-        return [list(row) for row in values]
+        return RangeChunker.copy_matrix(values)
 
     @staticmethod
     def _typed_shape(a1: A1Range, values: Sequence[Sequence[Any]]) -> None:
-        if len(values) != a1.row_count or len(values[0]) != a1.col_count:
-            raise ValueError(
-                "typed Sheet matrix shape does not match A1 range "
-                f"{a1.text}: expected {a1.row_count}x{a1.col_count}"
-            )
+        RangeChunker.require_shape(a1, values)
 
-    def _typed_range_limits(self, a1: A1Range) -> None:
-        if a1.row_count > self.write_max_rows or a1.col_count > self.write_max_cols:
-            raise ValueError(
-                "typed Sheet range exceeds configured write limits: "
-                f"{a1.row_count}x{a1.col_count} > "
-                f"{self.write_max_rows}x{self.write_max_cols}"
-            )
+    def _range_chunker(self) -> RangeChunker:
+        return RangeChunker(self.write_max_rows, self.write_max_cols)
 
     @staticmethod
     def _typed_failure_receipt(
@@ -314,6 +411,8 @@ class SheetAPI:
         *,
         failed_batch_index: int,
         raw_responses: Sequence[Mapping[str, Any]],
+        unit: str = "range",
+        unknown_scope: bool = False,
     ) -> MutationReceipt:
         unknown = error.kind == "transport"
         return MutationReceipt(
@@ -321,6 +420,7 @@ class SheetAPI:
             backend=_SHEET_BACKEND,
             requested_count=requested,
             accepted_count=accepted,
+            unit=unit,
             actual_ranges=tuple(actual_ranges),
             failed_batch_index=failed_batch_index,
             outcome=(
@@ -331,7 +431,12 @@ class SheetAPI:
             readback=(
                 ReadbackStatus.UNKNOWN if unknown else ReadbackStatus.NOT_REQUESTED
             ),
-            raw_metadata={"error": str(error), "responses": tuple(raw_responses)},
+            unknown_scope=unknown or unknown_scope,
+            raw_metadata={
+                "error": str(error),
+                "responses": tuple(raw_responses),
+                "unknown_scope": unknown or unknown_scope,
+            },
         )
 
     @staticmethod
@@ -416,9 +521,12 @@ class SheetAPI:
         actual_ranges: Sequence[A1Range],
         result: Mapping[str, Any],
         *,
+        accepted: Optional[int] = None,
+        unit: str = "range",
         unknown_scope: bool = False,
         failed_batch_index: Optional[int] = None,
         outcome: MutationOutcome = MutationOutcome.ACCEPTED,
+        extra_metadata: Optional[Mapping[str, Any]] = None,
     ) -> MutationReceipt:
         data = result.get("data", {})
         responses = data.get("responses", []) if isinstance(data, Mapping) else []
@@ -445,11 +553,22 @@ class SheetAPI:
         updated_rows = collect_metric(responses, "updatedRows")
         updated_columns = collect_metric(responses, "updatedColumns")
         updated_cells = collect_metric(responses, "updatedCells")
+        metadata: Dict[str, Any] = {
+            "response": result,
+            "unknown_scope": unknown_scope,
+        }
+        if extra_metadata:
+            metadata.update(extra_metadata)
         return MutationReceipt(
             operation=operation,
             backend=_SHEET_BACKEND,
             requested_count=requested,
-            accepted_count=(requested if outcome is MutationOutcome.ACCEPTED else 0),
+            accepted_count=(
+                requested
+                if accepted is None and outcome is MutationOutcome.ACCEPTED
+                else accepted or 0
+            ),
+            unit=unit,
             actual_ranges=tuple(actual_ranges),
             updated_rows=updated_rows or None,
             updated_columns=updated_columns or None,
@@ -461,27 +580,9 @@ class SheetAPI:
                 if unknown_scope
                 else ReadbackStatus.NOT_REQUESTED
             ),
-            raw_metadata={"response": result, "unknown_scope": unknown_scope},
+            unknown_scope=unknown_scope,
+            raw_metadata=metadata,
         )
-
-    def _typed_chunks(
-        self, a1: A1Range, values: List[List[Any]]
-    ) -> List[Tuple[A1Range, List[List[Any]]]]:
-        chunks: List[Tuple[A1Range, List[List[Any]]]] = []
-        for col_start in range(a1.start_col, a1.end_col + 1, self.write_max_cols):
-            col_end = min(col_start + self.write_max_cols - 1, a1.end_col)
-            for row_start in range(a1.start_row, a1.end_row + 1, self.write_max_rows):
-                row_end = min(row_start + self.write_max_rows - 1, a1.end_row)
-                rows = [
-                    row[col_start - a1.start_col : col_end - a1.start_col + 1]
-                    for row in values[
-                        row_start - a1.start_row : row_end - a1.start_row + 1
-                    ]
-                ]
-                chunks.append(
-                    (A1Range(a1.sheet_id, row_start, row_end, col_start, col_end), rows)
-                )
-        return chunks
 
     def write_values(
         self, spreadsheet_token: str, a1_range: str, values: Sequence[Sequence[Any]]
@@ -489,15 +590,18 @@ class SheetAPI:
         matrix = self._typed_matrix(values)
         a1 = A1Range.parse(a1_range)
         self._typed_shape(a1, matrix)
+        chunker = self._range_chunker()
         applied: List[A1Range] = []
         responses: List[Mapping[str, Any]] = []
-        chunks = self._typed_chunks(a1, matrix)
+        requested_ranges = chunker.chunk_count(a1)
         successful_requests = 0
         failed_request_index = 0
-        for chunk_range, chunk_values in chunks:
-            pending = [(chunk_range, chunk_values)]
+        for chunk in chunker.split(a1, matrix):
+            pending = [chunk]
             while pending:
-                current_range, current_values = pending.pop(0)
+                current = pending.pop(0)
+                current_range = current.a1_range
+                current_values = current.as_lists()
                 failed_request_index += 1
                 try:
                     result = self._typed_values_call(
@@ -512,43 +616,69 @@ class SheetAPI:
                         },
                     )
                 except FeishuAPIError as error:
-                    if (
-                        error.code == self.ERROR_CODE_REQUEST_TOO_LARGE
-                        and current_range.row_count > 1
-                    ):
-                        midpoint = (
-                            current_range.start_row + current_range.row_count // 2 - 1
-                        )
-                        split = [
-                            A1Range(
-                                current_range.sheet_id,
-                                current_range.start_row,
-                                midpoint,
-                                current_range.start_col,
-                                current_range.end_col,
-                            ),
-                            A1Range(
-                                current_range.sheet_id,
-                                midpoint + 1,
-                                current_range.end_row,
-                                current_range.start_col,
-                                current_range.end_col,
-                            ),
-                        ]
-                        offset = midpoint - current_range.start_row + 1
-                        pending[0:0] = [
-                            (split[0], current_values[:offset]),
-                            (split[1], current_values[offset:]),
-                        ]
+                    split: List[RangeChunk] = []
+                    if error.code == self.ERROR_CODE_REQUEST_TOO_LARGE:
+                        if current_range.row_count > 1:
+                            first_height = current_range.row_count // 2
+                            split = [
+                                RangeChunk(
+                                    A1Range(
+                                        current_range.sheet_id,
+                                        current_range.start_row,
+                                        current_range.start_row + first_height - 1,
+                                        current_range.start_col,
+                                        current_range.end_col,
+                                    ),
+                                    current.values[:first_height],
+                                ),
+                                RangeChunk(
+                                    A1Range(
+                                        current_range.sheet_id,
+                                        current_range.start_row + first_height,
+                                        current_range.end_row,
+                                        current_range.start_col,
+                                        current_range.end_col,
+                                    ),
+                                    current.values[first_height:],
+                                ),
+                            ]
+                        elif current_range.col_count > 1:
+                            first_width = current_range.col_count // 2
+                            split = [
+                                RangeChunk(
+                                    A1Range(
+                                        current_range.sheet_id,
+                                        current_range.start_row,
+                                        current_range.end_row,
+                                        current_range.start_col,
+                                        current_range.start_col + first_width - 1,
+                                    ),
+                                    tuple(row[:first_width] for row in current.values),
+                                ),
+                                RangeChunk(
+                                    A1Range(
+                                        current_range.sheet_id,
+                                        current_range.start_row,
+                                        current_range.end_row,
+                                        current_range.start_col + first_width,
+                                        current_range.end_col,
+                                    ),
+                                    tuple(row[first_width:] for row in current.values),
+                                ),
+                            ]
+                    if split:
+                        requested_ranges += 1
+                        pending[0:0] = split
                         continue
                     return self._typed_failure_receipt(
                         "write",
-                        len(chunks),
+                        requested_ranges,
                         successful_requests,
                         applied,
                         error,
                         failed_batch_index=failed_request_index,
                         raw_responses=responses,
+                        unit="range",
                     )
                 ranges, _ = self._typed_actual_ranges(
                     result, [current_range.text], allow_fallback=True
@@ -557,7 +687,12 @@ class SheetAPI:
                 responses.append(result)
                 successful_requests += 1
         return self._typed_sheet_receipt(
-            "write", len(chunks), applied, {"data": {"responses": responses}}
+            "write",
+            requested_ranges,
+            applied,
+            {"data": {"responses": responses}},
+            accepted=successful_requests,
+            unit="range",
         )
 
     def append_values(
@@ -566,27 +701,24 @@ class SheetAPI:
         matrix = self._typed_matrix(values)
         a1 = A1Range.parse(a1_range)
         self._typed_shape(a1, matrix)
-        pending: List[Tuple[A1Range, List[List[Any]]]] = []
-        for row_offset in range(0, len(matrix), self.write_max_rows):
-            current_values = matrix[row_offset : row_offset + self.write_max_rows]
-            pending.append(
-                (
-                    A1Range(
-                        a1.sheet_id,
-                        a1.start_row + row_offset,
-                        a1.start_row + row_offset + len(current_values) - 1,
-                        a1.start_col,
-                        a1.end_col,
-                    ),
-                    current_values,
-                )
-            )
+        anchor_width = min(a1.col_count, self.write_max_cols)
+        anchor_range = A1Range(
+            a1.sheet_id,
+            a1.start_row,
+            a1.end_row,
+            a1.start_col,
+            a1.start_col + anchor_width - 1,
+        )
+        anchor_values = tuple(tuple(row[:anchor_width]) for row in matrix)
+        anchor_chunker = RangeChunker(self.write_max_rows, anchor_width)
         applied: List[A1Range] = []
         responses: List[Mapping[str, Any]] = []
+        source_slices: List[Mapping[str, int | str]] = []
         successful_rows = 0
         request_index = 0
+        pending = list(anchor_chunker.split(anchor_range, anchor_values))
         while pending:
-            current_range, current = pending.pop(0)
+            anchor_chunk = pending.pop(0)
             request_index += 1
             try:
                 result = self._typed_values_call(
@@ -595,37 +727,38 @@ class SheetAPI:
                     "values_append",
                     {
                         "valueRange": {
-                            "range": current_range.text,
-                            "values": current,
+                            "range": anchor_chunk.a1_range.text,
+                            "values": anchor_chunk.as_lists(),
                         }
                     },
                     retry_transport=False,
                 )
             except FeishuAPIError as error:
-                if error.code == self.ERROR_CODE_REQUEST_TOO_LARGE and len(current) > 1:
-                    midpoint = len(current) // 2
-                    first = current[:midpoint]
-                    second = current[midpoint:]
+                if (
+                    error.code == self.ERROR_CODE_REQUEST_TOO_LARGE
+                    and anchor_chunk.a1_range.row_count > 1
+                ):
+                    first_height = anchor_chunk.a1_range.row_count // 2
                     pending[0:0] = [
-                        (
+                        RangeChunk(
                             A1Range(
-                                current_range.sheet_id,
-                                current_range.start_row,
-                                current_range.start_row + len(first) - 1,
-                                current_range.start_col,
-                                current_range.end_col,
+                                anchor_chunk.a1_range.sheet_id,
+                                anchor_chunk.a1_range.start_row,
+                                anchor_chunk.a1_range.start_row + first_height - 1,
+                                anchor_chunk.a1_range.start_col,
+                                anchor_chunk.a1_range.end_col,
                             ),
-                            first,
+                            anchor_chunk.values[:first_height],
                         ),
-                        (
+                        RangeChunk(
                             A1Range(
-                                current_range.sheet_id,
-                                current_range.start_row + len(first),
-                                current_range.end_row,
-                                current_range.start_col,
-                                current_range.end_col,
+                                anchor_chunk.a1_range.sheet_id,
+                                anchor_chunk.a1_range.start_row + first_height,
+                                anchor_chunk.a1_range.end_row,
+                                anchor_chunk.a1_range.start_col,
+                                anchor_chunk.a1_range.end_col,
                             ),
-                            second,
+                            anchor_chunk.values[first_height:],
                         ),
                     ]
                     continue
@@ -637,19 +770,114 @@ class SheetAPI:
                     error,
                     failed_batch_index=request_index,
                     raw_responses=responses,
+                    unit="row",
                 )
-            ranges, unknown = self._typed_actual_ranges(
+            anchor_ranges, unknown = self._typed_actual_ranges(
                 result, (), allow_fallback=False
             )
-            applied.extend(ranges)
             responses.append(result)
-            successful_rows += len(current)
+            if (
+                unknown
+                or len(anchor_ranges) != 1
+                or anchor_ranges[0].row_count != anchor_chunk.a1_range.row_count
+                or anchor_ranges[0].col_count != anchor_width
+            ):
+                return self._typed_sheet_receipt(
+                    "append",
+                    len(matrix),
+                    applied,
+                    {"data": {"responses": responses}},
+                    accepted=successful_rows,
+                    unit="row",
+                    unknown_scope=True,
+                    failed_batch_index=request_index,
+                    outcome=MutationOutcome.UNKNOWN_OUTCOME,
+                    extra_metadata={"source_slices": tuple(source_slices)},
+                )
+
+            actual_anchor = anchor_ranges[0]
+            applied.append(actual_anchor)
+            source_slices.append(
+                {
+                    "range": actual_anchor.text,
+                    "row_offset": successful_rows,
+                    "col_offset": 0,
+                    "row_count": actual_anchor.row_count,
+                    "col_count": actual_anchor.col_count,
+                }
+            )
+            for column_offset in range(anchor_width, a1.col_count, self.write_max_cols):
+                width = min(self.write_max_cols, a1.col_count - column_offset)
+                fixed_range = RangeChunker.fixed_band(
+                    actual_anchor, column_offset=column_offset, width=width
+                )
+                band_values = tuple(
+                    tuple(row[column_offset : column_offset + width])
+                    for row in matrix[
+                        successful_rows : successful_rows
+                        + anchor_chunk.a1_range.row_count
+                    ]
+                )
+                request_index += 1
+                band_receipt = self.write_values(
+                    spreadsheet_token, fixed_range.text, band_values
+                )
+                for item in band_receipt.actual_ranges:
+                    if not isinstance(item, A1Range):
+                        continue
+                    applied.append(item)
+                    source_slices.append(
+                        {
+                            "range": item.text,
+                            "row_offset": successful_rows
+                            + item.start_row
+                            - fixed_range.start_row,
+                            "col_offset": column_offset
+                            + item.start_col
+                            - fixed_range.start_col,
+                            "row_count": item.row_count,
+                            "col_count": item.col_count,
+                        }
+                    )
+                if band_receipt.outcome is not MutationOutcome.ACCEPTED:
+                    unknown_band = (
+                        band_receipt.outcome is MutationOutcome.UNKNOWN_OUTCOME
+                    )
+                    return MutationReceipt(
+                        operation="append",
+                        backend=_SHEET_BACKEND,
+                        requested_count=len(matrix),
+                        accepted_count=successful_rows,
+                        unit="row",
+                        actual_ranges=tuple(applied),
+                        failed_batch_index=request_index,
+                        outcome=(
+                            MutationOutcome.UNKNOWN_OUTCOME
+                            if unknown_band
+                            else MutationOutcome.PARTIAL
+                        ),
+                        readback=(
+                            ReadbackStatus.UNKNOWN
+                            if unknown_band
+                            else ReadbackStatus.NOT_REQUESTED
+                        ),
+                        unknown_scope=unknown_band,
+                        raw_metadata={
+                            "responses": tuple(responses),
+                            "failed_band": band_receipt.raw_metadata,
+                            "unknown_scope": unknown_band,
+                            "source_slices": tuple(source_slices),
+                        },
+                    )
+            successful_rows += anchor_chunk.a1_range.row_count
         return self._typed_sheet_receipt(
             "append",
             len(matrix),
             applied,
             {"data": {"responses": responses}},
-            unknown_scope=not applied,
+            accepted=successful_rows,
+            unit="row",
+            extra_metadata={"source_slices": tuple(source_slices)},
         )
 
     def batch_update_values(
@@ -657,7 +885,7 @@ class SheetAPI:
     ) -> MutationReceipt:
         if not isinstance(value_ranges, (list, tuple)) or not value_ranges:
             raise ValueError("typed batch update requires non-empty value_ranges")
-        normalized: List[Dict[str, Any]] = []
+        normalized: List[Tuple[A1Range, Tuple[Tuple[Any, ...], ...]]] = []
         for item in value_ranges:
             if (
                 not isinstance(item, Mapping)
@@ -668,38 +896,96 @@ class SheetAPI:
             a1 = A1Range.parse(item["range"])
             matrix = self._typed_matrix(item["values"])
             self._typed_shape(a1, matrix)
-            self._typed_range_limits(a1)
-            normalized.append({"range": a1.text, "values": matrix})
-        try:
-            result = self._typed_values_call(
-                "POST",
-                spreadsheet_token,
-                "values_batch_update",
-                {"valueRanges": normalized},
-            )
-        except FeishuAPIError as error:
-            return self._typed_failure_receipt(
-                "batch_update",
-                len(normalized),
-                0,
-                (),
-                error,
-                failed_batch_index=1,
-                raw_responses=(),
-            )
-        ranges, unknown = self._typed_actual_ranges(
-            result, [item["range"] for item in normalized], allow_fallback=True
+            normalized.append((a1, matrix))
+
+        chunker = self._range_chunker()
+        requested_ranges = sum(chunker.chunk_count(a1) for a1, _ in normalized)
+
+        def chunks() -> Iterator[RangeChunk]:
+            for a1, matrix in normalized:
+                yield from chunker.split(a1, matrix)
+
+        return self._submit_batch_chunks(
+            spreadsheet_token,
+            chunks(),
+            requested_ranges=requested_ranges,
+            operation="batch_update",
         )
+
+    def _submit_batch_chunks(
+        self,
+        spreadsheet_token: str,
+        chunks: Iterator[RangeChunk],
+        *,
+        requested_ranges: int,
+        operation: str,
+    ) -> MutationReceipt:
+        applied: List[A1Range] = []
+        responses: List[Mapping[str, Any]] = []
+        accepted_ranges = 0
+        request_index = 0
+        for chunk in chunks:
+            request_index += 1
+            try:
+                result = self._typed_values_call(
+                    "POST",
+                    spreadsheet_token,
+                    "values_batch_update",
+                    {
+                        "valueRanges": [
+                            {
+                                "range": chunk.a1_range.text,
+                                "values": chunk.as_lists(),
+                            }
+                        ]
+                    },
+                )
+            except FeishuAPIError as error:
+                return self._typed_failure_receipt(
+                    operation,
+                    requested_ranges,
+                    accepted_ranges,
+                    applied,
+                    error,
+                    failed_batch_index=request_index,
+                    raw_responses=responses,
+                    unit="range",
+                )
+            ranges, unknown = self._typed_actual_ranges(
+                result, (chunk.a1_range.text,), allow_fallback=True
+            )
+            if unknown:
+                return self._typed_sheet_receipt(
+                    operation,
+                    requested_ranges,
+                    applied,
+                    {"data": {"responses": responses + [result]}},
+                    accepted=accepted_ranges,
+                    unit="range",
+                    unknown_scope=True,
+                    failed_batch_index=request_index,
+                    outcome=MutationOutcome.UNKNOWN_OUTCOME,
+                )
+            applied.extend(ranges or (chunk.a1_range,))
+            responses.append(result)
+            accepted_ranges += 1
         return self._typed_sheet_receipt(
-            "batch_update", len(normalized), ranges, result, unknown_scope=unknown
+            operation,
+            requested_ranges,
+            applied,
+            {"data": {"responses": responses}},
+            accepted=accepted_ranges,
+            unit="range",
         )
 
     def clear_values(self, spreadsheet_token: str, a1_range: str) -> MutationReceipt:
         a1 = A1Range.parse(a1_range)
-        empty_values = [[""] * a1.col_count for _ in range(a1.row_count)]
-        return self.batch_update_values(
+        chunker = self._range_chunker()
+        return self._submit_batch_chunks(
             spreadsheet_token,
-            [{"range": a1.text, "values": empty_values}],
+            chunker.empty(a1),
+            requested_ranges=chunker.chunk_count(a1),
+            operation="clear",
         )
 
     def query_sheets(self, spreadsheet_token: str) -> Tuple[SheetMetadata, ...]:

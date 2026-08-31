@@ -120,6 +120,7 @@ class MutationReceipt:
     backend: BitableBackendKind | str
     requested_count: int
     accepted_count: int = 0
+    unit: str | None = None
     verified_count: int = 0
     record_ids: tuple[str, ...] = ()
     revision: int | str | None = None
@@ -132,6 +133,7 @@ class MutationReceipt:
     failed_batch_index: int | None = None
     outcome: MutationOutcome = MutationOutcome.ACCEPTED
     readback: ReadbackStatus = ReadbackStatus.NOT_REQUESTED
+    unknown_scope: bool = False
     raw_metadata: Mapping[str, Any] = field(default_factory=dict)
 
     @property

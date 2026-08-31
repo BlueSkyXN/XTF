@@ -523,6 +523,54 @@ def test_sheet_append_readback_covers_each_server_actual_chunk():
     ]
 
 
+def test_wide_sheet_append_readback_uses_receipt_source_slices():
+    engine = make_sheet_engine(verify_remote_writes=True)
+    values = [list(range(101)), list(range(101, 202))]
+    engine.api.append_values = Mock(
+        return_value=MutationReceipt(
+            operation="append",
+            backend="sheet_v2",
+            requested_count=2,
+            accepted_count=2,
+            unit="row",
+            actual_ranges=(
+                A1Range.parse("sh1!A10:CV11"),
+                A1Range.parse("sh1!CW10:CW11"),
+            ),
+            raw_metadata={
+                "source_slices": (
+                    {
+                        "range": "sh1!A10:CV11",
+                        "row_offset": 0,
+                        "col_offset": 0,
+                        "row_count": 2,
+                        "col_count": 100,
+                    },
+                    {
+                        "range": "sh1!CW10:CW11",
+                        "row_offset": 0,
+                        "col_offset": 100,
+                        "row_count": 2,
+                        "col_count": 1,
+                    },
+                )
+            },
+        )
+    )
+    engine.api.get_sheet_data = Mock(
+        side_effect=[
+            [values[0][:100], values[1][:100]],
+            [[values[0][100]], [values[1][100]]],
+        ]
+    )
+
+    assert engine._typed_sheet_append(values, header_width=101)
+    assert [call.args[1] for call in engine.api.get_sheet_data.call_args_list] == [
+        "sh1!A10:CV11",
+        "sh1!CW10:CW11",
+    ]
+
+
 def test_sheet_unknown_outcome_blocks_formula_verification():
     engine = make_sheet_engine(sheet_verify_formulas=True)
     engine.api.verify_formulas = Mock()
@@ -538,10 +586,9 @@ def test_sheet_unknown_outcome_blocks_formula_verification():
     engine.api.verify_formulas.assert_not_called()
 
 
-def test_sheet_selective_write_stops_after_first_failed_chunk():
+def test_sheet_selective_write_propagates_partial_batch_failure():
     engine = make_sheet_engine()
-    engine.api.write_max_rows = 1
-    engine._typed_sheet_batch_update = Mock(side_effect=[True, False, True])
+    engine._typed_sheet_batch_update = Mock(return_value=False)
 
     assert (
         engine._typed_sheet_selective_write(
@@ -553,7 +600,7 @@ def test_sheet_selective_write_stops_after_first_failed_chunk():
         )
         is False
     )
-    assert engine._typed_sheet_batch_update.call_count == 2
+    engine._typed_sheet_batch_update.assert_called_once()
 
 
 def test_sheet_clear_readback_requires_observed_empty_cells():

@@ -114,7 +114,8 @@ DataFrame (N 行 × M 列)
 
 ### 写入分块
 
-写入采用与读取类似的分块策略，但额外包含二分重试机制：
+typed 写入统一由 `RangeChunker` 计算 A1 范围、矩阵切片和行列偏移。每个请求最多
+`5000` 行、`100` 列；`5001 × 101` 会被拆成四个合规块并按顺序提交。写入采用与读取类似的分块策略，但额外包含二分重试机制：
 
 ```
 待写入数据 → 按(行, 列)预分块 → 逐块写入
@@ -134,6 +135,26 @@ clone 模式下清空数据也需要分块（写入空值）：
 逐块写入空值 (batch_update)
 ```
 
+空矩阵按块惰性生成；不会先为整个大范围分配一份同尺寸空矩阵。batch update 的每个
+logical range 也先经过同一个 `RangeChunker`，随后逐块顺序提交并在首个失败处停止。
+XTF 不把未经 OpenAPI 或真实 UAT 证明的“单请求可包含多少个 ranges”固化为公共上限。
+
+### Wide append
+
+超过 `100` 列的 append 先只追加第一组不超过 `100` 列的 anchor band。只有服务端返回
+唯一且形状匹配的 actual range 后，XTF 才按该实际行区间对剩余列执行固定范围 write：
+
+```text
+append A:CV → actual A10:CV11
+                 ↓
+fixed write CW10:...11
+```
+
+actual range 缺失、重复或形状不匹配时不猜测落点，立即返回 `indeterminate` 并停止后续
+列带。typed `MutationReceipt` 同时携带 `requested_count`、`accepted_count`、`unit`、
+`actual_ranges`、`failed_batch_index`、`readback` 和 `unknown_scope`，因此 partial prefix
+与未知落点不会被报告成完整成功。
+
 ---
 
 ## 4. API 接口选择与调用
@@ -148,7 +169,7 @@ clone 模式下清空数据也需要分块（写入空值）：
 | 读取数据 | GET | `/values/{range}` | 按范围读取单元格 |
 | 写入数据 | PUT | `/values` | 精确重写指定范围 |
 | 追加数据 | POST | `/values_append` | 智能追加到末尾 |
-| 批量更新 | POST | `/values_batch_update` | 多范围同时更新 |
+| 批量更新 | POST | `/values_batch_update` | logical ranges 分块后顺序更新 |
 | 设置格式 | PUT | `/styles` | 设置单元格格式 |
 | 数据验证 | POST | `/dataValidation` | 创建下拉列表 |
 

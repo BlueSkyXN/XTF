@@ -565,21 +565,16 @@ def test_sheet_range_failure_retains_confirmed_prefix():
         ]
     )
     engine.api.batch_update_values = Mock(
-        side_effect=[
-            MutationReceipt(
-                "batch_update",
-                "sheet_v2",
-                requested_count=1,
-                accepted_count=1,
-                actual_ranges=(A1Range.parse("sheet!A2:A2"),),
-            ),
-            MutationReceipt(
-                "batch_update",
-                "sheet_v2",
-                requested_count=1,
-                outcome=MutationOutcome.PARTIAL,
-            ),
-        ]
+        return_value=MutationReceipt(
+            "batch_update",
+            "sheet_v2",
+            requested_count=2,
+            accepted_count=1,
+            unit="range",
+            actual_ranges=(A1Range.parse("sheet!A2:A2"),),
+            failed_batch_index=2,
+            outcome=MutationOutcome.PARTIAL,
+        )
     )
     action = WriteColumnsAction(
         column_data={"A": ("first",), "B": ("second",)},

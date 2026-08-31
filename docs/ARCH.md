@@ -457,7 +457,10 @@ Sheet 元数据不可用时可以用配置化窗口做有界诊断读取，但�
 | `create_data_validation()` | 创建数据验证（下拉列表） |
 
 **特性**：
-- 智能分块：超过行/列限制时自动拆分请求
+- `RangeChunker`：统一 A1 范围、矩阵和 `5000 × 100` 双向分块
+- 顺序 batch update：logical range 拆块后首错停止，不假设服务端 range-count 上限
+- wide append：anchor band 取得 actual range 后才固定写入剩余列；缺失落点返回 `indeterminate`
+- 大范围 clear：每块惰性生成空矩阵，不分配整表空矩阵
 - 二分重试：遇到 90227（请求过大）错误时自动减半重试
 - 范围验证：自动检查和修正 A1 记法范围
 - 公式识别：支持 `identify_formula_columns()` 检测公式列

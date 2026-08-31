@@ -1098,7 +1098,50 @@ class XTFSyncEngine:
         actual_ranges = [
             item for item in receipt.actual_ranges if isinstance(item, A1Range)
         ]
-        if actual_ranges and sum(item.row_count for item in actual_ranges) == len(
+        source_slices = receipt.raw_metadata.get("source_slices")
+        if isinstance(source_slices, (list, tuple)) and len(source_slices) == len(
+            actual_ranges
+        ):
+            actual_text = {item.text for item in actual_ranges}
+            for item in source_slices:
+                if not isinstance(item, Mapping):
+                    expected = {}
+                    break
+                range_text = item.get("range")
+                offsets = (
+                    item.get("row_offset"),
+                    item.get("col_offset"),
+                    item.get("row_count"),
+                    item.get("col_count"),
+                )
+                if (
+                    not isinstance(range_text, str)
+                    or range_text not in actual_text
+                    or any(
+                        not isinstance(value, int) or isinstance(value, bool)
+                        for value in offsets
+                    )
+                ):
+                    expected = {}
+                    break
+                row_offset, col_offset, row_count, col_count = cast(
+                    Tuple[int, int, int, int], offsets
+                )
+                if (
+                    row_offset < 0
+                    or col_offset < 0
+                    or row_count <= 0
+                    or col_count <= 0
+                    or row_offset + row_count > len(values)
+                    or col_offset + col_count > len(values[0])
+                ):
+                    expected = {}
+                    break
+                expected[range_text] = [
+                    row[col_offset : col_offset + col_count]
+                    for row in values[row_offset : row_offset + row_count]
+                ]
+        elif actual_ranges and sum(item.row_count for item in actual_ranges) == len(
             values
         ):
             offset = 0
@@ -1164,31 +1207,10 @@ class XTFSyncEngine:
             full_range = f"{self.config.sheet_id}!{item['range']}"
             a1 = A1Range.parse(full_range)
             values = [list(row) for row in item["values"]]
-            for row_start in range(
-                a1.start_row, a1.end_row + 1, self.api.write_max_rows
-            ):
-                row_end = min(row_start + self.api.write_max_rows - 1, a1.end_row)
-                offset = row_start - a1.start_row
-                chunk = values[offset : offset + row_end - row_start + 1]
-                value_ranges.append(
-                    {
-                        "range": A1Range(
-                            a1.sheet_id,
-                            row_start,
-                            row_end,
-                            a1.start_col,
-                            a1.end_col,
-                        ).text,
-                        "values": chunk,
-                    }
-                )
-        for value_range in value_ranges:
-            if not self._typed_sheet_batch_update(
-                [value_range], header_width=header_width, complete_action=False
-            ):
-                return False
-        self._last_action_mutation_complete = True
-        return True
+            value_ranges.append({"range": a1.text, "values": values})
+        return self._typed_sheet_batch_update(
+            value_ranges, header_width=header_width, complete_action=True
+        )
 
     def _typed_sheet_clear(self, range_str: str) -> bool:
         if (

@@ -75,7 +75,14 @@ from .bitable_backend import (
 )
 from .bitable_v1 import BitableV1Backend
 from .bitable_v3 import BaseV3Backend
-from .sheet import A1Range, FormulaVerificationResult, SheetAPI, SheetMetadata
+from .sheet import (
+    A1Range,
+    FormulaVerificationResult,
+    RangeChunk,
+    RangeChunker,
+    SheetAPI,
+    SheetMetadata,
+)
 from .sdk import (
     FeishuAPIError,
     FeishuResponseParser,
@@ -107,6 +114,8 @@ __all__ = [
     "UserIDType",
     "A1Range",
     "FormulaVerificationResult",
+    "RangeChunk",
+    "RangeChunker",
     "SheetAPI",
     "SheetMetadata",
     "FeishuAPIError",
