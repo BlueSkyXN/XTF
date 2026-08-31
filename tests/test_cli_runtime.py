@@ -22,6 +22,8 @@ BASE_FLAGS = [
     "target-token",
     "--target-table-id",
     "target-table",
+    "--match-strategy",
+    "by_key",
     "--index-column",
     "ID",
 ]
@@ -126,7 +128,7 @@ def test_formal_sync_executes_plan(monkeypatch, capsys):
 
 
 def destructive_file_flags(path, mode):
-    return [
+    flags = [
         "sync",
         "--app-id",
         "app",
@@ -147,6 +149,9 @@ def destructive_file_flags(path, mode):
         "--mode",
         mode,
     ]
+    if mode != "clone":
+        flags.extend(["--match-strategy", "by_key"])
+    return flags
 
 
 def test_destructive_dry_run_needs_no_allow_delete_and_never_executes(
@@ -333,6 +338,10 @@ def test_input_failure_uses_exit_3_and_stable_code(capsys):
         "target-token",
         "--target-table-id",
         "target-table",
+        "--match-strategy",
+        "by_key",
+        "--index-column",
+        "ID",
         "--file",
         "missing.xlsx",
     ]

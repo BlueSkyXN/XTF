@@ -225,7 +225,7 @@ class TestIndexValueHash:
                 pd.Series({"Date": written_timestamp}), "Date", {"Date": 5}
             )
 
-            assert written_timestamp == 1772467200000
+            assert written_timestamp == 1772496000000
             assert date_hash == timestamp_hash
         finally:
             if old_tz is None:
@@ -269,8 +269,11 @@ class TestIndexValueHash:
             os.environ["TZ"] = "Asia/Shanghai"
             time.tzset()
 
-            converter = DataConverter(TargetType.BITABLE)
-            converter.datetime_index_granularity = "day"
+            converter = DataConverter(
+                TargetType.BITABLE,
+                datetime_index_granularity="day",
+                datetime_index_timezone="Asia/Shanghai",
+            )
             instant = pd.Timestamp("2026-08-30 23:30:00+00:00")
             seconds = int(instant.timestamp())
 

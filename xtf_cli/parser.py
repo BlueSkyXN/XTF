@@ -144,8 +144,13 @@ def _add_config_override_flags(parser: argparse.ArgumentParser) -> None:
         dest="sync_mode",
         choices=("full", "incremental", "overwrite", "clone"),
     )
+    sync.add_argument(
+        "--match-strategy",
+        choices=("by_key", "append_only"),
+    )
     sync.add_argument("--index-column")
     sync.add_argument("--datetime-index-granularity", choices=("exact", "day"))
+    sync.add_argument("--datetime-index-timezone")
     _bool(
         sync,
         "--verify-remote-writes",

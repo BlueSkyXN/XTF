@@ -14,7 +14,7 @@
     3. 字段类型推荐（基于数据分析）
     4. DataFrame 与记录列表互转
     5. 列号与字母转换（A=1, Z=26, AA=27...）
-    6. 索引值哈希计算（用于记录匹配）
+    6. 索引值规范化（用于记录匹配）
 
 核心类：
     ConversionStats (TypedDict):
@@ -63,7 +63,6 @@
     外部依赖：
         - pandas: 数据处理
         - re: 正则表达式
-        - hashlib: 哈希计算
         - datetime: 日期时间处理
 
 注意事项：
@@ -78,8 +77,6 @@
 """
 
 import re
-import json
-import hashlib
 import logging
 import datetime as dt
 import numbers
@@ -88,6 +85,7 @@ from typing import Any, Dict, List, Optional, TypedDict
 import pandas as pd
 
 from .config import TargetType
+from .key_policy import KeyPolicy
 
 
 class ConversionStats(TypedDict):
@@ -104,7 +102,13 @@ class DataConverter:
     MIN_TIMESTAMP_MILLISECONDS = MIN_TIMESTAMP_SECONDS * 1000
     MAX_TIMESTAMP_MILLISECONDS = MAX_TIMESTAMP_SECONDS * 1000
 
-    def __init__(self, target_type: TargetType):
+    def __init__(
+        self,
+        target_type: TargetType,
+        *,
+        datetime_index_granularity: str = "exact",
+        datetime_index_timezone: Optional[str] = None,
+    ):
         """
         初始化数据转换器
 
@@ -112,9 +116,13 @@ class DataConverter:
             target_type: 目标类型（多维表格或电子表格）
         """
         self.target_type = target_type
-        # Standalone converter callers retain the historical day-level behavior.
-        # XTFSyncEngine applies SyncConfig's explicit default (``exact``).
-        self.datetime_index_granularity = "day"
+        self.datetime_index_granularity = datetime_index_granularity
+        self.datetime_index_timezone = datetime_index_timezone
+        self.key_policy = KeyPolicy(
+            datetime_granularity=datetime_index_granularity,
+            datetime_timezone=datetime_index_timezone,
+        )
+        self._key_warnings: List[str] = []
         self.logger = logging.getLogger("XTF.converter")
 
         # 类型转换统计
@@ -128,46 +136,18 @@ class DataConverter:
         """重置转换统计"""
         self.conversion_stats = {"success": 0, "failed": 0, "warnings": []}
 
+    def consume_key_warnings(self) -> List[str]:
+        warnings = list(self._key_warnings)
+        self._key_warnings.clear()
+        return warnings
+
     def _is_empty_value(self, value: Any) -> bool:
         """判断值是否为空，兼容 list/dict 等非标量对象。"""
-        if value is None:
-            return True
-
-        if isinstance(value, str):
-            return value.strip() == ""
-
-        if isinstance(value, dict):
-            if "value" in value:
-                return self._is_empty_value(value.get("value"))
-            return len(value) == 0
-
-        if isinstance(value, (list, tuple, set)):
-            return len(value) == 0 or all(self._is_empty_value(item) for item in value)
-
-        if pd.api.types.is_scalar(value):
-            try:
-                return bool(pd.isna(value))
-            except (TypeError, ValueError):
-                return False
-
-        return False
+        return KeyPolicy.is_empty(value)
 
     def _normalize_number_index_value(self, value: Any) -> Optional[str]:
-        """规范化数字索引值，避免 1 与 1.0 生成不同哈希。"""
-        if self._is_empty_value(value):
-            return None
-
-        if isinstance(value, bool):
-            return "1" if value else "0"
-
-        try:
-            number = float(str(value).strip().replace(",", ""))
-        except (TypeError, ValueError):
-            return str(value)
-
-        if number.is_integer():
-            return str(int(number))
-        return str(number)
+        """使用无损十进制规则规范化数字索引。"""
+        return self.key_policy.normalize_number(value)
 
     @classmethod
     def _numeric_timestamp_to_milliseconds(
@@ -188,81 +168,22 @@ class DataConverter:
     def _normalize_timestamp_index_value(
         self, value: Any, granularity: Optional[str] = None
     ) -> Optional[str]:
-        """规范化日期索引值。
-
-        ``exact`` 保留完整毫秒时间戳；``day`` 保留历史按本地日期匹配语义。
-        """
-        if self._is_empty_value(value):
-            return None
-
-        effective_granularity = (
-            (granularity or self.datetime_index_granularity).strip().lower()
+        """按显式 granularity/timezone 规范化 DATETIME 索引。"""
+        effective_granularity = granularity or self.datetime_index_granularity
+        policy = (
+            self.key_policy
+            if effective_granularity == self.datetime_index_granularity
+            else KeyPolicy(
+                datetime_granularity=effective_granularity,
+                datetime_timezone=self.datetime_index_timezone,
+            )
         )
-        if effective_granularity not in {"exact", "day"}:
-            raise ValueError("datetime index granularity must be 'exact' or 'day'")
-
-        if effective_granularity == "exact":
-            timestamp = self._exact_index_timestamp_ms(value)
-            return str(timestamp) if timestamp is not None else None
-
-        if isinstance(value, pd.Timestamp):
-            value = value.to_pydatetime()
-
-        if isinstance(value, dt.datetime):
-            if value.tzinfo is not None and value.utcoffset() is not None:
-                value = value.astimezone()
-            return value.date().isoformat()
-
-        if isinstance(value, dt.date):
-            return value.isoformat()
-
-        if isinstance(value, numbers.Real) and not isinstance(value, bool):
-            numeric = float(value)
-            milliseconds = self._numeric_timestamp_to_milliseconds(numeric)
-            if milliseconds is None:
-                return None
-            seconds = milliseconds / 1000
-            # ``day`` intentionally uses the host's local business date.
-            return dt.datetime.fromtimestamp(seconds).date().isoformat()
-
-        if isinstance(value, str):
-            str_val = value.strip()
-            if str_val.isdigit():
-                return self._normalize_timestamp_index_value(
-                    int(str_val), effective_granularity
-                )
-
-            for fmt in [
-                "%Y-%m-%d %H:%M:%S",
-                "%Y-%m-%d",
-                "%Y/%m/%d %H:%M:%S",
-                "%Y/%m/%d",
-                "%m/%d/%Y",
-                "%d/%m/%Y",
-                "%Y年%m月%d日",
-                "%m月%d日",
-                "%Y-%m-%d %H:%M",
-                "%Y/%m/%d %H:%M",
-            ]:
-                try:
-                    return dt.datetime.strptime(str_val, fmt).date().isoformat()
-                except ValueError:
-                    continue
-
-        timestamp = self._force_to_timestamp(value, "__index__")
-        if timestamp is None:
-            return None
-        return self._normalize_timestamp_index_value(timestamp, effective_granularity)
+        return policy.normalize_datetime(value)
 
     def _exact_index_timestamp_ms(self, value: Any) -> Optional[int]:
         """Normalize every exact DATETIME index representation through UTC."""
-        if self._is_empty_value(value) or isinstance(value, bool):
-            return None
-        if isinstance(value, numbers.Real):
-            return self._numeric_timestamp_to_milliseconds(float(value))
-        if isinstance(value, str) and value.strip().isdigit():
-            return self._exact_index_timestamp_ms(int(value.strip()))
-        return self._datetime_like_to_milliseconds(value, naive_utc=True)
+        normalized = KeyPolicy(datetime_granularity="exact").normalize_datetime(value)
+        return int(normalized) if normalized is not None else None
 
     @staticmethod
     def _datetime_like_to_milliseconds(value: Any, *, naive_utc: bool) -> Optional[int]:
@@ -288,96 +209,17 @@ class DataConverter:
         datetime_granularity: Optional[str] = None,
     ) -> Optional[str]:
         """将本地值和飞书返回值统一为可比较的索引字符串。"""
-        if self._is_empty_value(value):
-            return None
-
-        if isinstance(value, dict):
-            if "value" in value and "type" in value:
-                nested_type = value.get("type")
-                return self._normalize_index_value(
-                    value.get("value"), nested_type, datetime_granularity
-                )
-
-            if "text" in value:
-                text_value = str(value.get("text", ""))
-                return text_value if text_value.strip() else None
-
-            if "link_record_ids" in value:
-                return self._normalize_index_value(
-                    value.get("link_record_ids"), field_type, datetime_granularity
-                )
-
-            if "id" in value:
-                return str(value.get("id"))
-
-            if "file_token" in value:
-                return str(value.get("file_token"))
-
-            normalized_dict = {
-                str(k): self._normalize_index_value(
-                    v, datetime_granularity=datetime_granularity
-                )
-                for k, v in value.items()
-            }
-            normalized_dict = {
-                k: v for k, v in normalized_dict.items() if v is not None
-            }
-            if not normalized_dict:
-                return None
-            return json.dumps(
-                normalized_dict,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
+        effective_granularity = datetime_granularity or self.datetime_index_granularity
+        policy = (
+            self.key_policy
+            if effective_granularity == self.datetime_index_granularity
+            else KeyPolicy(
+                datetime_granularity=effective_granularity,
+                datetime_timezone=self.datetime_index_timezone,
             )
-
-        if isinstance(value, (list, tuple, set)):
-            values = list(value)
-            if field_type == 1 or all(
-                isinstance(item, dict) and "text" in item for item in values
-            ):
-                text_parts = []
-                for item in values:
-                    if isinstance(item, dict) and "text" in item:
-                        text_value = str(item.get("text", ""))
-                        if text_value.strip():
-                            text_parts.append(text_value)
-                    else:
-                        item_value = self._normalize_index_value(
-                            item, datetime_granularity=datetime_granularity
-                        )
-                        if item_value is not None:
-                            text_parts.append(item_value)
-                if not text_parts:
-                    return None
-                return "".join(text_parts)
-
-            normalized_items = [
-                self._normalize_index_value(item, field_type, datetime_granularity)
-                for item in values
-            ]
-            normalized_items = [item for item in normalized_items if item is not None]
-            if not normalized_items:
-                return None
-            if len(normalized_items) == 1:
-                return normalized_items[0]
-            return json.dumps(
-                normalized_items, ensure_ascii=False, separators=(",", ":")
-            )
-
-        if field_type == 2:
-            return self._normalize_number_index_value(value)
-
-        if field_type == 5:
-            return self._normalize_timestamp_index_value(value, datetime_granularity)
-
-        if field_type == 7:
-            if isinstance(value, bool):
-                return "true" if value else "false"
-            converted = self._force_to_boolean(value, "__index__")
-            return "true" if converted else "false"
-
-        return str(value)
+        )
+        key = policy.normalize(value, field_type)
+        return key.value if key is not None else None
 
     def get_index_value_hash(
         self,
@@ -393,10 +235,8 @@ class DataConverter:
                 if field_types
                 else None
             )
-            index_value = self._normalize_index_value(value, field_type)
-            if index_value is None:
-                return None
-            return hashlib.md5(index_value.encode("utf-8")).hexdigest()
+            key = self.key_policy.normalize(value, field_type)
+            return key.digest if key is not None else None
         return None
 
     @staticmethod
@@ -443,30 +283,25 @@ class DataConverter:
         field_types: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Dict[str, Any]]:
         """构建多维表格记录索引"""
-        index: Dict[str, Dict[str, Any]] = {}
         if not index_column:
-            return index
-
-        for record in records:
-            fields = record.get("fields", {})
-            if index_column in fields:
-                raw_value = fields[index_column]
-                field_type = (
-                    self._field_schema_type_code(field_types.get(index_column))
-                    if field_types
-                    else None
-                )
-                index_value = self._normalize_index_value(raw_value, field_type)
-                if index_value is None:
-                    continue
-                index_hash = hashlib.md5(index_value.encode("utf-8")).hexdigest()
-                if index_hash in index:
-                    raise ValueError(
-                        f"索引列 '{index_column}' 存在重复值: {index_value}"
-                    )
-                index[index_hash] = record
-
-        return index
+            return {}
+        field_type = (
+            self._field_schema_type_code(field_types.get(index_column))
+            if field_types
+            else None
+        )
+        result = self.key_policy.build_index(
+            records,
+            value_getter=lambda record: record.get("fields", {}).get(index_column),
+            field_type=field_type,
+            context=f"目标 Bitable 索引列 '{index_column}' ",
+            allow_empty=True,
+        )
+        if result.empty_count:
+            self._key_warnings.append(
+                f"目标 Bitable 有 {result.empty_count} 条记录的 key 为空；这些记录保持不变"
+            )
+        return dict(result.items)
 
     def _detect_excel_validation(self, df: pd.DataFrame, column_name: str) -> tuple:
         """
@@ -1507,29 +1342,33 @@ class DataConverter:
         df: pd.DataFrame,
         index_column: Optional[str],
         field_types: Optional[Dict[str, Any]] = None,
+        *,
+        allow_empty: bool = True,
+        context: str = "Sheet 索引列",
     ) -> Dict[str, int]:
         """构建电子表格数据索引（哈希 -> 行号）"""
-        index: Dict[str, int] = {}
         if not index_column:
-            return index
-
-        for idx, row in df.iterrows():
-            index_hash = self.get_index_value_hash(row, index_column, field_types)
-            if index_hash:
-                if index_hash in index:
-                    value = row[index_column] if index_column in row else None
-                    field_type = (
-                        self._field_schema_type_code(field_types.get(index_column))
-                        if field_types
-                        else None
-                    )
-                    normalized = self._normalize_index_value(value, field_type)
-                    raise ValueError(
-                        f"索引列 '{index_column}' 存在重复值: {normalized}"
-                    )
-                index[index_hash] = idx
-
-        return index
+            return {}
+        field_type = (
+            self._field_schema_type_code(field_types.get(index_column))
+            if field_types
+            else None
+        )
+        rows = list(df.iterrows())
+        result = self.key_policy.build_index(
+            rows,
+            value_getter=lambda item: (
+                item[1][index_column] if index_column in item[1] else None
+            ),
+            field_type=field_type,
+            context=context,
+            allow_empty=allow_empty,
+        )
+        if result.empty_count:
+            self._key_warnings.append(
+                f"{context}有 {result.empty_count} 条记录的 key 为空；这些记录保持不变"
+            )
+        return {digest: item[0] for digest, item in result.items.items()}
 
     def column_number_to_letter(self, col_num: int) -> str:
         """将列号转换为字母（1->A, 2->B, ..., 26->Z, 27->AA）"""

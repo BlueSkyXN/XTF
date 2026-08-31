@@ -22,9 +22,11 @@ target:
 
 sync:
   mode: full
+  match_strategy: by_key
   index:
     column: ID
     datetime_granularity: exact
+    timezone: null
   verify_remote_writes: false
   selective:
     enabled: false

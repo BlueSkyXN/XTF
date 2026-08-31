@@ -16,7 +16,7 @@ from api.bitable_backend import (
     MutationReceipt,
     RecordReadResult,
 )
-from core.config import SourceType, SyncConfig, SyncMode, TargetType
+from core.config import MatchStrategy, SourceType, SyncConfig, SyncMode, TargetType
 from core.converter import DataConverter
 from core.engine import XTFSyncEngine
 from core.plan import OutcomeStatus, PlanAction, SyncPlan
@@ -42,10 +42,15 @@ def make_remote_engine(
         index_column="When",
         sync_mode=mode,
         datetime_index_granularity=granularity,
+        datetime_index_timezone=("Asia/Shanghai" if granularity == "day" else None),
         bitable_api_backend=backend,
     )
     engine.logger = Mock()
-    engine.converter = DataConverter(TargetType.BITABLE)
+    engine.converter = DataConverter(
+        TargetType.BITABLE,
+        datetime_index_granularity=granularity,
+        datetime_index_timezone=("Asia/Shanghai" if granularity == "day" else None),
+    )
     engine.api = Mock(spec=BitableBackend)
     engine.api.max_batch_create_size = 500
     engine.api.max_batch_update_size = 500
@@ -94,9 +99,14 @@ def make_file_sheet_engine(*, mode=SyncMode.INCREMENTAL, granularity="exact"):
         index_column="When",
         sync_mode=mode,
         datetime_index_granularity=granularity,
+        datetime_index_timezone=("Asia/Shanghai" if granularity == "day" else None),
     )
     engine.logger = Mock()
-    engine.converter = DataConverter(TargetType.SHEET)
+    engine.converter = DataConverter(
+        TargetType.SHEET,
+        datetime_index_granularity=granularity,
+        datetime_index_timezone=("Asia/Shanghai" if granularity == "day" else None),
+    )
     engine.api = Mock()
     engine._sheet_read_complete = True
     return engine
@@ -164,8 +174,11 @@ def test_datetime_index_exact_does_not_match_different_time_same_day():
 
 
 def test_datetime_index_day_preserves_legacy_day_matching():
-    converter = DataConverter(TargetType.BITABLE)
-    converter.datetime_index_granularity = "day"
+    converter = DataConverter(
+        TargetType.BITABLE,
+        datetime_index_granularity="day",
+        datetime_index_timezone="Asia/Shanghai",
+    )
 
     morning = converter._normalize_index_value("2026-08-30 09:00:00", 5)
     evening = converter._normalize_index_value("2026-08-30 18:00:00", 5)
@@ -676,7 +689,6 @@ def test_sheet_datetime_exact_matches_timestamp_seconds_and_string(source_value)
 
 def test_sheet_datetime_day_matches_same_day_and_rejects_duplicate_day():
     engine = make_file_sheet_engine(granularity="day")
-    engine.converter.datetime_index_granularity = "day"
     current = pd.DataFrame({"When": ["2026-08-30 09:00:00"], "Name": ["existing"]})
     engine.get_current_sheet_data = Mock(return_value=current)
 
@@ -812,7 +824,7 @@ def test_config_datetime_index_granularity_defaults_to_exact():
     assert config.datetime_index_granularity == "exact"
 
 
-def test_sheet_full_without_index_records_implicit_clone(monkeypatch):
+def test_sheet_full_without_index_is_rejected_before_remote_reads():
     engine = XTFSyncEngine.__new__(XTFSyncEngine)
     engine.config = SyncConfig(
         file_path="test.xlsx",
@@ -828,27 +840,69 @@ def test_sheet_full_without_index_records_implicit_clone(monkeypatch):
     engine.converter = DataConverter(TargetType.SHEET)
     engine.api = Mock()
     engine._sheet_read_complete = True
+    with pytest.raises(ValueError, match="by_key.*index_column"):
+        engine.plan(pd.DataFrame({"ID": [2]}))
+
+    engine.api.clear_values.assert_not_called()
+    engine.api.write_values.assert_not_called()
+
+
+def test_incremental_append_only_bitable_creates_every_source_row_without_record_read():
+    engine = make_file_bitable_engine(SyncMode.INCREMENTAL)
+    engine.config = SyncConfig(
+        file_path="test.xlsx",
+        app_id="test_id",
+        app_secret="test_secret",
+        target_type=TargetType.BITABLE,
+        app_token="target_app",
+        table_id="target_table",
+        sync_mode=SyncMode.INCREMENTAL,
+        match_strategy=MatchStrategy.APPEND_ONLY,
+        create_missing_fields=False,
+    )
+
+    plan = engine.plan(pd.DataFrame({"ID": [1, 1], "Name": ["A", "B"]}))
+
+    assert plan.effective_mode == "incremental"
+    assert [action.kind for action in plan.actions] == ["create_records"]
+    assert plan.actions[0].count == 2
+    engine.api.list_records.assert_not_called()
+
+
+def test_incremental_append_only_sheet_does_not_read_or_clear_target():
+    engine = make_file_sheet_engine(mode=SyncMode.INCREMENTAL)
+    engine.config = SyncConfig(
+        file_path="test.xlsx",
+        app_id="test_id",
+        app_secret="test_secret",
+        target_type=TargetType.SHEET,
+        spreadsheet_token="sheet_token",
+        sheet_id="sheet",
+        sync_mode=SyncMode.INCREMENTAL,
+        match_strategy=MatchStrategy.APPEND_ONLY,
+    )
+
+    plan = engine.plan(pd.DataFrame({"Name": ["A", "B"]}))
+
+    assert plan.effective_mode == "incremental"
+    assert [action.kind for action in plan.actions] == ["append_rows"]
+    engine.api.get_sheet_data_chunked.assert_not_called()
+    engine.api.clear_values.assert_not_called()
+
+
+def test_empty_sheet_keeps_full_mode_instead_of_implicit_clone(monkeypatch):
+    engine = make_file_sheet_engine(mode=SyncMode.FULL)
     monkeypatch.setattr(
         engine,
         "get_sheet_data_with_validation",
-        Mock(return_value=(pd.DataFrame({"ID": [1]}), None, set())),
-    )
-    monkeypatch.setattr(
-        engine, "_build_sheet_full_range", Mock(return_value="sheet!A1:Z100")
+        Mock(return_value=(pd.DataFrame(columns=["When", "Name"]), None, set())),
     )
 
-    plan = engine.plan(pd.DataFrame({"ID": [2]}))
+    plan = engine.plan(pd.DataFrame({"When": ["2026-08-31"], "Name": ["A"]}))
 
-    assert plan.requested_mode == "full"
-    assert plan.effective_mode == "clone"
-    assert plan.destructive is True
-    assert [action.kind for action in plan.actions] == [
-        "clear_range",
-        "write_range",
-        "apply_sheet_config",
-    ]
-    engine.api.clear_values.assert_not_called()
-    engine.api.write_values.assert_not_called()
+    assert plan.requested_mode == plan.effective_mode == "full"
+    assert plan.destructive is False
+    assert [action.kind for action in plan.actions] == ["append_rows"]
 
 
 @pytest.mark.parametrize(

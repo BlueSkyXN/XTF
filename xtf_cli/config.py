@@ -38,7 +38,12 @@ TEMPLATE: dict[str, Any] = {
     },
     "sync": {
         "mode": "full",
-        "index": {"column": "ID", "datetime_granularity": "exact"},
+        "match_strategy": "by_key",
+        "index": {
+            "column": "ID",
+            "datetime_granularity": "exact",
+            "timezone": None,
+        },
         "verify_remote_writes": False,
         "selective": {
             "enabled": False,
@@ -122,8 +127,14 @@ SECTION_KEYS: dict[str, set[str]] = {
         "report_column_diff",
         "diff_tolerance",
     },
-    "sync": {"mode", "index", "verify_remote_writes", "selective"},
-    "sync.index": {"column", "datetime_granularity"},
+    "sync": {
+        "mode",
+        "match_strategy",
+        "index",
+        "verify_remote_writes",
+        "selective",
+    },
+    "sync.index": {"column", "datetime_granularity", "timezone"},
     "sync.selective": {
         "enabled",
         "columns",
@@ -206,8 +217,10 @@ STRING_PATHS = {
     "target.sheet.value_render_option",
     "target.sheet.datetime_render_option",
     "sync.mode",
+    "sync.match_strategy",
     "sync.index.column",
     "sync.index.datetime_granularity",
+    "sync.index.timezone",
     "conversion.strategy",
     "control.advanced.retry.strategy",
     "control.advanced.rate_limit.strategy",
@@ -246,8 +259,10 @@ YAML_TO_FLAT: dict[str, str] = {
     "target.sheet.report_column_diff": "sheet_report_column_diff",
     "target.sheet.diff_tolerance": "sheet_diff_tolerance",
     "sync.mode": "sync_mode",
+    "sync.match_strategy": "match_strategy",
     "sync.index.column": "index_column",
     "sync.index.datetime_granularity": "datetime_index_granularity",
+    "sync.index.timezone": "datetime_index_timezone",
     "sync.verify_remote_writes": "verify_remote_writes",
     "sync.selective.enabled": "selective_sync.enabled",
     "sync.selective.columns": "selective_sync.columns",
@@ -307,8 +322,10 @@ CLI_TO_FLAT: dict[str, str] = {
         "sheet_report_column_diff",
         "sheet_diff_tolerance",
         "sync_mode",
+        "match_strategy",
         "index_column",
         "datetime_index_granularity",
+        "datetime_index_timezone",
         "verify_remote_writes",
         "batch_size",
         "rate_limit_delay",
@@ -465,19 +482,58 @@ def validate_v2_document(document: Any) -> Mapping[str, Any]:
             f"inactive target.{inactive_target} branch must be absent or empty"
         )
 
-    sync = root.get("sync", {})
-    if sync:
-        sync_map = _mapping(sync, "sync")
-        if "index" in sync_map:
-            index_map = _mapping(sync_map["index"], "sync.index")
-            _check_keys(index_map, SECTION_KEYS["sync.index"], "sync.index")
-        if "selective" in sync_map:
-            selective_map = _mapping(sync_map["selective"], "sync.selective")
-            _check_keys(
-                selective_map,
-                SECTION_KEYS["sync.selective"],
-                "sync.selective",
+    sync = root.get("sync")
+    if sync is None:
+        raise _config_error("missing required section: sync")
+    sync_map = _mapping(sync, "sync")
+    mode = sync_map.get("mode", "full")
+    if mode not in {"full", "incremental", "overwrite", "clone"}:
+        raise _config_error("sync.mode must be full, incremental, overwrite, or clone")
+    match_strategy = sync_map.get("match_strategy")
+    index_map: Mapping[str, Any] = {}
+    if "index" in sync_map and sync_map["index"] is not None:
+        index_map = _mapping(sync_map["index"], "sync.index")
+        _check_keys(index_map, SECTION_KEYS["sync.index"], "sync.index")
+    selective_map: Mapping[str, Any] = {}
+    if "selective" in sync_map and sync_map["selective"] is not None:
+        selective_map = _mapping(sync_map["selective"], "sync.selective")
+        _check_keys(
+            selective_map,
+            SECTION_KEYS["sync.selective"],
+            "sync.selective",
+        )
+
+    if mode == "clone":
+        if match_strategy is not None:
+            raise _config_error("sync.match_strategy must be omitted for clone mode")
+    else:
+        if match_strategy not in {"by_key", "append_only"}:
+            raise _config_error(
+                "sync.match_strategy must be explicitly set to by_key or append_only"
             )
+        index_column = index_map.get("column")
+        if match_strategy == "by_key" and not index_column:
+            raise _config_error("sync.index.column is required for by_key")
+        if match_strategy == "append_only":
+            if mode != "incremental":
+                raise _config_error("append_only is only valid with incremental mode")
+            if index_column:
+                raise _config_error("sync.index.column must be omitted for append_only")
+            if selective_map.get("enabled"):
+                raise _config_error(
+                    "append_only cannot be combined with sync.selective"
+                )
+
+    granularity = index_map.get("datetime_granularity", "exact")
+    timezone = index_map.get("timezone")
+    if granularity not in {"exact", "day"}:
+        raise _config_error("sync.index.datetime_granularity must be exact or day")
+    if granularity == "exact" and timezone not in (None, ""):
+        raise _config_error("sync.index.timezone is only valid with day granularity")
+    if granularity == "day" and not timezone:
+        raise _config_error("sync.index.timezone is required with day granularity")
+    if source_type == "bitable" and match_strategy != "by_key":
+        raise _config_error("source.type=bitable requires sync.match_strategy=by_key")
 
     conversion = root.get("conversion", {})
     if conversion:
@@ -646,6 +702,28 @@ def resolve_config(
 
     if getattr(args, "column", None) is not None:
         _set(values, sources, "selective_sync.enabled", True, "cli")
+
+    mode = str(values.get("sync_mode", "full"))
+    match_strategy = values.get("match_strategy")
+    if mode == "clone":
+        if sources.get("match_strategy", "").startswith(("cli", "yaml:")):
+            raise _config_error("match_strategy must be omitted for clone mode")
+    else:
+        if sources.get("match_strategy", "").startswith("default:"):
+            raise _config_error(
+                "sync.match_strategy or --match-strategy must be explicitly provided"
+            )
+        if match_strategy == "by_key" and not values.get("index_column"):
+            raise _config_error("index column is required for by_key")
+        if match_strategy == "append_only":
+            if mode != "incremental":
+                raise _config_error("append_only is only valid with incremental mode")
+            if values.get("index_column"):
+                raise _config_error("index column must be omitted for append_only")
+            if values.get("selective_sync.enabled"):
+                raise _config_error(
+                    "append_only cannot be combined with selective sync"
+                )
 
     selective = SelectiveSyncConfig(
         **{

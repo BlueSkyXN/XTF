@@ -54,6 +54,7 @@ XTF 核心模块包
 """
 
 from .config import (
+    MatchStrategy,
     SourceType,
     SyncConfig,
     SyncMode,
@@ -64,11 +65,13 @@ from .config import (
 )
 from .converter import DataConverter
 from .engine import XTFSyncEngine
+from .key_policy import CanonicalKey, KeyIndex, KeyPolicy
 from .plan import ErrorKind, OutcomeStatus, PlanAction, SyncOutcome, SyncPlan
 from .reader import DataFileReader
 
 __all__ = [
     "SyncConfig",
+    "MatchStrategy",
     "SourceType",
     "SyncMode",
     "TargetType",
@@ -76,6 +79,9 @@ __all__ = [
     "create_sample_config",
     "get_target_description",
     "DataConverter",
+    "CanonicalKey",
+    "KeyIndex",
+    "KeyPolicy",
     "XTFSyncEngine",
     "PlanAction",
     "SyncPlan",

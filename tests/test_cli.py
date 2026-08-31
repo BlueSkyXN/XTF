@@ -15,11 +15,11 @@ def test_help_and_version_have_no_banner_or_files(tmp_path, monkeypatch, capsys)
     assert "====" not in help_output.out
     assert help_output.err == ""
     assert list(tmp_path.iterdir()) == []
-    assert VERSION == "2.0.0"
+    assert VERSION == "2.0.0-dev"
 
     assert main(["--version"]) == 0
     version_output = capsys.readouterr()
-    assert version_output.out == "XTF 2.0.0\n"
+    assert version_output.out == "XTF 2.0.0-dev\n"
     assert version_output.err == ""
     assert list(tmp_path.iterdir()) == []
 

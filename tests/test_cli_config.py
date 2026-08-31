@@ -7,7 +7,8 @@ import pytest
 import yaml
 
 from xtf_cli import main
-from xtf_cli.config import TEMPLATE, resolve_config
+from xtf_cli.config import TEMPLATE, resolve_config, validate_v2_document
+from xtf_cli.errors import CLIError
 from xtf_cli.parser import parse_args
 
 
@@ -27,7 +28,15 @@ def v2_config(**overrides):
                 "create_missing_fields": True,
             },
         },
-        "sync": {"mode": "full"},
+        "sync": {
+            "mode": "full",
+            "match_strategy": "by_key",
+            "index": {
+                "column": "ID",
+                "datetime_granularity": "exact",
+                "timezone": None,
+            },
+        },
         "conversion": {"strategy": "base"},
         "control": {
             "batch_size": 500,
@@ -43,6 +52,41 @@ def v2_config(**overrides):
 
 def write_yaml(path: Path, value):
     path.write_text(yaml.safe_dump(value, sort_keys=False), encoding="utf-8")
+
+
+def test_match_strategy_mode_matrix_is_strict():
+    clone = v2_config()
+    clone["sync"]["mode"] = "clone"
+    with pytest.raises(CLIError, match="omitted for clone"):
+        validate_v2_document(clone)
+
+    clone["sync"].pop("match_strategy")
+    validate_v2_document(clone)
+
+    append_only = v2_config()
+    append_only["sync"]["mode"] = "incremental"
+    append_only["sync"]["match_strategy"] = "append_only"
+    append_only["sync"].pop("index")
+    validate_v2_document(append_only)
+
+    append_only["sync"]["mode"] = "full"
+    with pytest.raises(CLIError, match="only valid with incremental"):
+        validate_v2_document(append_only)
+
+
+def test_by_key_requires_index_and_day_requires_timezone():
+    missing_index = v2_config()
+    missing_index["sync"].pop("index")
+    with pytest.raises(CLIError, match="index.column is required"):
+        validate_v2_document(missing_index)
+
+    day = v2_config()
+    day["sync"]["index"]["datetime_granularity"] = "day"
+    with pytest.raises(CLIError, match="timezone is required"):
+        validate_v2_document(day)
+
+    day["sync"]["index"]["timezone"] = "Asia/Shanghai"
+    validate_v2_document(day)
 
 
 @pytest.mark.parametrize(
@@ -215,6 +259,8 @@ def test_auto_discovery_and_flags_only(tmp_path, monkeypatch):
             "target-token",
             "--target-table-id",
             "target-table",
+            "--match-strategy",
+            "by_key",
             "--index-column",
             "ID",
         ]

@@ -103,6 +103,13 @@ If the local machine lacks `python`, run the same module command with `python3` 
 - When a change affects CLI flags, v2 schema/defaults, plan/outcome serialization, or destructive behavior, keep `config.example.yaml`, `README.md`, `docs/CONFIG.md`, `docs/SYNC.md`, relevant architecture docs, parser/config tests, and packaging assumptions aligned as applicable.
 - Supported targets are `bitable` and `sheet`; shared changes must consider both unless the code path is target-specific by construction.
 - Sync modes are `full`, `incremental`, `overwrite`, and `clone`.
+- Matching is explicit: `full`/`overwrite` require `by_key`; `incremental`
+  accepts `by_key` or `append_only`; `clone` omits `match_strategy` and always
+  uses replace-all. `by_key` requires a non-empty index, while `append_only`
+  forbids index/selective configuration. Never infer clone from an empty target
+  or missing Sheet index.
+- DATETIME key granularity defaults to `exact` UTC milliseconds. `day` requires
+  an explicit valid IANA timezone and must not use the host timezone implicitly.
 - Treat `overwrite` and `clone` as destructive remote-data modes. Preserve clear logging, batching semantics, deletion scope, failure handling, and user-facing risk wording when touching them.
 - `sync.selective.enabled` is incompatible with `clone`; keep the underlying `selective_sync` column validation, duplicate checks, and `max_gap_for_merge` bounds intact.
 - Sheet formula protection is valid only for `full` with a non-empty `index_column`; it depends on dual reads using `Formula` and `FormattedValue`, and enabling it also enables result validation. A failed or incomplete formula/result read must stop the write, and protected formula columns must not be rewritten.

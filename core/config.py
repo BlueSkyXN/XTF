@@ -80,6 +80,7 @@ from pathlib import Path
 from enum import Enum
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, List, Union
+from zoneinfo import ZoneInfo
 
 import yaml  # type: ignore[import-untyped]
 
@@ -100,6 +101,13 @@ class SyncMode(Enum):
     INCREMENTAL = "incremental"  # 增量同步：只新增不存在的记录
     OVERWRITE = "overwrite"  # 覆盖同步：删除已存在的，然后新增全部
     CLONE = "clone"  # 克隆同步：清空全部，然后新增全部
+
+
+class MatchStrategy(Enum):
+    """非 clone 模式的记录匹配策略。"""
+
+    BY_KEY = "by_key"
+    APPEND_ONLY = "append_only"
 
 
 class TargetType(Enum):
@@ -192,8 +200,10 @@ class SyncConfig:
 
     # 同步设置
     sync_mode: SyncMode = SyncMode.FULL
+    match_strategy: Optional[MatchStrategy] = MatchStrategy.BY_KEY
     index_column: Optional[str] = None  # 索引列名，用于记录比对
     datetime_index_granularity: str = "exact"
+    datetime_index_timezone: Optional[str] = None
     verify_remote_writes: bool = False
 
     # 性能设置
@@ -229,6 +239,8 @@ class SyncConfig:
     def __post_init__(self):
         if isinstance(self.sync_mode, str):
             self.sync_mode = SyncMode(self.sync_mode)
+        if isinstance(self.match_strategy, str):
+            self.match_strategy = MatchStrategy(self.match_strategy)
         if isinstance(self.target_type, str):
             self.target_type = TargetType(self.target_type)
         if isinstance(self.source_type, str):
@@ -241,6 +253,39 @@ class SyncConfig:
         )
         if self.datetime_index_granularity not in {"exact", "day"}:
             raise ValueError("datetime_index_granularity 仅支持 exact 或 day")
+        if self.datetime_index_timezone is not None:
+            self.datetime_index_timezone = (
+                str(self.datetime_index_timezone).strip() or None
+            )
+        if self.datetime_index_granularity == "exact":
+            if self.datetime_index_timezone is not None:
+                raise ValueError("exact DATETIME key 不允许配置 timezone")
+        else:
+            if self.datetime_index_timezone is None:
+                raise ValueError("day DATETIME key 必须配置 IANA timezone")
+            try:
+                ZoneInfo(self.datetime_index_timezone)
+            except Exception as exc:
+                raise ValueError(
+                    f"无效的 IANA timezone: {self.datetime_index_timezone}"
+                ) from exc
+
+        if self.sync_mode is SyncMode.CLONE:
+            # YAML v2 层要求 clone 省略 match_strategy；直接构造旧内部配置时
+            # 仍允许默认值存在，但执行语义固定为 replace-all。
+            self.match_strategy = None
+        else:
+            if self.match_strategy is None:
+                raise ValueError("非 clone 模式必须显式配置 match_strategy")
+            if self.match_strategy is MatchStrategy.APPEND_ONLY:
+                if self.sync_mode is not SyncMode.INCREMENTAL:
+                    raise ValueError("append_only 仅支持 incremental 模式")
+                if self.index_column:
+                    raise ValueError("append_only 不允许配置 index_column")
+                if self.selective_sync.enabled:
+                    raise ValueError("append_only 不支持 selective 同步")
+            # YAML v2/CLI resolver enforces the public by_key index requirement.
+            # This legacy mutable adapter remains permissive until phase E removes it.
 
         if self.source_app_token is not None:
             self.source_app_token = str(self.source_app_token).strip() or None
@@ -277,6 +322,8 @@ class SyncConfig:
                 raise ValueError("bitable 数据源必须配置 index_column")
             if self.sync_mode not in {SyncMode.FULL, SyncMode.INCREMENTAL}:
                 raise ValueError("bitable 数据源仅支持 full 或 incremental 模式")
+            if self.match_strategy is not MatchStrategy.BY_KEY:
+                raise ValueError("bitable 数据源仅支持 by_key")
             if (
                 self.source_app_token == self.app_token
                 and self.source_table_id == self.table_id

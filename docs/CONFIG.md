@@ -64,9 +64,11 @@ target:
 
 sync:
   mode: full
+  match_strategy: by_key
   index:
     column: ID
     datetime_granularity: exact
+    timezone: null
   verify_remote_writes: false
   selective:
     enabled: false
@@ -111,6 +113,10 @@ output:
 - inactive source/target 分支可以省略；若提供非空且与 `type` 不匹配则失败。
 - `source.type: bitable` 仅支持 `target.type: bitable`，并要求 source/target table 和索引列。
 - Bitable source 只允许 `full` / `incremental`，不允许 `overwrite` / `clone`。
+- `full` / `overwrite` 只允许 `by_key`；`incremental` 允许 `by_key` 或
+  `append_only`；`clone` 必须省略 `match_strategy`。
+- `by_key` 必须配置 `sync.index.column`。`append_only` 禁止 index 和 selective，
+  并且不会读取目标 key 或执行去重。
 - `sync.selective.enabled` 与 clone 互斥；columns 不允许空名或重复值。
 - 公式保护只允许 Sheet full 且要求非空索引列。
 
@@ -201,9 +207,11 @@ target:
 ```yaml
 sync:
   mode: full
+  match_strategy: by_key
   index:
     column: ID
     datetime_granularity: exact
+    timezone: null
   verify_remote_writes: false
   selective:
     enabled: true
@@ -211,13 +219,15 @@ sync:
 ```
 
 ```bash
---mode full --index-column ID --datetime-index-granularity exact
+--mode full --match-strategy by_key --index-column ID
+--datetime-index-granularity exact
 --verify-remote-writes --selective --column salary --column department
 ```
 
 - `exact`：日期时间统一到 UTC 后使用完整 epoch milliseconds；naive Python/pandas/string 值按同一 UTC 语义解释，同日不同时间不会误匹配。
 - 数字型 DATETIME 索引接受 2000-01-01 至 2100-01-01 范围内的 epoch seconds 或 milliseconds；范围外数字会 fail closed，不猜测单位。
-- `day`：显式按本地日期 `YYYY-MM-DD` 匹配；同日多条记录会触发重复索引保护。
+- `day`：必须同时设置 `sync.index.timezone` / `--datetime-index-timezone`
+  为有效 IANA 时区，并按该业务时区的 `YYYY-MM-DD` 匹配；同日多条记录会触发重复索引保护。
 - `verify_remote_writes: false` 只表示 mutation receipt 被接受，不代表已经写后读回。
 - 命令行出现任何 `--column` 时，会替换 YAML columns 并自动启用 selective sync。
 - 若显式关闭 `auto_include_index`，配置的 `index.column` 必须由 `columns` 明确包含，否则在规划前失败。
@@ -259,7 +269,9 @@ python3 XTF.py sync -c config.yaml --mode clone --allow-delete
 
 - requested mode 是 `overwrite` / `clone`；
 - planner 产生 `delete_records` / `clear_range`；
-- Sheet 的 full/incremental 实际退化为 destructive clone。
+
+普通 `full` / `incremental` 不会因为目标为空或缺少索引而退化为 clone；非法
+mode/strategy/index 组合会在零 mutation 阶段直接失败。
 
 ## 9. Exit codes
 

@@ -127,12 +127,13 @@ base = client.bitable_backend(backend="base_v3", user_id_type="open_id")
 
 ## 同步模式
 
-| 模式 | 已存在记录 | 不存在记录 | 数据安全 |
-|------|-----------|-----------|----------|
-| `full` | 更新 | 新增 | ✅ 安全 |
-| `incremental` | 跳过 | 新增 | ✅ 安全 |
-| `overwrite` | 删除后重建 | 新增 | ⚠️ 需要 `--allow-delete` |
-| `clone` | 全部清除 | 全部创建 | 🔴 需要 `--allow-delete` |
+| 模式 | `match_strategy` | 已存在记录 | 不存在记录 | 数据安全 |
+|------|------------------|-----------|-----------|----------|
+| `full` | `by_key` | 更新 | 新增 | ✅ 安全 |
+| `incremental` | `by_key` | 跳过 | 新增 | ✅ 安全 |
+| `incremental` | `append_only` | 不匹配 | 全部追加 | ✅ 显式追加 |
+| `overwrite` | `by_key` | 删除后重建 | 新增 | ⚠️ 需要 `--allow-delete` |
+| `clone` | 省略 | 全部清除 | 全部创建 | 🔴 需要 `--allow-delete` |
 
 > `overwrite` / `clone`，以及 planner 发现的任何 `delete_records` / `clear_range` action，在正式执行时都要求 `--allow-delete`。`--dry-run` 永远不执行 mutation。
 
@@ -141,7 +142,14 @@ base = client.bitable_backend(backend="base_v3", user_id_type="open_id")
 `incremental` 只新增缺失记录；两种模式都不会删除目标表多余记录。源、目标字段需预先
 存在且类型兼容，公式、附件、系统字段和需要跨表 ID 映射的关联字段不会作为普通数据复制。
 
-日期时间索引默认统一到 UTC 后使用完整毫秒值；只有显式设置 `sync.index.datetime_granularity: day` 或 `--datetime-index-granularity day` 才按本地日期匹配。
+`full` / `overwrite` 只支持 `by_key`；`incremental` 可显式选择 `by_key` 或
+`append_only`；`clone` 固定使用 replace-all，不读取 `match_strategy`。`by_key`
+必须配置非空索引列，不再因目标为空或 Sheet 缺少索引而隐式转成 clone。
+
+日期时间索引默认统一到 UTC 后使用完整毫秒值。选择
+`sync.index.datetime_granularity: day` 时还必须通过
+`sync.index.timezone`（或 `--datetime-index-timezone`）提供 IANA 业务时区，例如
+`Asia/Shanghai`；不再依赖宿主机本地时区。
 
 **详细说明**：[docs/SYNC.md](docs/SYNC.md)（含 Bitable/Sheet 分版本详解）
 

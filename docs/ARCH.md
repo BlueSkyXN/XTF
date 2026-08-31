@@ -158,7 +158,7 @@ XTF 2.0 对每个有效 `SyncConfig` leaf 提供显式 override，并按功能�
 | **源 Bitable** | `--source-app-token`, `--source-table-id` | 远端多维表格数据源 |
 | **Bitable** | `--target-app-token`, `--target-table-id`, backend、字段创建 | Bitable 目标 |
 | **Sheet** | `--spreadsheet-token`, `--sheet-id`, `--start-row`, `--start-column` | 电子表格专用 |
-| **同步** | `--mode`, `--index-column`, `--datetime-index-granularity` | 同步行为控制 |
+| **同步** | `--mode`, `--match-strategy`, `--index-column`, `--datetime-index-granularity`, `--datetime-index-timezone` | 同步行为控制 |
 | **性能** | `--batch-size`, `--rate-limit-delay`, `--max-retries` | 性能调优 |
 | **策略** | `--field-type-strategy` | 字段类型策略 |
 | **Output** | `--dry-run`, `--allow-delete`, `--json`, `--quiet`, `--log-level` | 计划、安全和自动化输出 |
@@ -203,7 +203,9 @@ class SyncConfig:
 
     # 同步设置
     sync_mode: SyncMode               # full | incremental | overwrite | clone
+    match_strategy: MatchStrategy     # by_key | append_only；clone 省略
     index_column: Optional[str]       # 索引列名
+    datetime_index_timezone: Optional[str]  # day 模式的 IANA 时区
 
     # 字段类型策略
     field_type_strategy: FieldTypeStrategy  # raw | base | auto | intelligence
@@ -243,6 +245,8 @@ app_secret: CLI → XTF_APP_SECRET → YAML → missing error
 | Bitable 必填 | 目标 `app_token` + `table_id` 不能为空 | `ValueError` |
 | Sheet 必填 | `spreadsheet_token` + `sheet_id` 不能为空 | `ValueError` |
 | 远端源表限制 | 需要 `source_app_token` + `source_table_id` + `index_column`，只支持 `full` / `incremental` | `ValueError` |
+| 匹配策略 | full/overwrite=`by_key`；incremental=`by_key` 或 `append_only`；clone 省略 | `ValueError` |
+| DATETIME day | 必须配置有效 IANA timezone；exact 禁止 timezone | `ValueError` |
 | 选择性同步 | `columns` 非空列表；不含重复项；不支持 clone 模式 | `ValueError` |
 | 分块参数 | `sheet_scan_max_rows/cols > 0`，`sheet_write_max_rows/cols > 0` | `ValueError` |
 | 合并间隔 | `max_gap_for_merge` 范围 0-50 | `ValueError` |

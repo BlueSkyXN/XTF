@@ -90,7 +90,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Mapping, Union, Tuple, cast
 
-from .config import SourceType, SyncConfig, SyncMode, TargetType
+from .config import MatchStrategy, SourceType, SyncConfig, SyncMode, TargetType
 from .converter import DataConverter
 from .plan import ErrorKind, OutcomeStatus, PlanAction, SyncOutcome, SyncPlan
 from api import (
@@ -164,8 +164,11 @@ class XTFSyncEngine:
                 datetime_render_option=self.config.sheet_datetime_render_option,
             )
         # 初始化数据转换器
-        self.converter = DataConverter(config.target_type)
-        self.converter.datetime_index_granularity = config.datetime_index_granularity
+        self.converter = DataConverter(
+            config.target_type,
+            datetime_index_granularity=config.datetime_index_granularity,
+            datetime_index_timezone=config.datetime_index_timezone,
+        )
         # 缓存工作表网格属性，避免重复请求
         self._sheet_grid_cache: Optional[Tuple[int, int]] = None
         self._sheet_grid_cache_key: Optional[Tuple[str, str]] = None
@@ -2915,13 +2918,15 @@ class XTFSyncEngine:
         actions: List[PlanAction],
         warnings: Optional[List[str]] = None,
     ) -> SyncPlan:
+        plan_warnings = list(warnings or ())
+        plan_warnings.extend(self.converter.consume_key_warnings())
         return SyncPlan(
             requested_mode=requested_mode.value,
             effective_mode=effective_mode.value,
             source=source,
             target=target,
             actions=tuple(actions),
-            warnings=tuple(warnings or ()),
+            warnings=tuple(plan_warnings),
             destructive=(
                 effective_mode in {SyncMode.OVERWRITE, SyncMode.CLONE}
                 or any(action.destructive for action in actions)
@@ -2947,6 +2952,7 @@ class XTFSyncEngine:
 
     def _plan_file_bitable(self, df: pd.DataFrame) -> SyncPlan:
         mode = self.config.sync_mode
+        match_strategy = self.config.match_strategy
         actions, field_types = self.plan_fields(df)
         source = {"type": "file", "rows": len(df), "columns": len(df.columns)}
         target = {"type": "bitable"}
@@ -2960,7 +2966,9 @@ class XTFSyncEngine:
         fetch_fields = self._get_bitable_fetch_field_names(df, mode.value)
         existing_records: List[Dict[str, Any]] = []
         if mode is SyncMode.CLONE or (
-            index_column and index_column not in planned_fields
+            match_strategy is MatchStrategy.BY_KEY
+            and index_column
+            and index_column not in planned_fields
         ):
             existing_records = self.get_all_bitable_records(fetch_fields)
         try:
@@ -2968,13 +2976,19 @@ class XTFSyncEngine:
                 self.converter.build_record_index(
                     existing_records, index_column, field_types
                 )
-                if index_column
+                if match_strategy is MatchStrategy.BY_KEY and index_column
                 else {}
             )
         except ValueError as error:
             raise RuntimeError(f"目标 Bitable 索引不安全: {error}") from error
-        if index_column:
-            self.converter.build_data_index(df, index_column, field_types)
+        if match_strategy is MatchStrategy.BY_KEY and index_column:
+            self.converter.build_data_index(
+                df,
+                index_column,
+                field_types,
+                allow_empty=False,
+                context=f"本地数据索引列 '{index_column}' ",
+            )
 
         creates: List[CanonicalRecord] = []
         updates: List[CanonicalRecord] = []
@@ -2986,6 +3000,10 @@ class XTFSyncEngine:
                 for record in existing_records
                 if record.get("record_id")
             ]
+            creates = self._canonical_records(
+                self.converter.df_to_records(df, field_types)
+            )
+        elif match_strategy is MatchStrategy.APPEND_ONLY:
             creates = self._canonical_records(
                 self.converter.df_to_records(df, field_types)
             )
@@ -3005,10 +3023,8 @@ class XTFSyncEngine:
             )
         else:
             for _, row in df.iterrows():
-                index_hash = (
-                    self.converter.get_index_value_hash(row, index_column, field_types)
-                    if index_column
-                    else None
+                index_hash = self.converter.get_index_value_hash(
+                    row, index_column, field_types
                 )
                 fields = self._row_to_canonical_fields(row, field_types)
                 if index_hash and index_hash in existing_index:
@@ -3272,6 +3288,15 @@ class XTFSyncEngine:
         source = {"type": "file", "rows": len(df), "columns": len(df.columns)}
         target = {"type": "sheet"}
         warnings: List[str] = []
+        if self.config.match_strategy is MatchStrategy.APPEND_ONLY:
+            actions = [self._sheet_append_action(df)] if not df.empty else []
+            return self._make_plan(
+                requested_mode=requested_mode,
+                effective_mode=requested_mode,
+                source=source,
+                target=target,
+                actions=actions,
+            )
         formula_columns: Optional[set[Union[str, int]]] = None
         if requested_mode is SyncMode.FULL:
             current_df, _, formula_columns = self.get_sheet_data_with_validation()
@@ -3280,20 +3305,7 @@ class XTFSyncEngine:
         if not self._require_complete_sheet_read("同步计划"):
             raise RuntimeError("Sheet 读取不完整，拒绝生成写计划")
 
-        implicit_clone = (
-            requested_mode is SyncMode.CLONE
-            or (
-                requested_mode
-                in {
-                    SyncMode.FULL,
-                    SyncMode.INCREMENTAL,
-                    SyncMode.OVERWRITE,
-                }
-                and current_df.empty
-            )
-            or (requested_mode is SyncMode.FULL and not self.config.index_column)
-        )
-        if implicit_clone:
+        if requested_mode is SyncMode.CLONE:
             actions = [self._sheet_clear_action(), self._sheet_write_action(df)]
             actions.append(
                 PlanAction(
@@ -3303,10 +3315,6 @@ class XTFSyncEngine:
                     payload=df.copy(),
                 )
             )
-            if requested_mode is not SyncMode.CLONE:
-                warnings.append(
-                    f"{requested_mode.value} 在当前 Sheet 状态下按 clone 执行"
-                )
             return self._make_plan(
                 requested_mode=requested_mode,
                 effective_mode=SyncMode.CLONE,
@@ -3323,11 +3331,19 @@ class XTFSyncEngine:
         current_index: Mapping[str, int] = {}
         if self.config.index_column:
             self.converter.build_data_index(
-                df, self.config.index_column, index_field_types
+                df,
+                self.config.index_column,
+                index_field_types,
+                allow_empty=False,
+                context=f"本地数据索引列 '{self.config.index_column}' ",
             )
             try:
                 current_index = self.converter.build_data_index(
-                    current_df, self.config.index_column, index_field_types
+                    current_df,
+                    self.config.index_column,
+                    index_field_types,
+                    allow_empty=True,
+                    context=f"目标 Sheet 索引列 '{self.config.index_column}' ",
                 )
             except ValueError as error:
                 raise RuntimeError(f"目标 Sheet 索引不安全: {error}") from error
@@ -3439,9 +3455,12 @@ class XTFSyncEngine:
 
     def plan(self, df: Optional[pd.DataFrame] = None) -> SyncPlan:
         """Build a complete mutation plan using reads and local classification only."""
-        self.converter.datetime_index_granularity = (
-            self.config.datetime_index_granularity
-        )
+        if (
+            self.config.sync_mode is not SyncMode.CLONE
+            and self.config.match_strategy is MatchStrategy.BY_KEY
+            and not self.config.index_column
+        ):
+            raise ValueError("by_key 模式必须配置 index_column")
         if self.config.source_type is SourceType.BITABLE:
             if df is not None:
                 raise ValueError("source_type=bitable 不接受本地 DataFrame")

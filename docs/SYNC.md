@@ -23,28 +23,29 @@
 
 ## 1. 同步模式概览
 
-XTF 支持四种同步模式，通过 YAML v2 的 `sync.mode` 或 `XTF sync --mode` 指定：
+XTF 支持四种同步模式，并用显式 `sync.match_strategy` 区分 key 匹配与纯追加：
 
-| 模式 | 说明 | 已存在记录 | 不存在记录 | 数据安全 | 需要索引列 |
-|------|------|-----------|-----------|----------|-----------|
-| **full** | 全量同步 | 更新 | 新增 | ⭐⭐⭐⭐⭐ 最安全 | 推荐 |
-| **incremental** | 增量同步 | 跳过 | 新增 | ⭐⭐⭐⭐⭐ 最安全 | 推荐 |
-| **overwrite** | 覆盖同步 | 删除后重建 | 新增 | ⚠️ 需要 `--allow-delete` | 必需 |
-| **clone** | 克隆同步 | 全部清除 | 全部创建 | 🔴 需要 `--allow-delete` | 不需要 |
+| 模式 | 策略 | 已存在记录 | 不存在记录 | 数据安全 | 索引列 |
+|------|------|-----------|-----------|----------|--------|
+| **full** | `by_key` | 更新 | 新增 | ⭐⭐⭐⭐⭐ | 必需 |
+| **incremental** | `by_key` | 跳过 | 新增 | ⭐⭐⭐⭐⭐ | 必需 |
+| **incremental** | `append_only` | 不匹配 | 全部追加 | ⭐⭐⭐⭐⭐ | 禁止 |
+| **overwrite** | `by_key` | 删除后重建 | 新增 | ⚠️ `--allow-delete` | 必需 |
+| **clone** | 省略 | 全部清除 | 全部创建 | 🔴 `--allow-delete` | 不参与判断 |
 
-> **索引列说明**：索引列（`sync.index.column` / `--index-column`）用于建立匹配关系，值必须唯一。日期时间默认统一到 UTC 后按完整毫秒匹配，只有显式选择 `day` 才按本地日期匹配。
+> **索引列说明**：`by_key` 必须配置唯一且非空的索引列。日期时间默认统一到 UTC 后按完整毫秒匹配；选择 `day` 时必须提供 IANA 业务时区。
 
 ```bash
 # 使用方式：同步参数属于 `sync` 子命令；这里以 v2 配置为例
-python3 XTF.py sync --config config.yaml --mode full --index-column "ID"
+python3 XTF.py sync --config config.yaml --mode full --match-strategy by_key --index-column "ID"
 python3 XTF.py sync --config config.yaml --mode clone --dry-run
 python3 XTF.py sync --config config.yaml --mode clone --allow-delete
 ```
 
 先用 `config validate` 和默认离线的 `doctor` 检查本地条件；只有需要读取远端认证、字段或
-工作表 metadata 时才传 `doctor --network`。每次正式同步都会先生成 `SyncPlan`；`--dry-run`
-只返回该计划，不执行 Feishu mutation。Sheet 的 full/incremental 在无法安全按索引匹配时可能
-形成 effective `clone`，计划会显式标记 destructive action，正式执行必须传 `--allow-delete`。
+工作表 metadata 时才传 `doctor --network`。每次正式同步都会先生成计划；`--dry-run`
+只返回该计划，不执行 Feishu mutation。目标为空不会改变 requested/effective mode；缺少索引或
+其它非法组合会在零 mutation 阶段失败，不会隐式形成 destructive clone。
 
 ---
 
@@ -68,9 +69,11 @@ target:
     api_backend: base_v3
 sync:
   mode: full
+  match_strategy: by_key
   index:
     column: ID
     datetime_granularity: exact
+    timezone: null
 ```
 
 执行：
@@ -121,7 +124,7 @@ python3 XTF.py sync --source-type bitable --mode full --config config.yaml --dry
 **特点**：
 - 远程表中未匹配的记录完全不受影响
 - 支持选择性列同步（v2 YAML 的 `sync.selective`，或 `--selective --column NAME`），选择性模式下仅获取索引列+指定列
-- 无索引列时退化为纯新增操作
+- 缺少索引列时拒绝生成计划，不会退化为纯新增或 clone
 
 ### Sheet 版本
 
@@ -134,7 +137,7 @@ python3 XTF.py sync --source-type bitable --mode full --config config.yaml --dry
 **特点**：
 - 支持结果检测（`target.sheet.validate_results`）和公式保护（`target.sheet.protect_formulas`）
 - 支持选择性列同步，只更新指定列的单元格
-- 无有效索引列时，full/incremental 的计划可能显式转为 destructive clone；先用 dry-run 审核，正式执行必须传 `--allow-delete`
+- 目标为空时仍保持 full，只生成必要的 append action，不执行 clear
 
 ### 适用场景
 
@@ -169,9 +172,8 @@ python3 XTF.py sync --source-type bitable --mode full --config config.yaml --dry
 4. `batch_create_records`（仅创建新记录）
 
 **特点**：
-- 远程数据查询极快（只获取索引列）
-- 已存在的记录完全不会被修改
-- 无索引列时将所有本地数据作为新记录添加
+- `by_key` 只读取索引列，已存在记录不会修改
+- `append_only` 不读取目标 key，明确追加全部源记录，也不做去重
 
 ### Sheet 版本
 
@@ -182,9 +184,9 @@ python3 XTF.py sync --source-type bitable --mode full --config config.yaml --dry
 4. 使用 `values_append` 追加新行
 
 **特点**：
-- 支持选择性列同步
-- 无索引列时追加全部本地数据
-- 电子表格为空时退化为克隆模式
+- `by_key` 支持选择性列同步
+- `append_only` 禁止 selective 和 index，直接追加全部源行
+- 电子表格为空时仍保持 incremental，不转 clone
 
 ### 适用场景
 
@@ -538,23 +540,25 @@ incremental   full   overwrite   clone
 # 最安全的日常同步配置
 sync:
   mode: full
+  match_strategy: by_key
   index:
     column: ID
     datetime_granularity: exact
+    timezone: null
 ```
 
 ```yaml
 # 只追加新数据（日志/交易记录）
 sync:
   mode: incremental
-  index:
-    column: 交易编号
+  match_strategy: append_only
 ```
 
 ```yaml
 # 本地数据优先覆盖
 sync:
   mode: overwrite
+  match_strategy: by_key
   index:
     column: 工号
 ```
@@ -569,6 +573,7 @@ sync:
 # 只更新薪资和部门列
 sync:
   mode: full
+  match_strategy: by_key
   index:
     column: 工号
   selective:
