@@ -6,13 +6,13 @@ import argparse
 import copy
 import os
 from collections.abc import Mapping, MutableMapping
-from dataclasses import MISSING, dataclass, fields
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import yaml  # type: ignore[import-untyped]
 
-from core.config import SelectiveSyncConfig, SyncConfig
+from core.runtime_config import RuntimeConfig
 
 from .errors import EXIT_CONFIG, CLIError
 
@@ -357,10 +357,42 @@ CLI_TO_FLAT.update(
     }
 )
 
+SOURCE_FILE_OVERRIDES = frozenset({"file_path", "excel_sheet_name"})
+SOURCE_BITABLE_OVERRIDES = frozenset({"source_app_token", "source_table_id"})
+TARGET_BITABLE_OVERRIDES = frozenset(
+    {
+        "app_token",
+        "table_id",
+        "create_missing_fields",
+        "bitable_api_backend",
+        "bitable_user_id_type",
+    }
+)
+TARGET_SHEET_OVERRIDES = frozenset(
+    {
+        "spreadsheet_token",
+        "sheet_id",
+        "start_row",
+        "start_column",
+        "sheet_value_render_option",
+        "sheet_datetime_render_option",
+        "sheet_scan_max_rows",
+        "sheet_scan_max_cols",
+        "sheet_write_max_rows",
+        "sheet_write_max_cols",
+        "sheet_validate_results",
+        "sheet_protect_formulas",
+        "sheet_verify_formulas",
+        "sheet_formula_max_locations",
+        "sheet_report_column_diff",
+        "sheet_diff_tolerance",
+    }
+)
+
 
 @dataclass(frozen=True)
 class ResolvedConfig:
-    config: SyncConfig
+    config: RuntimeConfig
     values: dict[str, Any]
     sources: dict[str, str]
     path: Path | None
@@ -622,24 +654,7 @@ def _walk_leaves(value: Mapping[str, Any], prefix: str = "") -> dict[str, Any]:
 
 
 def _defaults(target_type: str) -> tuple[dict[str, Any], dict[str, str]]:
-    values: dict[str, Any] = {
-        "file_path": None,
-        "app_id": "",
-        "app_secret": "",
-        "target_type": target_type,
-    }
-    for item in fields(SyncConfig):
-        if item.name in values or item.name == "selective_sync":
-            continue
-        if item.default is not MISSING:
-            default = item.default
-            values[item.name] = getattr(default, "value", default)
-    for item in fields(SelectiveSyncConfig):
-        if item.default is not MISSING:
-            values[f"selective_sync.{item.name}"] = item.default
-    if target_type == "sheet":
-        values["batch_size"] = 1000
-        values["rate_limit_delay"] = 0.1
+    values = RuntimeConfig.flat_defaults(target_type)
     sources = {name: f"default:{target_type}" for name in values}
     return values, sources
 
@@ -660,6 +675,23 @@ def _set(
         value = int(value)
     values[name] = value
     sources[name] = source
+
+
+def _reject_inactive_cli_overrides(
+    *, source_type: str, target_type: str, sources: Mapping[str, str]
+) -> None:
+    inactive = set(
+        SOURCE_BITABLE_OVERRIDES if source_type == "file" else SOURCE_FILE_OVERRIDES
+    )
+    inactive.update(
+        TARGET_SHEET_OVERRIDES if target_type == "bitable" else TARGET_BITABLE_OVERRIDES
+    )
+    explicitly_set = sorted(name for name in inactive if sources.get(name) == "cli")
+    if explicitly_set:
+        raise _config_error(
+            "CLI override(s) do not apply to the selected source/target: "
+            + ", ".join(explicitly_set)
+        )
 
 
 def resolve_config(
@@ -700,6 +732,13 @@ def resolve_config(
         if value is not None:
             _set(values, sources, flat_name, value, "cli")
 
+    source_type = str(values.get("source_type", "file"))
+    _reject_inactive_cli_overrides(
+        source_type=source_type,
+        target_type=target_type,
+        sources=sources,
+    )
+
     if getattr(args, "column", None) is not None:
         _set(values, sources, "selective_sync.enabled", True, "cli")
 
@@ -708,6 +747,8 @@ def resolve_config(
     if mode == "clone":
         if sources.get("match_strategy", "").startswith(("cli", "yaml:")):
             raise _config_error("match_strategy must be omitted for clone mode")
+        values.pop("match_strategy", None)
+        sources.pop("match_strategy", None)
     else:
         if sources.get("match_strategy", "").startswith("default:"):
             raise _config_error(
@@ -725,28 +766,22 @@ def resolve_config(
                     "append_only cannot be combined with selective sync"
                 )
 
-    selective = SelectiveSyncConfig(
-        **{
-            item.name: values.pop(f"selective_sync.{item.name}")
-            for item in fields(SelectiveSyncConfig)
-        }
+    selective_names = (
+        "enabled",
+        "columns",
+        "auto_include_index",
+        "optimize_ranges",
+        "max_gap_for_merge",
+        "preserve_column_order",
     )
+    selective = {name: values.pop(f"selective_sync.{name}") for name in selective_names}
     config_values = dict(values)
     config_values["selective_sync"] = selective
     try:
-        config = SyncConfig(**config_values)
+        config = RuntimeConfig.from_flat(config_values, sources=sources)
     except (TypeError, ValueError) as exc:
         raise _config_error(str(exc)) from exc
-    if not config.app_id:
-        raise _config_error("auth.app_id or --app-id is required")
-    if not config.app_secret:
-        raise _config_error(
-            "app secret is required via --app-secret, XTF_APP_SECRET, or auth.app_secret"
-        )
-    config.__dict__["config_sources"] = dict(sources)
-    values["selective_sync"] = {
-        item.name: getattr(selective, item.name) for item in fields(SelectiveSyncConfig)
-    }
+    values["selective_sync"] = dict(selective)
     return ResolvedConfig(config=config, values=values, sources=sources, path=path)
 
 

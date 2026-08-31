@@ -1,13 +1,13 @@
 # XTF 电子表格算法设计
 
-> 源码位置：[`core/engine.py`](../core/engine.py) · [`api/sheet.py`](../api/sheet.py)
+> 源码位置：[`core/service.py`](../core/service.py) · [`api/sheet.py`](../api/sheet.py)
 
 ---
 
 ## 目录
 
 - [1. 概述](#1-概述)
-- [2. 三层大数据稳定上传保障](#2-三层大数据稳定上传保障)
+- [2. Typed 分块与失败边界](#2-typed-分块与失败边界)
 - [3. 智能分块策略](#3-智能分块策略)
 - [4. API 接口选择与调用](#4-api-接口选择与调用)
 - [5. 公式保护与双读验证](#5-公式保护与双读验证)
@@ -23,7 +23,7 @@
 
 | 挑战 | 原因 | XTF 解决方案 |
 |------|------|-------------|
-| **请求体积限制** | 单次 API ≤ 10MB | 三层分块 + 二分重试 |
+| **请求体积限制** | 单次 API 有体积上限 | RangeChunker 预分块 + 90227 有界拆分 |
 | **行列限制** | 单次 5000 行 × 100 列 | 可配置分块参数 |
 | **公式保护** | 覆盖会破坏公式 | 双读检测 + 列级保护 |
 | **范围定位** | A1 记法、列号转换 | 自动范围计算与验证 |
@@ -31,29 +31,26 @@
 
 ---
 
-## 2. 三层大数据稳定上传保障
+## 2. Typed 分块与失败边界
 
 ### 第一层：预分块
 
 在发送 API 请求之前，基于配置参数进行初始分块：
 
 ```
-DataFrame (N 行 × M 列)
+逻辑 A1 range + 矩阵
         ↓
-按行分块: max(batch_size, sheet_write_max_rows)
+RangeChunker 按 write_max_rows × write_max_columns 双向切片
         ↓
-按列分块: sheet_write_max_cols (默认 100)
-        ↓
-生成 K 个子块 → 逐块发送
+生成 typed RangeChunk → 顺序提交 → 累积 actual/applied ranges
 ```
 
 **默认分块参数**：
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `sheet_write_max_rows` | `5000` | 写入分块最大行数 |
-| `sheet_write_max_cols` | `100` | 写入分块最大列数 |
-| `batch_size` | `1000` | 批处理大小 |
+| `target.sheet.write_max_rows` | `5000` | 写入分块最大行数 |
+| `target.sheet.write_max_columns` | `100` | 写入分块最大列数 |
 
 ### 第二层：自动二分重试
 
@@ -76,7 +73,7 @@ DataFrame (N 行 × M 列)
 
 ### 第三层：智能重试与频控
 
-在前两层基础上，应用通用重试和频率控制机制：
+在确定性分块和有界拆分基础上，应用通用重试和频率控制机制：
 
 - **默认模式**：固定延迟 + 固定重试次数
 - **高级模式**：可配置指数退避/线性增长/滑动窗口等策略
@@ -105,10 +102,10 @@ DataFrame (N 行 × M 列)
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `sheet_scan_max_rows` | `5000` | 每块最大行数 |
-| `sheet_scan_max_cols` | `100` | 每块最大列数 |
+| `target.sheet.scan_max_rows` | `5000` | 每块最大行数 |
+| `target.sheet.scan_max_columns` | `100` | 每块最大列数 |
 
-`sheet_scan_max_rows/cols` 是单次读取分块上限，不是完整表的总扫描上限。若工作表
+`target.sheet.scan_max_rows/scan_max_columns` 是单次读取分块上限，不是完整表的总扫描上限。若工作表
 元数据不可用，XTF 只执行该大小的有界诊断读取并将结果标记为不完整；依赖远端
 索引的 `full` / `incremental` / `overwrite` 会停止写入，而不会把截断数据当成完整表。
 
@@ -130,7 +127,7 @@ clone 模式下清空数据也需要分块（写入空值）：
 ```
 清空范围 (R 行 × C 列)
         ↓
-按 sheet_write_max_rows × sheet_write_max_cols 分块
+按 target.sheet.write_max_rows × target.sheet.write_max_columns 分块
         ↓
 逐块写入空值 (batch_update)
 ```
@@ -199,7 +196,7 @@ get_info(范围) → batch_update(清空) → values PUT(全部写入)
 
 ## 5. 公式保护与双读验证
 
-> 源码：`core/engine.py` → `get_sheet_data_with_validation()`
+> 源码：`core/service.py` → `get_sheet_data_with_validation()`
 
 ### 双读策略
 
@@ -258,14 +255,14 @@ actual range 时不会猜测落点或改扫全表，而是报告验证范围未�
 
 ## 6. 列级差异检测报告
 
-> 源码：`core/engine.py` → `validate_and_report_differences()`, `print_column_diff_report()`
+> 源码：`core/service.py` → `validate_and_report_differences()`, `print_column_diff_report()`
 
 ### 差异比较逻辑
 
 | 数据类型 | 比较方式 |
 |----------|----------|
 | 空值 | 双方均为空 → 相等；一方为空 → 不等 |
-| 数字 | 差值 ≤ `sheet_diff_tolerance` → 相等 |
+| 数字 | 差值 ≤ `target.sheet.diff_tolerance` → 相等 |
 | 字符串 | 去除首尾空格后精确比较 |
 | 其他 | 转为字符串后比较 |
 

@@ -72,7 +72,7 @@ python3 XTF.py sync --field-type-strategy intelligence  # 全面智能
 - 自动设置日期格式（`yyyy/MM/dd`）
 - 不创建下拉列表
 
-**CSV 兼容性**：✅ 完美支持
+**CSV 兼容性**：🧪 格式仍为实验性；类型分析可用，但不视为与 Excel 等价
 
 ---
 
@@ -90,7 +90,7 @@ python3 XTF.py sync --field-type-strategy intelligence  # 全面智能
 - 基于 Excel 数据验证自动创建飞书下拉列表
 - 自动设置日期和数字格式
 
-**CSV 兼容性**：⚠️ 部分受限（CSV 不保留 Excel 数据验证信息）
+**CSV 兼容性**：🧪 实验性且部分受限（CSV 不保留 Excel 数据验证信息）
 
 ---
 
@@ -117,7 +117,7 @@ python3 XTF.py sync --field-type-strategy intelligence  # 全面智能
 | 选择 | `intelligence_choice_confidence` | `0.9` | 超过此值推荐单选/多选 |
 | 布尔 | `intelligence_boolean_confidence` | `0.95` | 超过此值推荐复选框 |
 
-**CSV 兼容性**：✅ 完美支持（基于数据内容分析，不依赖 Excel 验证）
+**CSV 兼容性**：🧪 格式仍为实验性（内容分析不依赖 Excel 验证，但不构成生产等价保证）
 
 ---
 
@@ -328,10 +328,10 @@ python3 XTF.py sync --field-type-strategy intelligence  # 全面智能
 
 | 策略 | CSV 兼容性 | 建议 |
 |------|-----------|------|
-| raw | ✅ 完美 | 仅需归档时使用 |
-| base | ✅ 完美 | ⭐ CSV 首选推荐 |
-| auto | ⚠️ 受限 | CSV 无验证信息，等同 base |
-| intelligence | ✅ 完美 | 需要高级类型时使用 |
+| raw | 🧪 实验性 | 仅需原值处理时使用 |
+| base | 🧪 实验性 | CSV 的保守起点 |
+| auto | 🧪 受限 | CSV 无验证信息，等同 base |
+| intelligence | 🧪 实验性 | 内容推断可用，但需额外验证 |
 
 ### 常见问题
 

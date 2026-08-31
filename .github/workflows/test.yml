@@ -2,7 +2,7 @@ name: Tests
 
 on:
   push:
-    branches: [main, master, dev]
+    branches: [main, master, dev, codex/xtf-cli-v2]
     paths:
       - 'core/**'
       - 'api/**'
@@ -14,10 +14,9 @@ on:
       - 'requirements-dev.txt'
       - 'config.example.yaml'
       - 'lite/config.*.example.yaml'
-      - '.github/workflows/test.yml'
-      - '.github/workflows/multi-platform-build.yml'
+      - '.github/workflows/**'
   pull_request:
-    branches: [main, master, dev]
+    branches: [main, master, dev, codex/xtf-cli-v2]
     paths:
       - 'core/**'
       - 'api/**'
@@ -29,8 +28,7 @@ on:
       - 'requirements-dev.txt'
       - 'config.example.yaml'
       - 'lite/config.*.example.yaml'
-      - '.github/workflows/test.yml'
-      - '.github/workflows/multi-platform-build.yml'
+      - '.github/workflows/**'
   workflow_dispatch:
 
 env:

@@ -15,7 +15,6 @@ from api.sdk import (
     PaginationError,
     Paginator,
     PartialBatchError,
-    XTFFeishuClient,
     run_batches,
 )
 
@@ -147,61 +146,6 @@ class TestRunBatches:
         ) == [(True, 0)]
 
 
-def test_unified_client_shares_auth_and_transport_across_targets():
-    transport = Mock()
-    client = XTFFeishuClient("cli_test", "secret", api_client=transport)
-
-    bitable = client.bitable()
-    sheet = client.sheet(start_row=3, start_column="C")
-
-    assert client.auth.api_client is transport
-    assert bitable.auth is client.auth
-    assert bitable.api_client is transport
-    assert sheet.auth is client.auth
-    assert sheet.api_client is transport
-    assert sheet.start_row == 3
-    assert sheet.start_column == "C"
-
-
-def test_unified_client_without_injected_transport_uses_requested_controls():
-    client = XTFFeishuClient(
-        "cli_test",
-        "secret",
-        max_retries=7,
-        rate_limit_delay=0.25,
-    )
-
-    assert client.api_client.max_retries == 7
-    assert client.api_client.rate_limiter.delay == 0.25
-
-
-def test_unified_client_creates_explicit_typed_bitable_backends():
-    from api import BaseV3Backend, BitableV1Backend
-
-    transport = Mock()
-    client = XTFFeishuClient("cli_test", "secret", api_client=transport)
-
-    base = client.bitable_backend("base_v3", user_id_type="union_id")
-    legacy = client.bitable_backend("bitable_v1", user_id_type="user_id")
-
-    assert isinstance(base, BaseV3Backend)
-    assert isinstance(legacy, BitableV1Backend)
-    assert base.auth is client.auth
-    assert legacy.auth is client.auth
-    assert base.api_client is transport
-    assert legacy.api_client is transport
-    assert base.user_id_type.value == "union_id"
-    assert legacy.user_id_type.value == "user_id"
-
-
-@pytest.mark.parametrize("backend", ["auto", "v3", "unknown"])
-def test_unified_client_rejects_implicit_or_unknown_backend(backend):
-    client = XTFFeishuClient("cli_test", "secret", api_client=Mock())
-
-    with pytest.raises(ValueError, match="base_v3.*bitable_v1"):
-        client.bitable_backend(backend)
-
-
 def test_public_api_exports_typed_sheet_contracts():
     from api import A1Range, FormulaVerificationResult, RangeChunker, SheetMetadata
 
@@ -209,3 +153,21 @@ def test_public_api_exports_typed_sheet_contracts():
     assert FormulaVerificationResult("success", False).passed is True
     assert RangeChunker(5000, 100).chunk_count(A1Range.parse("sh1!A1:CW5001")) == 4
     assert SheetMetadata("sh1").sheet_id == "sh1"
+
+
+def test_removed_python_facades_are_not_exported():
+    import api
+    import core
+    from api.sheet import SheetAPI
+
+    assert not hasattr(api, "XTFFeishuClient")
+    assert not hasattr(api, "BitableAPI")
+    assert not hasattr(core, "XTFSyncEngine")
+    assert not hasattr(core, "SyncConfig")
+    for name in (
+        "write_sheet_data",
+        "append_sheet_data",
+        "write_selective_columns",
+        "clear_sheet_data",
+    ):
+        assert not hasattr(SheetAPI, name)

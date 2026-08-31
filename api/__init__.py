@@ -1,65 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-飞书 API 模块包
-
-模块概述：
-    此包封装了飞书开放平台的 API 调用，提供统一的认证管理、
-    网络请求处理以及多维表格和电子表格的操作接口。
-
-包结构：
-    api/
-    ├── __init__.py     - 包初始化，导出公共接口
-    ├── auth.py         - 飞书认证管理（FeishuAuth）
-    ├── base.py         - 基础网络层（RateLimiter, RetryableAPIClient）
-    ├── sdk.py          - 响应、错误、分页与批处理契约
-    ├── bitable.py      - 多维表格 API（BitableAPI）
-    └── sheet.py        - 电子表格 API（SheetAPI）
-
-导出的类：
-    认证相关：
-        - FeishuAuth: 飞书认证管理器，负责获取和刷新访问令牌
-
-    网络层：
-        - RateLimiter: 接口频率限制器
-        - RetryableAPIClient: 可重试的 API 客户端
-
-    SDK 契约：
-        - XTFFeishuClient: 统一装配共享认证和 transport 的目标客户端
-        - FeishuAPIError: 带 HTTP/业务码、log_id 和重试元数据的错误
-        - Paginator: 带游标完整性保护的分页器
-        - run_batches: 首错停止并报告已应用前缀的批处理器
-
-    业务 API：
-        - BitableAPI: 多维表格 API 客户端
-        - SheetAPI: 电子表格 API 客户端
-
-API 调用流程：
-    1. FeishuAuth 获取/刷新 tenant_access_token
-    2. RetryableAPIClient 处理请求重试和频率限制
-    3. BitableAPI/SheetAPI 封装具体业务操作
-
-使用示例：
-    >>> from api import XTFFeishuClient
-    >>>
-    >>> client = XTFFeishuClient(app_id, app_secret)
-    >>> bitable_api = client.bitable()
-    >>> records = bitable_api.get_all_records(app_token, table_id)
-
-    既有 FeishuAuth + BitableAPI/SheetAPI 直接构造方式继续兼容。
-
-设计原则：
-    - 关注点分离：认证、网络、业务逻辑分层
-    - 可复用性：基础组件可独立使用
-    - 可扩展性：易于添加新的 API 类型
-
-作者: XTF Team
-版本: 1.7.3+
-"""
+"""XTF 2.0 内部 Feishu typed transport、backend 与 Sheet contracts。"""
 
 from .auth import FeishuAuth
 from .base import RateLimiter, RetryableAPIClient
-from .bitable import BitableAPI
 from .bitable_backend import (
     BitableBackend,
     BitableBackendKind,
@@ -90,7 +34,6 @@ from .sdk import (
     PaginationError,
     Paginator,
     PartialBatchError,
-    XTFFeishuClient,
     run_batches,
 )
 
@@ -98,7 +41,6 @@ __all__ = [
     "FeishuAuth",
     "RateLimiter",
     "RetryableAPIClient",
-    "BitableAPI",
     "BitableBackend",
     "BitableBackendKind",
     "BitableV1Backend",
@@ -124,6 +66,5 @@ __all__ = [
     "PaginationError",
     "Paginator",
     "PartialBatchError",
-    "XTFFeishuClient",
     "run_batches",
 ]

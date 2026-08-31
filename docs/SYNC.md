@@ -1,6 +1,6 @@
 # XTF 同步模式与选择性同步
 
-> 源码位置：[`core/engine.py`](../core/engine.py) · [`core/config.py`](../core/config.py)
+> 源码位置：[`core/service.py`](../core/service.py) · [`core/runtime_config.py`](../core/runtime_config.py)
 
 ---
 
@@ -37,9 +37,9 @@ XTF 支持四种同步模式，并用显式 `sync.match_strategy` 区分 key 匹
 
 ```bash
 # 使用方式：同步参数属于 `sync` 子命令；这里以 v2 配置为例
-python3 XTF.py sync --config config.yaml --mode full --match-strategy by_key --index-column "ID"
-python3 XTF.py sync --config config.yaml --mode clone --dry-run
-python3 XTF.py sync --config config.yaml --mode clone --allow-delete
+python3 XTF.py sync --config config-keyed.yaml --mode full --match-strategy by_key --index-column "ID"
+python3 XTF.py sync --config config-clone.yaml --dry-run
+python3 XTF.py sync --config config-clone.yaml --allow-delete
 ```
 
 先用 `config validate` 和默认离线的 `doctor` 检查本地条件；只有需要读取远端认证、字段或
@@ -116,7 +116,7 @@ python3 XTF.py sync --source-type bitable --mode full --config config.yaml --dry
 
 **API 调用流程**：
 1. `search_records`（带 `field_names` 优化，仅获取必要字段）
-2. 构建索引映射：index_column 值 → record_id
+2. 构建索引映射：`sync.index.column` 值 → record_id
 3. 比对索引，分类为"更新"和"新增"
 4. `batch_update_records`（更新已存在的记录）
 5. `batch_create_records`（创建新记录）
@@ -130,7 +130,7 @@ python3 XTF.py sync --source-type bitable --mode full --config config.yaml --dry
 
 **API 调用流程**：
 1. 获取远程表格数据（含表头行号映射）
-2. 构建索引映射：index_column 值 → 行号
+2. 构建索引映射：`sync.index.column` 值 → 行号
 3. 匹配的行 → 批量更新 (`values_batch_update`)
 4. 不匹配的行 → 追加到末尾 (`values_append`)
 
@@ -236,7 +236,7 @@ python3 XTF.py sync --source-type bitable --mode full --config config.yaml --dry
 **API 调用流程**：
 1. 获取远程表格数据
 2. 保留不在本地数据中的远程行 + 全部本地数据行
-3. 使用 `write_sheet_data` 重写整个表格
+3. 执行 typed `WriteRangeAction` 重写计划范围
 
 **特点**：
 - 支持选择性列覆盖同步
@@ -283,14 +283,14 @@ python3 XTF.py sync --source-type bitable --mode full --config config.yaml --dry
 
 **API 调用流程**：
 1. 获取工作表网格属性（行数/列数）
-2. `clear_sheet_data`（清空整个范围）
-3. `write_sheet_data`（写入全部本地数据含表头）
+2. 执行 typed `ClearRangeAction`（分块清空整个计划范围）
+3. 执行 typed `WriteRangeAction`（写入全部本地数据含表头）
 4. 可选：应用智能字段配置（日期/数字格式、下拉列表等）
 
 **特点**：
 - 会清空整个工作表范围
 - 会重写表头
-- 支持写入后自动配置字段格式（`field_type_strategy`）
+- 支持写入后自动配置字段格式（`conversion.strategy`）
 
 ### 适用场景
 
@@ -313,7 +313,7 @@ python3 XTF.py sync --source-type bitable --mode full --config config.yaml --dry
 | 更新记录 | ✅ | ❌ | ❌（删后重建） | ❌（删后重建） |
 | 删除记录 | ❌ | ❌ | ✅（匹配的） | ✅（全部） |
 | 保留未匹配记录 | ✅ | ✅ | ✅ | ❌ |
-| 需要索引列 | 推荐 | 推荐 | 必需 | 不需要 |
+| 需要索引列 | 必需 | `by_key` 必需；`append_only` 禁止 | 必需 | 不需要 |
 | 选择性同步 | ✅ | ✅ | ✅ | ❌ |
 | record_id 不变 | ✅（更新的） | ✅ | ❌ | ❌ |
 
@@ -324,7 +324,7 @@ python3 XTF.py sync --source-type bitable --mode full --config config.yaml --dry
 | 读取远程数据 | 是 | 是 | 是 | 否 |
 | 写入策略 | 更新+追加 | 仅追加 | 重写整表 | 清空+重写 |
 | 保留未匹配行 | ✅ | ✅ | ✅ | ❌ |
-| 需要索引列 | 推荐 | 推荐 | 必需 | 不需要 |
+| 需要索引列 | 必需 | `by_key` 必需；`append_only` 禁止 | 必需 | 不需要 |
 | 选择性列同步 | ✅ | ✅ | ✅ | ❌ |
 | 结果检测支持 | ✅ | ❌ | ❌ | ❌ |
 | 公式保护支持 | ✅ | ❌ | ❌ | ❌ |
@@ -366,9 +366,9 @@ python3 XTF.py sync --source-type bitable --mode full --config config.yaml --dry
 
 ## 8. 选择性列同步
 
-> 源码：`core/engine.py` → `_get_effective_selective_columns()`, `_sync_selective_columns_sheet()`
+> 源码：`core/service.py` → `_get_effective_selective_columns()`, `_plan_file_sheet()`
 >
-> 配置：`core/config.py` → `SelectiveSyncConfig`
+> 配置：`core/runtime_config.py` → `RuntimeSelectiveConfig`
 
 选择性同步允许只更新指定的列/字段，其他列/字段保持不变。
 
@@ -416,7 +416,7 @@ sync:
 
 **`max_gap_for_merge` 说明**：
 - 值为 0：不合并，每列保持独立 range
-- 正数（默认 2）：启用相邻目标列合并；为兼容现有配置，允许范围仍为 1-50
+- 正数（默认 2）：启用相邻目标列合并；有效范围为 1-50
 - 非相邻目标列不会跨列合并，避免空值覆盖未选择的中间列
 
 ### 验证规则
@@ -462,11 +462,10 @@ sync:
 | overwrite | `PUT /values` | — | — |
 | clone | `PUT /values` | — | `POST /values_batch_update`（空值） |
 
-同步引擎的数据 mutation 使用 additive typed 方法：`write_values()`、`append_values()`、
+同步引擎的数据 mutation 使用 typed 方法：`write_values()`、`append_values()`、
 `batch_update_values()` 和 `clear_values()`。固定 range 会做矩阵 shape 预检查，分块失败时
-只保留成功叶子范围；append 没有 actual range 时保持 unknown，不推断行号。原有
-`write_sheet_data()` / `append_sheet_data()` / `write_selective_columns()` /
-`clear_sheet_data()` 的 `bool` 以及私有 tuple 返回契约继续兼容。
+只保留成功叶子范围；append 没有 actual range 时保持 unknown，不推断行号。执行结果通过
+typed `MutationReceipt` 和 `SyncResult` 传播，不保留旧 bool facade。
 
 append 与 Base v3 create 没有已确认幂等键，因此 transport 无响应时只发送一次并返回
 `unknown_outcome`；不会由通用 transport 盲目重放。固定 range write 和已知 range 的
@@ -583,8 +582,8 @@ sync:
 
 ```bash
 # 命令行快速使用
-python3 XTF.py sync --config config.yaml --mode full --index-column "ID"
-python3 XTF.py sync --config config.yaml --mode incremental --index-column "ID"
-python3 XTF.py sync --config config.yaml --mode clone --dry-run
-python3 XTF.py sync --config config.yaml --mode clone --allow-delete
+python3 XTF.py sync --config config-keyed.yaml --mode full --match-strategy by_key --index-column "ID"
+python3 XTF.py sync --config config-keyed.yaml --mode incremental --match-strategy by_key --index-column "ID"
+python3 XTF.py sync --config config-clone.yaml --dry-run
+python3 XTF.py sync --config config-clone.yaml --allow-delete
 ```

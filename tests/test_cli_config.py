@@ -74,6 +74,23 @@ def test_match_strategy_mode_matrix_is_strict():
         validate_v2_document(append_only)
 
 
+def test_clone_resolution_does_not_restore_default_match_strategy(tmp_path):
+    clone = v2_config()
+    clone["sync"]["mode"] = "clone"
+    clone["sync"].pop("match_strategy")
+    path = tmp_path / "clone.yaml"
+    write_yaml(path, clone)
+
+    resolved = resolve_config(
+        parse_args(["sync", "--config", str(path)]),
+        environ={},
+    )
+
+    assert resolved.config.sync.match_strategy is None
+    assert "match_strategy" not in resolved.values
+    assert "match_strategy" not in resolved.sources
+
+
 def test_by_key_requires_index_and_day_requires_timezone():
     missing_index = v2_config()
     missing_index["sync"].pop("index")
@@ -172,16 +189,16 @@ def test_precedence_cli_then_env_then_yaml_and_target_defaults(tmp_path):
         ]
     )
     resolved = resolve_config(args, environ={"XTF_APP_SECRET": "env-secret"})
-    assert resolved.config.app_secret == "cli-secret"
-    assert resolved.config.batch_size == 333
+    assert resolved.config.auth.app_secret == "cli-secret"
+    assert resolved.config.control.batch_size == 333
     assert resolved.sources["app_secret"] == "cli"
     assert resolved.sources["batch_size"] == "cli"
-    assert resolved.config.config_sources["app_secret"] == "cli"
+    assert resolved.config.config_source_map()["app_secret"] == "cli"
 
     args = parse_args(["sync", "-c", str(path)])
     resolved = resolve_config(args, environ={"XTF_APP_SECRET": "env-secret"})
-    assert resolved.config.app_secret == "env-secret"
-    assert resolved.config.batch_size == 222
+    assert resolved.config.auth.app_secret == "env-secret"
+    assert resolved.config.control.batch_size == 222
     assert resolved.sources["app_secret"] == "env:XTF_APP_SECRET"
     assert resolved.sources["batch_size"].startswith("yaml:")
 
@@ -203,10 +220,30 @@ def test_column_repeats_replace_yaml_columns(tmp_path):
         ["sync", "-c", str(path), "--column", "new-a", "--column", "new-b"]
     )
     resolved = resolve_config(args, environ={})
-    assert resolved.config.selective_sync.columns == ["new-a", "new-b"]
-    assert resolved.config.selective_sync.enabled is True
+    assert resolved.config.sync.selective.columns == ("new-a", "new-b")
+    assert resolved.config.sync.selective.enabled is True
     assert resolved.sources["selective_sync.columns"] == "cli"
     assert resolved.sources["selective_sync.enabled"] == "cli"
+
+
+@pytest.mark.parametrize(
+    "inactive_flag",
+    [
+        ["--source-app-token", "unused-source"],
+        ["--spreadsheet-token", "unused-sheet"],
+        ["--sheet-verify-formulas"],
+    ],
+)
+def test_cli_rejects_explicit_inactive_source_and_target_overrides(
+    tmp_path, inactive_flag
+):
+    path = tmp_path / "config.yaml"
+    write_yaml(path, v2_config())
+
+    with pytest.raises(CLIError, match="do not apply"):
+        resolve_config(
+            parse_args(["sync", "-c", str(path), *inactive_flag]), environ={}
+        )
 
 
 def test_flags_only_requires_explicit_target_type(capsys):
@@ -237,7 +274,7 @@ def test_auto_discovery_and_flags_only(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     resolved = resolve_config(parse_args(["sync"]), environ={})
     assert resolved.path == config_path
-    assert resolved.config.app_id == "yaml-app"
+    assert resolved.config.auth.app_id == "yaml-app"
 
     config_path.unlink()
     args = parse_args(
@@ -267,7 +304,7 @@ def test_auto_discovery_and_flags_only(tmp_path, monkeypatch):
     )
     resolved = resolve_config(args, environ={})
     assert resolved.path is None
-    assert resolved.config.app_id == "flag-app"
+    assert resolved.config.auth.app_id == "flag-app"
 
 
 def test_show_redacts_all_secrets_and_tokens_and_reports_sources(tmp_path, capsys):

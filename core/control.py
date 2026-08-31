@@ -4,15 +4,13 @@
 统一控制模块 - 高级重试与频控策略
 
 模块概述：
-    此模块提供全局的重试和频率控制（频控）管理功能，实现了多种
-    重试策略和频控策略，支持灵活配置和组合使用，兼容现有配置系统。
+    此模块提供可显式装配的重试和频率控制（频控）策略。每个 runtime
+    拥有独立 RequestController，不使用进程全局状态。
 
 主要功能：
     1. 重试策略实现（指数退避、线性增长、固定等待）
     2. 频控策略实现（固定等待、滑动窗口、固定窗口）
     3. 统一请求控制器（整合重试和频控）
-    4. 全局控制器单例（线程安全）
-    5. 增强的 API 客户端
 
 重试策略详解：
     ExponentialBackoffRetry（指数退避）：
@@ -45,20 +43,24 @@
         适合：API 按固定周期重置配额的场景
         特点：窗口边界固定，实现简单
 
-配置示例（config.yaml）：
-    enable_advanced_control: true
-    retry_strategy_type: "exponential_backoff"
-    retry_initial_delay: 0.5
-    retry_multiplier: 2.0
-    retry_max_wait_time: 30.0
-    rate_limit_strategy_type: "sliding_window"
-    rate_limit_window_size: 1.0
-    rate_limit_max_requests: 10
+配置示例（YAML v2）：
+    control:
+      advanced:
+        enabled: true
+        retry:
+          strategy: exponential_backoff
+          initial_delay: 0.5
+          multiplier: 2.0
+          max_wait_time: 30.0
+        rate_limit:
+          strategy: sliding_window
+          window_size: 1.0
+          max_requests: 10
 
 使用示例：
     # 创建控制器
-    >>> from core.control import GlobalRequestController
-    >>> controller = GlobalRequestController.create_from_config(
+    >>> from core.control import build_request_controller
+    >>> controller = build_request_controller(
     ...     retry_type="exponential_backoff",
     ...     retry_config={"initial_delay": 0.5, "max_retries": 3},
     ...     rate_limit_type="sliding_window",
@@ -66,29 +68,21 @@
     ... )
 
     # 执行请求
-    >>> result = controller.get_controller().execute_request(api_call)
+    >>> result = controller.execute_request(api_call)
 
 设计模式：
     - 策略模式：重试和频控策略可灵活替换
-    - 单例模式：全局控制器确保一致性
     - 模板方法：基类定义接口，子类实现具体策略
-
-线程安全：
-    GlobalRequestController 使用 threading.Lock 保证线程安全，
-    适合多线程环境下的 API 调用控制。
 
 依赖关系：
     外部依赖：
         - time: 时间控制
-        - threading: 线程同步
-        - requests: HTTP请求（仅 EnhancedAPIClient）
         - collections.deque: 滑动窗口数据结构
 
 注意事项：
-    1. 启用高级控制需设置 enable_advanced_control: true
-    2. 默认使用传统控制方式（向后兼容）
-    3. 重试次数过多可能导致整体延迟增加
-    4. 频控策略会阻塞当前线程
+    1. 启用高级控制需设置 control.advanced.enabled: true
+    2. 重试次数过多可能导致整体延迟增加
+    3. 频控策略会阻塞当前线程
 
 作者: XTF Team
 版本: 1.7.3+
@@ -97,14 +91,11 @@
 
 import time
 import logging
-import threading
 from abc import ABC, abstractmethod
 from collections import deque
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Callable, Optional, Union
-
-import requests  # type: ignore[import-untyped]
+from typing import Any, Callable, Optional
 
 # ============================================================================
 # 重试策略实现
@@ -420,39 +411,6 @@ class RequestController:
             raise last_exception
 
 
-class EnhancedAPIClient:
-    """增强的API客户端，兼容原有接口"""
-
-    def __init__(self, controller: Optional[RequestController] = None):
-        self.controller = controller
-        self.logger = logging.getLogger("XTF.control")
-
-    def call_api(self, method: str, url: str, **kwargs) -> requests.Response:
-        """调用API，应用统一的重试和频控策略"""
-
-        def _make_request():
-            response = requests.request(method, url, timeout=60, **kwargs)
-
-            # 检查是否需要重试的响应状态
-            if response.status_code == 429:  # 频率限制
-                raise requests.exceptions.RequestException(
-                    f"Rate limit exceeded: {response.status_code}"
-                )
-
-            if response.status_code >= 500:  # 服务器错误
-                raise requests.exceptions.RequestException(
-                    f"Server error: {response.status_code}"
-                )
-
-            return response
-
-        if self.controller:
-            return self.controller.execute_request(_make_request)
-        else:
-            # 回退到直接执行
-            return _make_request()
-
-
 # ============================================================================
 # Explicit controller construction
 # ============================================================================
@@ -518,65 +476,3 @@ def build_request_controller(
     else:
         raise ValueError(f"unsupported rate-limit strategy: {rate_limit_type}")
     return RequestController(retry_strategy, rate_limit_strategy)
-
-
-# ============================================================================
-# Legacy global controller (removed at the final cutover)
-# ============================================================================
-
-
-class GlobalRequestController:
-    """全局请求控制器单例"""
-
-    _instance = None
-    _controller = None
-    _lock = threading.Lock()
-
-    def __new__(cls):
-        if cls._instance is None:
-            with GlobalRequestController._lock:
-                if cls._instance is None:
-                    cls._instance = super().__new__(cls)
-        return cls._instance
-
-    def configure(self, controller: RequestController):
-        """配置全局控制器"""
-        with GlobalRequestController._lock:
-            self._controller = controller
-
-    def clear(self):
-        """清除进程级 controller，防止普通 client 继承旧配置。"""
-        with GlobalRequestController._lock:
-            self._controller = None
-
-    def get_controller(self) -> Optional[RequestController]:
-        """获取全局控制器实例"""
-        with GlobalRequestController._lock:
-            return self._controller
-
-    def get_api_client(self) -> EnhancedAPIClient:
-        """获取配置好的API客户端"""
-        return EnhancedAPIClient(self._controller)
-
-    @classmethod
-    def create_from_config(
-        cls,
-        retry_type: str = "exponential_backoff",
-        retry_config: Optional[dict[str, Any]] = None,
-        rate_limit_type: str = "fixed_wait",
-        rate_limit_config: Optional[dict[str, Any]] = None,
-    ):
-        """从配置创建全局控制器"""
-
-        controller = build_request_controller(
-            retry_type=retry_type,
-            retry_config=retry_config,
-            rate_limit_type=rate_limit_type,
-            rate_limit_config=rate_limit_config,
-        )
-
-        # 配置全局实例
-        global_controller = cls()
-        global_controller.configure(controller)
-
-        return global_controller

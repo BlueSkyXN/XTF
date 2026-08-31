@@ -73,7 +73,7 @@ control:
   第4次重试: 4.0s
   第5次重试: 8.0s
   ...
-  上限: retry_max_wait_time (如设置)
+  上限: control.advanced.retry.max_wait_time (如设置)
 ```
 
 **特点**：
@@ -342,29 +342,18 @@ INFO  - 批量操作完成: 500/500 条记录, 重试 2 次
 
 | 问题 | 调优方向 |
 |------|----------|
-| 重试次数耗尽仍失败 | 增大 `max_retries`，增大 `retry_initial_delay` |
-| 等待时间过长 | 减小 `retry_multiplier`，减小 `retry_max_wait_time` |
-| 限流频繁触发 | 减小 `rate_limit_max_requests`，增大 `rate_limit_window_size` |
-| 吞吐量不足 | 增大 `rate_limit_max_requests`，减小延迟 |
+| 重试次数耗尽仍失败 | 增大 `control.max_retries` 和 `control.advanced.retry.initial_delay` |
+| 等待时间过长 | 减小 `control.advanced.retry.multiplier` 和 `control.advanced.retry.max_wait_time` |
+| 限流频繁触发 | 减小 `control.advanced.rate_limit.max_requests`，增大 `control.advanced.rate_limit.window_size` |
+| 吞吐量不足 | 增大 `control.advanced.rate_limit.max_requests`，减小 `control.rate_limit_delay` |
 | 突发限流 | 从固定窗口切换到滑动窗口 |
 
-### 飞书 API 频率限制参考
+### 飞书 API 限流处理
 
-**多维表格（Bitable）官方限制**：
-
-| 接口 | 官方限制（程序内嵌上限） | 说明 |
-|------|------------------------|------|
-| 查询记录 (search) | 20 次/秒 | 搜索+分页拉取 |
-| 批量获取 (batch_get) | 20 次/秒 | 按 ID 获取 |
-| 新增记录 (batch_create) | 50 次/秒 | 批量写入 |
-| 更新记录 (batch_update) | 50 次/秒 | 批量更新 |
-| 删除记录 (batch_delete) | 50 次/秒 | 批量删除 |
-| 列出字段 (list_fields) | 20 次/秒 | 字段管理 |
-| 新增字段 (create_field) | 10 次/秒 | 字段创建 |
-
-> 数据来源：[飞书开放平台 API 频率限制](https://open.feishu.cn/document/ukTMukTMukTM/uUzN04SN3QjL1cDN)
->
-> 官方限制直接作为程序内嵌上限，在 `api/bitable.py` 中定义为 `OFFICIAL_RATE_LIMITS` 常量。
+Feishu 的实际频率限制和容量会随 endpoint、应用和服务端策略变化。XTF 不把某一历史
+次数表固化为跨版本保证；运行时以 OpenAPI 响应、`Retry-After` 和显式 control 配置为准。
+需要核对当前服务端限制时，以[飞书开放平台 API 频率限制](https://open.feishu.cn/document/ukTMukTMukTM/uUzN04SN3QjL1cDN)
+及对应 endpoint 文档为准。
 
 **关键业务错误码处理**：
 
@@ -384,9 +373,9 @@ INFO  - 批量操作完成: 500/500 条记录, 重试 2 次
 | `1254040` | FieldNotFound（字段不存在） | ❌ 不重试 |
 
 > 注意：上述错误码以 HTTP 200 返回，HTTP 层面的重试无法捕获。
-> 程序在 `BitableAPI._call_api_with_biz_retry()` 中实现应用层重试。
-> 未列入可重试集合的业务错误会立即抛出 `FeishuAPIError`，由查询调用方处理；
-> Bitable 的既有布尔写接口会记录错误并继续返回 `False`，不会盲目重试。
+> Bitable v1 在 `BitableV1Backend._call()` 中实现应用层重试。
+> 未列入可重试集合的业务错误会立即抛出 `FeishuAPIError`；mutation 结果通过 typed
+> receipt / `SyncResult` 传播，不通过旧布尔写 facade 吞掉错误。
 
 **按错误类型分工的两层重试架构**：
 
@@ -395,16 +384,14 @@ INFO  - 批量操作完成: 500/500 条记录, 重试 2 次
   频控策略（控制发送速率）
     → HTTP 请求
       → transport：网络异常、HTTP 429/5xx          [api/base.py]
-        → Bitable：仅 HTTP 200 的可恢复业务错误码   [api/bitable.py]
+        → Bitable v1：仅 HTTP 200 的可恢复业务错误码 [api/bitable_v1.py]
 ```
 
 - **标准模式**：固定间隔 + HTTP 重试 + 业务重试
 - **高级模式**：高级频控策略 + 高级重试策略 + 业务重试
 - 同一个 HTTP 失败只由 transport 重试，不会在 Bitable 层再次形成嵌套循环
 - standard/advanced transport 耗尽后都保留最终 response，或抛 typed transport error
-- 禁用高级控制会清除进程级 controller，避免后续普通 client 继承旧配置
-
-> 详细分析：`local/retry-mechanism-analysis.md`
+- 禁用高级控制时，当前 runtime 不创建 controller；不存在供后续 client 继承的进程全局状态
 
 **建议的频控配置**：
 
@@ -423,4 +410,4 @@ control:
 | 多维表格查询操作 | 20 次/秒 | `control.advanced.rate_limit.max_requests: 20` |
 | 多维表格写入操作 | 50 次/秒 | 按实例实际配额设置 |
 | 电子表格读写 | ~100 次/秒 | 按实例实际配额设置 |
-| 单次请求体积 | ≤ 10MB | 使用分块 + 二分重试 |
+| 单次请求体积 | 以服务端 endpoint 限制为准 | 使用分块 + 90227 有界拆分 |

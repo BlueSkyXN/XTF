@@ -16,9 +16,9 @@ from api.bitable_backend import (
     MutationReceipt,
     RecordReadResult,
 )
-from core.config import MatchStrategy, SourceType, SyncConfig, SyncMode, TargetType
+from core.config import MatchStrategy, SourceType, SyncMode, TargetType
 from core.converter import DataConverter
-from core.engine import XTFSyncEngine
+from core.service import SyncService
 from core.plan import (
     AppendRowsAction,
     ApplySheetConfigAction,
@@ -31,6 +31,7 @@ from core.plan import (
     WriteColumnsAction,
 )
 from core.key_policy import KeyPolicy
+from tests.conftest import attach_runtime, make_runtime_config
 
 
 def make_remote_engine(
@@ -38,24 +39,27 @@ def make_remote_engine(
     mode=SyncMode.FULL,
     granularity="exact",
     backend="base_v3",
+    verify_remote_writes=False,
 ):
-    engine = XTFSyncEngine.__new__(XTFSyncEngine)
-    engine.config = SyncConfig(
+    engine = SyncService.__new__(SyncService)
+    runtime = make_runtime_config(
+        TargetType.BITABLE,
         file_path=None,
         app_id="test_id",
         app_secret="test_secret",
-        target_type=TargetType.BITABLE,
-        source_type=SourceType.BITABLE,
+        source_type=SourceType.BITABLE.value,
         source_app_token="source_app",
         source_table_id="source_table",
         app_token="target_app",
         table_id="target_table",
         index_column="When",
-        sync_mode=mode,
+        sync_mode=mode.value,
         datetime_index_granularity=granularity,
         datetime_index_timezone=("Asia/Shanghai" if granularity == "day" else None),
         bitable_api_backend=backend,
+        verify_remote_writes=verify_remote_writes,
     )
+    attach_runtime(engine, runtime)
     engine.logger = Mock()
     engine.converter = DataConverter(
         TargetType.BITABLE,
@@ -68,19 +72,35 @@ def make_remote_engine(
     return engine
 
 
-def make_file_bitable_engine(mode):
-    engine = XTFSyncEngine.__new__(XTFSyncEngine)
-    engine.config = SyncConfig(
+def make_file_bitable_engine(
+    mode,
+    *,
+    backend="base_v3",
+    batch_size=500,
+    create_missing_fields=False,
+    verify_remote_writes=False,
+    match_strategy="by_key",
+    index_column="ID",
+):
+    engine = SyncService.__new__(SyncService)
+    if mode is SyncMode.CLONE:
+        match_strategy = None
+    runtime = make_runtime_config(
+        TargetType.BITABLE,
         file_path="test.xlsx",
         app_id="test_id",
         app_secret="test_secret",
-        target_type=TargetType.BITABLE,
         app_token="target_app",
         table_id="target_table",
-        index_column="ID",
-        sync_mode=mode,
-        create_missing_fields=False,
+        index_column=index_column,
+        sync_mode=mode.value,
+        match_strategy=match_strategy,
+        create_missing_fields=create_missing_fields,
+        bitable_api_backend=backend,
+        batch_size=batch_size,
+        verify_remote_writes=verify_remote_writes,
     )
+    attach_runtime(engine, runtime)
     engine.logger = Mock()
     engine.converter = DataConverter(TargetType.BITABLE)
     engine.api = Mock(spec=BitableBackend)
@@ -98,20 +118,36 @@ def make_file_bitable_engine(mode):
     return engine
 
 
-def make_file_sheet_engine(*, mode=SyncMode.INCREMENTAL, granularity="exact"):
-    engine = XTFSyncEngine.__new__(XTFSyncEngine)
-    engine.config = SyncConfig(
+def make_file_sheet_engine(
+    *,
+    mode=SyncMode.INCREMENTAL,
+    granularity="exact",
+    index_column="When",
+    match_strategy="by_key",
+    verify_remote_writes=False,
+    protect_formulas=False,
+    selective_sync=None,
+):
+    engine = SyncService.__new__(SyncService)
+    if mode is SyncMode.CLONE:
+        match_strategy = None
+    runtime = make_runtime_config(
+        TargetType.SHEET,
         file_path="test.xlsx",
         app_id="test_id",
         app_secret="test_secret",
-        target_type=TargetType.SHEET,
         spreadsheet_token="sheet_token",
         sheet_id="sheet",
-        index_column="When",
-        sync_mode=mode,
+        index_column=index_column,
+        sync_mode=mode.value,
+        match_strategy=match_strategy,
         datetime_index_granularity=granularity,
         datetime_index_timezone=("Asia/Shanghai" if granularity == "day" else None),
+        verify_remote_writes=verify_remote_writes,
+        sheet_protect_formulas=protect_formulas,
+        selective_sync=selective_sync,
     )
+    attach_runtime(engine, runtime)
     engine.logger = Mock()
     engine.converter = DataConverter(
         TargetType.SHEET,
@@ -279,7 +315,7 @@ def test_bitable_v1_schema_requires_raw_type_and_multiple_match():
     source = FieldSchema("a", "Value", FieldKind.TEXT, raw_type=1)
     target = FieldSchema("b", "Value", FieldKind.TEXT, raw_type=13)
 
-    assert not XTFSyncEngine._bitable_schemas_compatible(
+    assert not SyncService._bitable_schemas_compatible(
         source, target, BitableBackendKind.BITABLE_V1
     )
 
@@ -300,7 +336,7 @@ def test_base_v3_schema_requires_write_shape_properties_match():
         raw_properties={"ui_type": "Phone"},
     )
 
-    assert not XTFSyncEngine._bitable_schemas_compatible(
+    assert not SyncService._bitable_schemas_compatible(
         source, target, BitableBackendKind.BASE_V3
     )
 
@@ -434,6 +470,56 @@ def test_execute_plan_stops_after_created_field_schema_mismatch():
     assert engine._execute_action.call_count == 1
 
 
+def test_sequential_field_creates_advance_schema_precondition():
+    engine = make_file_bitable_engine(SyncMode.FULL)
+    initial = (FieldSchema("id", "ID", FieldKind.NUMBER, raw_type="number"),)
+    after_name = initial + (
+        FieldSchema("name", "Name", FieldKind.TEXT, raw_type="text"),
+    )
+    after_age = after_name + (
+        FieldSchema("age", "Age", FieldKind.TEXT, raw_type="text"),
+    )
+    precondition = SnapshotPrecondition(
+        "bitable_schema",
+        {"fingerprint": engine._schema_fingerprint(initial)},
+    )
+    actions = (
+        CreateFieldAction(
+            field_name="Name",
+            suggested_type=1,
+            scope={"target": "bitable", "field": "Name"},
+            precondition=precondition,
+        ),
+        CreateFieldAction(
+            field_name="Age",
+            suggested_type=1,
+            scope={"target": "bitable", "field": "Age"},
+            precondition=precondition,
+        ),
+    )
+    plan = ExecutionPlan(
+        requested_mode="full",
+        effective_mode="full",
+        source={"type": "file"},
+        target={"type": "bitable"},
+        actions=actions,
+    )
+    engine.api.list_fields.side_effect = [
+        initial,
+        after_name,
+        after_name,
+        after_age,
+        after_age,
+    ]
+    engine._execute_action = Mock(return_value=True)
+
+    outcome = engine.execute_plan(plan)
+
+    assert outcome.status is OutcomeStatus.SUCCESS
+    assert outcome.applied == tuple(action.to_public() for action in actions)
+    assert engine._execute_action.call_count == 2
+
+
 def test_execute_plan_keeps_auth_kind_when_created_field_refresh_is_denied():
     engine = make_remote_engine()
     create_field = CreateFieldAction(
@@ -493,8 +579,7 @@ def test_execute_plan_verifies_created_fields_even_without_record_actions():
 
 
 def test_bitable_readback_mismatch_is_verification_failure():
-    engine = make_file_bitable_engine(SyncMode.FULL)
-    engine.config.verify_remote_writes = True
+    engine = make_file_bitable_engine(SyncMode.FULL, verify_remote_writes=True)
     record = CanonicalRecord("record-1", {"Name": "updated"})
     action = UpdateRecordsAction(
         records=(record,),
@@ -542,8 +627,7 @@ def test_bitable_readback_mismatch_is_verification_failure():
 def test_bitable_batch_failure_retains_confirmed_action_prefix(
     failure_outcome, accepted_in_failure, expected_count, unknown, expected_status
 ):
-    engine = make_file_bitable_engine(SyncMode.INCREMENTAL)
-    engine.config.batch_size = 2
+    engine = make_file_bitable_engine(SyncMode.INCREMENTAL, batch_size=2)
     accepted = MutationReceipt(
         "create",
         BitableBackendKind.BASE_V3,
@@ -730,8 +814,7 @@ def test_base_revision_drift_stops_before_mutation():
 
 
 def test_bitable_v1_record_key_drift_stops_update_before_mutation():
-    engine = make_file_bitable_engine(SyncMode.FULL)
-    engine.config.bitable_api_backend = "bitable_v1"
+    engine = make_file_bitable_engine(SyncMode.FULL, backend="bitable_v1")
     planned_key = KeyPolicy().normalize(1, 2)
     assert planned_key is not None
     action = UpdateRecordsAction(
@@ -772,8 +855,7 @@ def test_bitable_v1_record_key_drift_stops_update_before_mutation():
 
 
 def test_bitable_v1_create_reconfirms_key_is_still_absent():
-    engine = make_file_bitable_engine(SyncMode.INCREMENTAL)
-    engine.config.bitable_api_backend = "bitable_v1"
+    engine = make_file_bitable_engine(SyncMode.INCREMENTAL, backend="bitable_v1")
     new_key = KeyPolicy().normalize(2, 2)
     assert new_key is not None
     action = CreateRecordsAction(
@@ -1052,8 +1134,7 @@ def test_execute_missing_resource_keeps_resource_kind():
 
 
 def test_apply_sheet_config_is_not_reported_as_verified_without_readback():
-    engine = make_file_sheet_engine()
-    engine.config.verify_remote_writes = True
+    engine = make_file_sheet_engine(verify_remote_writes=True)
     action = ApplySheetConfigAction(
         frame=pd.DataFrame({"When": ["2026-08-30"]}),
         scope={"target": "sheet"},
@@ -1224,8 +1305,7 @@ def test_generated_base_plan_carries_revision_and_key_preconditions():
 
 
 def test_file_bitable_planner_uses_predicted_new_index_without_remote_match_read():
-    engine = make_file_bitable_engine(SyncMode.FULL)
-    engine.config.create_missing_fields = True
+    engine = make_file_bitable_engine(SyncMode.FULL, create_missing_fields=True)
     name_field = FieldSchema("name", "Name", FieldKind.TEXT, raw_type="text")
     engine.api.list_fields.return_value = (name_field,)
 
@@ -1256,11 +1336,8 @@ def test_file_bitable_planner_rejects_missing_fields_when_creation_is_disabled()
 @pytest.mark.parametrize("granularity", ["minute", "", "EXACTLY"])
 def test_config_rejects_unknown_datetime_index_granularity(granularity):
     with pytest.raises(ValueError, match="仅支持 exact 或 day"):
-        SyncConfig(
-            file_path="test.xlsx",
-            app_id="test_id",
-            app_secret="test_secret",
-            target_type=TargetType.BITABLE,
+        make_runtime_config(
+            TargetType.BITABLE,
             app_token="app",
             table_id="table",
             datetime_index_granularity=granularity,
@@ -1268,53 +1345,21 @@ def test_config_rejects_unknown_datetime_index_granularity(granularity):
 
 
 def test_config_datetime_index_granularity_defaults_to_exact():
-    config = SyncConfig(
-        file_path="test.xlsx",
-        app_id="test_id",
-        app_secret="test_secret",
-        target_type=TargetType.BITABLE,
-        app_token="app",
-        table_id="table",
-    )
+    config = make_runtime_config(TargetType.BITABLE)
 
-    assert config.datetime_index_granularity == "exact"
+    assert config.sync.index.datetime_granularity == "exact"
 
 
 def test_sheet_full_without_index_is_rejected_before_remote_reads():
-    engine = XTFSyncEngine.__new__(XTFSyncEngine)
-    engine.config = SyncConfig(
-        file_path="test.xlsx",
-        app_id="test_id",
-        app_secret="test_secret",
-        target_type=TargetType.SHEET,
-        spreadsheet_token="sheet_token",
-        sheet_id="sheet",
-        sync_mode=SyncMode.FULL,
-        index_column=None,
-    )
-    engine.logger = Mock()
-    engine.converter = DataConverter(TargetType.SHEET)
-    engine.api = Mock()
-    engine._sheet_read_complete = True
     with pytest.raises(ValueError, match="by_key.*index_column"):
-        engine.plan(pd.DataFrame({"ID": [2]}))
-
-    engine.api.clear_values.assert_not_called()
-    engine.api.write_values.assert_not_called()
+        make_file_sheet_engine(mode=SyncMode.FULL, index_column=None)
 
 
 def test_incremental_append_only_bitable_creates_every_source_row_without_record_read():
-    engine = make_file_bitable_engine(SyncMode.INCREMENTAL)
-    engine.config = SyncConfig(
-        file_path="test.xlsx",
-        app_id="test_id",
-        app_secret="test_secret",
-        target_type=TargetType.BITABLE,
-        app_token="target_app",
-        table_id="target_table",
-        sync_mode=SyncMode.INCREMENTAL,
-        match_strategy=MatchStrategy.APPEND_ONLY,
-        create_missing_fields=False,
+    engine = make_file_bitable_engine(
+        SyncMode.INCREMENTAL,
+        match_strategy=MatchStrategy.APPEND_ONLY.value,
+        index_column=None,
     )
 
     plan = engine.plan(pd.DataFrame({"ID": [1, 1], "Name": ["A", "B"]}))
@@ -1326,16 +1371,10 @@ def test_incremental_append_only_bitable_creates_every_source_row_without_record
 
 
 def test_incremental_append_only_sheet_does_not_read_or_clear_target():
-    engine = make_file_sheet_engine(mode=SyncMode.INCREMENTAL)
-    engine.config = SyncConfig(
-        file_path="test.xlsx",
-        app_id="test_id",
-        app_secret="test_secret",
-        target_type=TargetType.SHEET,
-        spreadsheet_token="sheet_token",
-        sheet_id="sheet",
-        sync_mode=SyncMode.INCREMENTAL,
-        match_strategy=MatchStrategy.APPEND_ONLY,
+    engine = make_file_sheet_engine(
+        mode=SyncMode.INCREMENTAL,
+        match_strategy=MatchStrategy.APPEND_ONLY.value,
+        index_column=None,
     )
 
     plan = engine.plan(pd.DataFrame({"Name": ["A", "B"]}))
@@ -1393,21 +1432,7 @@ def test_empty_sheet_keeps_full_mode_instead_of_implicit_clone(monkeypatch):
 def test_file_sheet_planner_covers_modes_without_mutation(
     monkeypatch, mode, expected_kinds, expected_preconditions, destructive
 ):
-    engine = XTFSyncEngine.__new__(XTFSyncEngine)
-    engine.config = SyncConfig(
-        file_path="test.xlsx",
-        app_id="test_id",
-        app_secret="test_secret",
-        target_type=TargetType.SHEET,
-        spreadsheet_token="sheet_token",
-        sheet_id="sheet",
-        sync_mode=mode,
-        index_column="ID",
-    )
-    engine.logger = Mock()
-    engine.converter = DataConverter(TargetType.SHEET)
-    engine.api = Mock()
-    engine._sheet_read_complete = True
+    engine = make_file_sheet_engine(mode=mode, index_column="ID")
     current = pd.DataFrame({"ID": [1], "Name": ["old"]})
     monkeypatch.setattr(
         engine,
@@ -1433,10 +1458,18 @@ def test_file_sheet_planner_covers_modes_without_mutation(
 
 
 def test_generated_selective_sheet_actions_carry_mapping_preconditions(monkeypatch):
-    engine = make_file_sheet_engine(mode=SyncMode.FULL)
-    engine.config.index_column = "ID"
-    engine.config.selective_sync.enabled = True
-    engine.config.selective_sync.columns = ["Name"]
+    engine = make_file_sheet_engine(
+        mode=SyncMode.FULL,
+        index_column="ID",
+        selective_sync={
+            "enabled": True,
+            "columns": ["Name"],
+            "auto_include_index": True,
+            "optimize_ranges": True,
+            "max_gap_for_merge": 2,
+            "preserve_column_order": True,
+        },
+    )
     current = pd.DataFrame({"ID": [1], "Name": ["old"]})
     monkeypatch.setattr(
         engine,
@@ -1455,3 +1488,64 @@ def test_generated_selective_sheet_actions_carry_mapping_preconditions(monkeypat
         for action in plan.actions
     )
     assert "precondition" not in repr(plan.to_public().to_dict())
+
+
+@pytest.mark.parametrize("mode", [SyncMode.INCREMENTAL, SyncMode.OVERWRITE])
+def test_sheet_planner_rejects_incomplete_target_read_before_mutation(mode):
+    engine = make_file_sheet_engine(mode=mode)
+    engine.get_current_sheet_data = Mock(
+        return_value=pd.DataFrame({"When": ["2026-08-31"], "Name": ["old"]})
+    )
+    engine._sheet_read_complete = False
+
+    with pytest.raises(RuntimeError, match="读取不完整"):
+        engine.plan(pd.DataFrame({"When": ["2026-09-01"], "Name": ["new"]}))
+
+    engine.api.clear_values.assert_not_called()
+    engine.api.write_values.assert_not_called()
+    engine.api.append_values.assert_not_called()
+
+
+def test_sheet_formula_index_is_rejected_during_planning():
+    engine = make_file_sheet_engine(mode=SyncMode.FULL, protect_formulas=True)
+    current = pd.DataFrame({"When": ["2026-08-31"], "Name": ["old"]})
+    engine.get_sheet_data_with_validation = Mock(
+        return_value=(current, current, {"When"})
+    )
+
+    with pytest.raises(ValueError, match="索引列是公式列"):
+        engine.plan(pd.DataFrame({"When": ["2026-08-31"], "Name": ["new"]}))
+
+
+def test_sheet_formula_state_must_be_known_before_protected_plan():
+    engine = make_file_sheet_engine(mode=SyncMode.FULL, protect_formulas=True)
+    current = pd.DataFrame({"When": ["2026-08-31"], "Formula": ["10"]})
+    engine.get_sheet_data_with_validation = Mock(return_value=(current, None, None))
+
+    with pytest.raises(RuntimeError, match="无法确认远端公式列"):
+        engine.plan(pd.DataFrame({"When": ["2026-08-31"], "Formula": ["local"]}))
+
+
+def test_protected_formula_columns_never_enter_generated_mutation_payload():
+    engine = make_file_sheet_engine(mode=SyncMode.FULL, protect_formulas=True)
+    current = pd.DataFrame({"When": ["2026-08-31"], "Formula": ["10"], "Name": ["old"]})
+    formula = pd.DataFrame(
+        {"When": ["2026-08-31"], "Formula": ["=A2*10"], "Name": ["old"]}
+    )
+    engine.get_sheet_data_with_validation = Mock(
+        return_value=(current, formula, {"Formula"})
+    )
+
+    plan = engine.plan(
+        pd.DataFrame(
+            {
+                "When": ["2026-08-31", "2026-09-01"],
+                "Formula": ["local", "local"],
+                "Name": ["updated", "new"],
+            }
+        )
+    )
+
+    assert plan.actions
+    assert all(isinstance(action, WriteColumnsAction) for action in plan.actions)
+    assert all("Formula" not in action.column_data for action in plan.actions)

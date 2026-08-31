@@ -111,6 +111,7 @@ output:
 - `schema_version` 必须等于整数 `2`。
 - 未知顶层、section 或 leaf key 都会失败。
 - inactive source/target 分支可以省略；若提供非空且与 `type` 不匹配则失败。
+- CLI 显式传入与所选 source/target 无关的专用 flag 也会失败，不会静默忽略。
 - `source.type: bitable` 仅支持 `target.type: bitable`，并要求 source/target table 和索引列。
 - Bitable source 只允许 `full` / `incremental`，不允许 `overwrite` / `clone`。
 - `full` / `overwrite` 只允许 `by_key`；`incremental` 允许 `by_key` 或
@@ -260,9 +261,11 @@ Transport 负责网络异常与 HTTP `429/5xx`；Bitable 业务重试只处理 H
 ```bash
 python3 XTF.py sync -c config.yaml --dry-run
 python3 XTF.py sync -c config.yaml --dry-run --json
-python3 XTF.py sync -c config.yaml --mode clone --allow-delete
+python3 XTF.py sync -c config-clone.yaml --allow-delete
 ```
 
+`config-clone.yaml` 必须设置 `sync.mode: clone` 并省略 `sync.match_strategy`；保留的
+`sync.index` 不参与 clone 的 replace-all 计划。
 `--dry-run` 可以读取 Feishu 字段、记录和 Sheet metadata，但不会创建字段、写记录、清空范围、写单元格或设置样式/验证。它使用与正式执行相同的 planner；运行时初始化仍可能创建本地日志，这不属于 Feishu mutation。
 
 正式执行满足任一条件时必须有 `--allow-delete`：

@@ -15,7 +15,7 @@ XTF 是一个 flags-first 的数据同步 CLI，将本地 Excel/CSV 或另一张
 - **智能字段类型** — Raw / Base / Auto / Intelligence 四种策略，从保守到智能逐级增强
 - **选择性列同步** — 精确列级控制，只更新指定列，其他列完全不受影响
 - **公式保护** — `full` 模式双读检测云端公式，无法确认公式状态时停止写入
-- **三层上传保障** — 预分块 → 自动二分重试 → 智能频控，确保大数据稳定处理
+- **Typed 安全门禁** — 统一分块、mutation receipt、snapshot freshness 和可选写后读回
 - **高级频控** — 3 种重试策略 × 3 种频控策略，9 种组合灵活配置
 - **Excel 引擎回退** — 优先使用可用的 Calamine 引擎，必要时回退 OpenPyXL
 
@@ -73,10 +73,10 @@ python3 XTF.py sync \
   --app-id cli_xxx \
   --source-type file --file data.xlsx \
   --target-type bitable --target-app-token app_xxx --target-table-id tbl_xxx \
-  --mode full --index-column ID
+  --mode full --match-strategy by_key --index-column ID
 
-# destructive 模式必须显式授权删除
-python3 XTF.py sync --config config.yaml --mode clone --allow-delete
+# destructive 配置必须显式授权删除；clone 配置中须省略 match_strategy
+python3 XTF.py sync --config config-clone.yaml --allow-delete
 ```
 
 ### 推荐的安全操作顺序
@@ -102,28 +102,12 @@ python3 XTF.py sync --config config.yaml
 `--dry-run` 的“零写入”只指 Feishu mutation；运行时仍可能创建本地 `logs/` 文件。计划和
 JSON 结果不会包含完整 token、secret、记录正文或 mutation payload，但 dry-run 也不替代真实业务验收。
 
-### Python SDK
+### 公共契约边界
 
-需要在其他 Python 程序中复用 XTF 的 Feishu API 封装时，可通过兼容式统一入口共享
-认证、transport、错误、分页和批处理契约：
-
-```python
-from api import XTFFeishuClient
-
-client = XTFFeishuClient(app_id, app_secret)
-bitable = client.bitable()
-sheet = client.sheet()
-
-# 新 typed 后端必须显式选择；默认推荐 Base v3
-base = client.bitable_backend(backend="base_v3", user_id_type="open_id")
-
-```
-
-原有 `FeishuAuth`、`BitableAPI`、`SheetAPI` 的直接构造方式继续保留；统一入口不依赖
-`lark-cli` subprocess、MCP 或 Go SDK。主同步引擎默认使用原生 `base_v3` typed backend，
-可在 YAML 中显式切换为 `bitable_v1`，不会自动 fallback。`lite/` 仍是 legacy standalone，
-不包含本轮 typed backend 改造，也没有新增运行时依赖。同步模式和远端删除仍由 `core/engine.py`
-管理，不由 SDK facade 隐式执行。
+XTF 2.0 的稳定公共接口仅包括 CLI、YAML v2、JSON output 和退出码，不提供稳定 Python
+SDK。`core.*`、`api.*`、`SyncService` 和 typed client constructor 都是仓库内部实现，可以随
+内部架构演进而变化。需要自动化集成时使用 `XTF ... --json`；Bitable backend 可在 YAML
+中显式选择 `base_v3` 或 `bitable_v1`，不会自动 fallback。
 
 ## 同步模式
 
@@ -184,21 +168,27 @@ XTF/
 ├── XTF.py                    # 薄可执行入口
 ├── xtf_cli/                  # parser、config v2、命令、输出与退出码
 ├── core/
-│   ├── config.py             # 配置管理
+│   ├── config.py             # mode/source/target/strategy 枚举
+│   ├── runtime_config.py     # 嵌套、不可变运行时配置
 │   ├── plan.py               # ExecutionPlan / PlanDocument / SyncResult
-│   ├── engine.py             # planner + executor（四种模式、选择性同步、公式保护）
+│   ├── snapshot.py           # SourceTable / BitableSnapshot / SheetSnapshot
+│   ├── compiler.py           # Bitable / Sheet typed action compiler
+│   ├── bootstrap.py          # 显式装配 logger/controller/auth/transport/client
+│   ├── service.py            # 单一 planner + executor 主干
 │   ├── converter.py          # 数据转换（类型分析、转换、统计报告）
 │   └── control.py            # 高级控制（重试策略、频控策略）
 ├── api/
 │   ├── auth.py               # 飞书认证
 │   ├── base.py               # 基础 HTTP 客户端（重试、频控）
-│   ├── sdk.py                # 统一 SDK client、typed error、分页与批处理契约
-│   ├── bitable.py            # 多维表格 API
+│   ├── sdk.py                # typed error、分页与批处理契约
+│   ├── bitable_backend.py    # canonical Bitable contracts
+│   ├── bitable_v1.py         # Bitable v1 wire client
+│   ├── bitable_v3.py         # Base v3 wire client
 │   └── sheet.py              # 电子表格 API
 ├── utils/
 │   └── excel_reader.py       # Excel/CSV 读取器
-├── lite/                     # 旧版独立脚本
 ├── config.example.yaml       # 主程序 YAML schema v2 模板
+├── QUICKSTART.md             # 安装、运行和 1.9→2.0 人工迁移
 ├── requirements.txt          # 依赖
 ├── docs/                     # 详细文档
 └── logs/                     # 运行日志
@@ -208,6 +198,7 @@ XTF/
 
 | 文档 | 内容 |
 |------|------|
+| **[QUICKSTART.md](QUICKSTART.md)** | 快速开始与 1.9→2.0 人工迁移 |
 | **[docs/README.md](docs/README.md)** | 📚 文档中心，导航与快速入门 |
 | **[docs/ARCH.md](docs/ARCH.md)** | 系统架构，四层设计，组件交互 |
 | **[docs/CONFIG.md](docs/CONFIG.md)** | 配置参数完整参考，CLI 映射 |
@@ -215,6 +206,7 @@ XTF/
 | **[docs/FIELD_TYPES.md](docs/FIELD_TYPES.md)** | 字段类型策略，检测算法，转换规则 |
 | **[docs/SHEET.md](docs/SHEET.md)** | 电子表格算法，分块机制，公式保护 |
 | **[docs/CONTROL.md](docs/CONTROL.md)** | 高级重试与频控策略配置 |
+| **[docs/RELEASE_NOTES_2_0.md](docs/RELEASE_NOTES_2_0.md)** | 2.0 breaking changes 与发布门禁 |
 
 ## 常见问题
 

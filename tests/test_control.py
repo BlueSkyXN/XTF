@@ -5,7 +5,7 @@
 
 模块概述：
     此模块测试 core/control.py 中的重试和频控功能，包括各种
-    重试策略、频控策略、请求控制器以及全局控制器单例。
+    重试策略、频控策略和显式请求控制器。
 
 测试覆盖：
     重试配置测试（TestRetryConfig）：
@@ -48,11 +48,6 @@
         - 超过最大重试
         - 带频控执行
 
-    全局控制器测试（TestGlobalRequestController）：
-        - 单例模式验证
-        - 从配置创建（各种策略组合）
-        - 获取 API 客户端
-
     重试策略等待方法测试（TestRetryStrategyWait）：
         - 等待返回值
         - 最大等待时间遵守
@@ -60,7 +55,7 @@
 测试策略：
     - 使用实际时间测量验证延迟
     - 使用 mock 模拟异常场景
-    - 验证单例模式行为
+    - 验证显式 controller 行为
 
 依赖关系：
     测试目标：
@@ -92,7 +87,6 @@ from core.control import (
     FixedWindowRateConfig,
     FixedWindowRateLimit,
     RequestController,
-    GlobalRequestController,
 )
 
 
@@ -385,94 +379,6 @@ class TestRequestController:
 
         elapsed = time.time() - start_time
         assert elapsed >= 0.05  # 至少等待一次频控延迟
-
-
-class TestGlobalRequestController:
-    """全局请求控制器测试"""
-
-    def test_singleton_pattern(self):
-        """测试单例模式"""
-        controller1 = GlobalRequestController()
-        controller2 = GlobalRequestController()
-
-        assert controller1 is controller2
-
-    def test_create_from_config_exponential_backoff(self):
-        """测试从配置创建（指数退避）"""
-        controller = GlobalRequestController.create_from_config(
-            retry_type="exponential_backoff",
-            retry_config={"initial_delay": 1.0, "max_retries": 3, "multiplier": 2.0},
-            rate_limit_type="fixed_wait",
-            rate_limit_config={"delay": 0.1},
-        )
-
-        assert controller is not None
-        inner_controller = controller.get_controller()
-        assert inner_controller is not None
-        assert isinstance(inner_controller.retry_strategy, ExponentialBackoffRetry)
-
-    def test_create_from_config_linear_growth(self):
-        """测试从配置创建（线性增长）"""
-        controller = GlobalRequestController.create_from_config(
-            retry_type="linear_growth",
-            retry_config={"initial_delay": 0.5, "max_retries": 3, "increment": 0.5},
-            rate_limit_type="fixed_wait",
-            rate_limit_config={"delay": 0.1},
-        )
-
-        inner_controller = controller.get_controller()
-        assert isinstance(inner_controller.retry_strategy, LinearGrowthRetry)
-
-    def test_create_from_config_fixed_wait(self):
-        """测试从配置创建（固定等待）"""
-        controller = GlobalRequestController.create_from_config(
-            retry_type="fixed_wait",
-            retry_config={"initial_delay": 1.0, "max_retries": 3},
-            rate_limit_type="fixed_wait",
-            rate_limit_config={"delay": 0.1},
-        )
-
-        inner_controller = controller.get_controller()
-        assert isinstance(inner_controller.retry_strategy, FixedWaitRetry)
-
-    def test_create_from_config_sliding_window(self):
-        """测试从配置创建（滑动时间窗）"""
-        controller = GlobalRequestController.create_from_config(
-            retry_type="exponential_backoff",
-            retry_config={"initial_delay": 0.5, "max_retries": 3},
-            rate_limit_type="sliding_window",
-            rate_limit_config={"window_size": 1.0, "max_requests": 10},
-        )
-
-        inner_controller = controller.get_controller()
-        assert isinstance(inner_controller.rate_limit_strategy, SlidingWindowRateLimit)
-
-    def test_create_from_config_fixed_window(self):
-        """测试从配置创建（固定时间窗）"""
-        controller = GlobalRequestController.create_from_config(
-            retry_type="exponential_backoff",
-            retry_config={"initial_delay": 0.5, "max_retries": 3},
-            rate_limit_type="fixed_window",
-            rate_limit_config={"window_size": 1.0, "max_requests": 10},
-        )
-
-        inner_controller = controller.get_controller()
-        assert isinstance(inner_controller.rate_limit_strategy, FixedWindowRateLimit)
-
-    def test_get_api_client(self):
-        """测试获取 API 客户端"""
-        controller = GlobalRequestController.create_from_config()
-        client = controller.get_api_client()
-
-        assert client is not None
-        assert client.controller is not None
-
-    def test_clear_removes_configured_controller(self):
-        controller = GlobalRequestController.create_from_config()
-
-        controller.clear()
-
-        assert controller.get_controller() is None
 
 
 class TestRetryStrategyWait:

@@ -10,7 +10,7 @@
 主要功能：
     1. 接口调用频率限制（防止触发 API 限流）
     2. 自动重试机制（处理临时性错误）
-    3. 支持新的统一控制系统（可选）
+    3. 支持显式注入的高级控制器（可选）
     4. 指数退避策略（应对服务器繁忙）
 
 核心类：
@@ -32,9 +32,8 @@
     以此类推...
 
 与高级控制系统的集成：
-    当配置了全局控制器时（enable_advanced_control=true），
-    RetryableAPIClient 会使用 core.control 中定义的高级策略，
-    否则使用传统的重试和频控机制（向后兼容）。
+    bootstrap 可以显式注入 RequestController；未注入时使用 transport
+    自身的固定间隔和重试机制。api 模块不读取进程全局 controller。
 
 使用示例：
     # 基本使用
@@ -57,11 +56,9 @@
     RetryableAPIClient:
         - max_retries (int): 最大重试次数，默认 3
         - rate_limiter (RateLimiter): 频率限制器实例
-        - use_global_controller (bool): 是否使用全局控制器，默认 True
+        - controller: 显式注入的高级请求控制器
 
 依赖关系：
-    内部模块：
-        - core.control: 全局控制器（可选依赖）
     外部依赖：
         - requests: HTTP 请求库
         - time: 时间控制
@@ -71,7 +68,7 @@
     1. 所有请求默认超时时间为 60 秒
     2. 重试只针对可恢复的错误（429、5xx、网络异常）
     3. 4xx 错误（除429外）不会触发重试
-    4. 全局控制器导入失败时会自动回退到传统模式
+    4. 无幂等保护的 mutation 必须禁用 transport replay
 
 作者: XTF Team
 版本: 1.7.3+
@@ -111,13 +108,12 @@ class RateLimiter:
 
 
 class RetryableAPIClient:
-    """可重试的API客户端，支持新的统一控制系统"""
+    """可重试的 API transport，支持显式注入的请求控制器。"""
 
     def __init__(
         self,
         max_retries: int = 3,
         rate_limiter: Optional[RateLimiter] = None,
-        use_global_controller: bool = False,
         jitter_ratio: float = 0.1,
         controller: Optional[Any] = None,
     ):
@@ -127,13 +123,10 @@ class RetryableAPIClient:
         Args:
             max_retries: 最大重试次数
             rate_limiter: 频率限制器实例（传统模式）
-            use_global_controller: 是否使用全局统一控制器
+            controller: 显式注入的高级请求控制器
         """
         self.max_retries = max_retries
         self.rate_limiter = rate_limiter or RateLimiter()
-        if use_global_controller and controller is None:
-            raise ValueError("controller must be injected explicitly")
-        self.use_global_controller = controller is not None
         self.jitter_ratio = max(0.0, jitter_ratio)
         self.logger = logging.getLogger("XTF.base")
 
@@ -166,8 +159,7 @@ class RetryableAPIClient:
         if not retry_transport:
             return self._call_api_once(method, url, **kwargs)
 
-        # 如果配置了全局控制器并且可用，使用新的统一控制系统
-        if self.use_global_controller and self._controller:
+        if self._controller is not None:
             last_response = None
             last_failure_had_response = False
 
@@ -213,14 +205,14 @@ class RetryableAPIClient:
 
                 raise FeishuAPIError.from_transport(str(exc), cause=exc) from exc
 
-        # 否则使用传统的重试和频控机制（向后兼容）
+        # 未注入 controller 时使用 transport 自身的重试和频控机制。
         return self._call_api_legacy(method, url, **kwargs)
 
     def _call_api_once(self, method: str, url: str, **kwargs) -> requests.Response:
         """Send once for mutations whose outcome cannot be replayed safely."""
         request_started = False
         try:
-            if self.use_global_controller and self._controller:
+            if self._controller is not None:
                 rate_limit_strategy = getattr(
                     self._controller, "rate_limit_strategy", None
                 )

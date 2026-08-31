@@ -10,9 +10,10 @@ import logging
 import sys
 from collections.abc import Mapping, Sequence
 from contextlib import redirect_stdout
+from dataclasses import fields, is_dataclass
 from pathlib import Path
 from time import perf_counter
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from .config import (
     ResolvedConfig,
@@ -51,13 +52,26 @@ class Reporter:
 
     def add_sensitive_config(self, config: Any) -> None:
         """Register configured secrets and resource tokens for output redaction."""
-        for name, value in vars(config).items():
+
+        def visit(value: Any, path: str = "") -> None:
+            if is_dataclass(value) and not isinstance(value, type):
+                for item in fields(value):
+                    child_path = f"{path}.{item.name}" if path else item.name
+                    visit(getattr(value, item.name), child_path)
+                return
+            if isinstance(value, Mapping):
+                for name, item in value.items():
+                    child_path = f"{path}.{name}" if path else str(name)
+                    visit(item, child_path)
+                return
             if (
                 isinstance(value, str)
                 and value
-                and any(marker in name.lower() for marker in ("secret", "token"))
+                and any(marker in path.lower() for marker in ("secret", "token"))
             ):
                 self._sensitive_values.add(value)
+
+        visit(config)
 
     def redact(self, value: str) -> str:
         redacted = value
@@ -245,16 +259,16 @@ def _plan_is_destructive(plan: ExecutionPlan | Mapping[str, Any]) -> bool:
 
 def _load_dataframe(resolved: ResolvedConfig) -> Any:
     config = resolved.config
-    source_type = getattr(config.source_type, "value", config.source_type)
+    source_type = config.source.type.value
     if source_type == "bitable":
         return None
-    if not config.file_path:
+    if not config.source.file_path:
         raise CLIError(
             "XTF_E_INPUT_REQUIRED",
             "source.type=file requires source.file.path or --file",
             EXIT_INPUT,
         )
-    path = Path(config.file_path)
+    path = Path(config.source.file_path)
     if not path.is_file():
         raise CLIError(
             "XTF_E_INPUT_NOT_FOUND", f"input file not found: {path}", EXIT_INPUT
@@ -268,8 +282,11 @@ def _load_dataframe(resolved: ResolvedConfig) -> Any:
             EXIT_INPUT,
         )
     kwargs: dict[str, Any] = {}
-    if config.excel_sheet_name is not None and path.suffix.lower() in {".xlsx", ".xls"}:
-        kwargs["sheet_name"] = config.excel_sheet_name
+    if config.source.excel_sheet_name is not None and path.suffix.lower() in {
+        ".xlsx",
+        ".xls",
+    }:
+        kwargs["sheet_name"] = config.source.excel_sheet_name
     try:
         return DataFileReader().read_file(path, **kwargs)
     except FileNotFoundError as exc:
@@ -286,21 +303,21 @@ def _sync(
     dataframe = _load_dataframe(resolved)
     reporter.info("Planning synchronization...")
 
-    from core.engine import XTFSyncEngine
+    from core.service import SyncService
 
-    engine = XTFSyncEngine(resolved.config)
+    service = SyncService(resolved.config)
     if reporter.quiet:
         for handler in logging.getLogger("XTF").handlers:
             if isinstance(handler, logging.StreamHandler) and not isinstance(
                 handler, logging.FileHandler
             ):
                 handler.setLevel(logging.WARNING)
-    plan_method = getattr(engine, "plan", None)
-    execute_method = getattr(engine, "execute_plan", None)
+    plan_method = getattr(service, "plan", None)
+    execute_method = getattr(service, "execute_plan", None)
     if not callable(plan_method) or not callable(execute_method):
         raise CLIError(
             "XTF_E_CORE_PLAN_UNAVAILABLE",
-            "core planner interface is unavailable; expected XTFSyncEngine.plan/execute_plan",
+            "core planner interface is unavailable; expected SyncService.plan/execute_plan",
             EXIT_RUNTIME,
         )
     try:
@@ -340,7 +357,7 @@ def _sync(
             f"Dry-run plan created; nothing executed. Config: {config_label}.",
         )
 
-    mode = getattr(resolved.config.sync_mode, "value", resolved.config.sync_mode)
+    mode = resolved.config.sync.mode.value
     if (
         mode in {"overwrite", "clone"} or _plan_is_destructive(plan)
     ) and not args.allow_delete:
@@ -529,11 +546,9 @@ def _doctor_local(
                 "detail": str(path) if path else "flags",
             }
         )
-        source_type = getattr(
-            resolved.config.source_type, "value", resolved.config.source_type
-        )
+        source_type = resolved.config.source.type.value
         if source_type == "file":
-            input_path = Path(resolved.config.file_path or "")
+            input_path = Path(resolved.config.source.file_path or "")
             input_exists = input_path.is_file()
             checks.append(
                 {"name": "input", "ok": input_exists, "detail": str(input_path)}
@@ -561,51 +576,40 @@ def _doctor_local(
 
 def _doctor_network(resolved: ResolvedConfig) -> list[dict[str, Any]]:
     config = resolved.config
-    from api import XTFFeishuClient
+    from api import BitableBackend, SheetAPI
+    from core.bootstrap import bootstrap_runtime
+    from core.runtime_config import RuntimeBitableTarget, RuntimeSheetTarget
 
-    client = XTFFeishuClient(
-        config.app_id,
-        config.app_secret,
-        max_retries=config.max_retries,
-        rate_limit_delay=config.rate_limit_delay,
-    )
+    dependencies = bootstrap_runtime(config)
     checks: list[dict[str, Any]] = []
-    target_type = getattr(config.target_type, "value", config.target_type)
+    target_type = config.target.type.value
     if target_type == "bitable":
-        backend = client.bitable_backend(
-            backend=config.bitable_api_backend,
-            user_id_type=config.bitable_user_id_type,
-        )
-        target_fields = backend.list_fields(
-            config.app_token or "", config.table_id or ""
-        )
+        target = config.target
+        assert isinstance(target, RuntimeBitableTarget)
+        backend = cast(BitableBackend, dependencies.target)
+        target_fields = backend.list_fields(target.app_token, target.table_id)
         checks.append(
             {"name": "target_fields", "ok": True, "detail": len(target_fields)}
         )
-        source_type = getattr(config.source_type, "value", config.source_type)
+        source_type = config.source.type.value
         if source_type == "bitable":
             source_fields = backend.list_fields(
-                config.source_app_token or "", config.source_table_id or ""
+                config.source.app_token or "", config.source.table_id or ""
             )
             checks.append(
                 {"name": "source_fields", "ok": True, "detail": len(source_fields)}
             )
     else:
-        sheet = client.sheet(
-            start_row=config.start_row,
-            start_column=config.start_column,
-            scan_max_rows=config.sheet_scan_max_rows,
-            scan_max_cols=config.sheet_scan_max_cols,
-            write_max_rows=config.sheet_write_max_rows,
-            write_max_cols=config.sheet_write_max_cols,
-        )
-        metadata = sheet.query_sheets(config.spreadsheet_token or "")
-        found = any(item.sheet_id == config.sheet_id for item in metadata)
+        target = config.target
+        assert isinstance(target, RuntimeSheetTarget)
+        sheet = cast(SheetAPI, dependencies.target)
+        metadata = sheet.query_sheets(target.spreadsheet_token)
+        found = any(item.sheet_id == target.sheet_id for item in metadata)
         if not found:
             raise CLIError(
                 "XTF_E_REMOTE_RESOURCE_NOT_FOUND",
-                f"sheet_id not found in spreadsheet metadata: {config.sheet_id}",
-                EXIT_AUTH,
+                f"sheet_id not found in spreadsheet metadata: {target.sheet_id}",
+                EXIT_REMOTE,
             )
         checks.append({"name": "sheet_metadata", "ok": True, "detail": len(metadata)})
     return checks
@@ -641,20 +645,12 @@ def _doctor(
                 str(resolved.path) if resolved is not None and resolved.path else None
             ),
             "source": (
-                {"type": getattr(config.source_type, "value", config.source_type)}
-                if config is not None
-                else None
+                {"type": config.source.type.value} if config is not None else None
             ),
             "target": (
-                {"type": getattr(config.target_type, "value", config.target_type)}
-                if config is not None
-                else None
+                {"type": config.target.type.value} if config is not None else None
             ),
-            "requested_mode": (
-                getattr(config.sync_mode, "value", config.sync_mode)
-                if config is not None
-                else None
-            ),
+            "requested_mode": (config.sync.mode.value if config is not None else None),
             "effective_mode": None,
         },
         (

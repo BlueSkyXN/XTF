@@ -20,7 +20,7 @@ Key files: `utils/excel_reader.py`, `core/reader.py`, and `tests/test_reader.py`
 
 ## Do not
 
-- Do not import `api/`, `core/engine.py`, or remote sync clients into utility helpers.
+- Do not import `api/`, `core/service.py`, or remote sync clients into utility helpers.
 - Do not silently fall back in ways that hide unsupported formats, corrupted inputs, or missing optional engines.
 
 ## Validation

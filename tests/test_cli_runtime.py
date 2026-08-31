@@ -111,7 +111,7 @@ def install_fake_engine(
             assert value is selected_plan
             return outcome or FakeOutcome()
 
-    monkeypatch.setattr("core.engine.XTFSyncEngine", FakeEngine)
+    monkeypatch.setattr("core.service.SyncService", FakeEngine)
     return calls
 
 
@@ -315,11 +315,10 @@ def test_core_stdout_is_diagnostic_stderr_not_final_stdout(monkeypatch, capsys):
 def test_doctor_offline_does_not_construct_sdk(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
 
-    class ForbiddenSDK:
-        def __init__(self, *args, **kwargs):
-            raise AssertionError("offline doctor must not construct SDK")
+    def forbidden_bootstrap(*args, **kwargs):
+        raise AssertionError("offline doctor must not bootstrap network clients")
 
-    monkeypatch.setattr("api.XTFFeishuClient", ForbiddenSDK)
+    monkeypatch.setattr("core.bootstrap.bootstrap_runtime", forbidden_bootstrap)
     assert main(["doctor", "--json"]) == 0
     captured = capsys.readouterr()
     payload = json.loads(captured.out)

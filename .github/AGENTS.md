@@ -2,13 +2,13 @@
 
 `.github/` contains workflows for quality gates, coverage, PyInstaller builds, bundles, and releases.
 Read this card before changing workflow commands, Python or OS matrices, artifact names, release assets, package contents, retention, or secrets usage.
-Key files: `workflows/test.yml` and `workflows/multi-platform-build.yml`.
+Key files: `workflows/test.yml`, `workflows/multi-platform-build.yml`, and the manual-only `workflows/build-1.9-rollback.yml`.
 
 ## Why this is high-risk
 
 - Workflow commands are the source for the root validation contract.
 - Test matrices define Python/OS compatibility; build matrices define distributed binary platforms.
-- Builds package `config.example.yaml` as `config.yaml`; template changes affect distributed defaults.
+- XTF 2.0 builds ship `config.example.yaml` under that exact name; a real `config.yaml` must only come from `XTF config init`.
 - Release jobs upload public artifacts and use repository secrets.
 
 ## Required before changes
@@ -16,8 +16,9 @@ Key files: `workflows/test.yml` and `workflows/multi-platform-build.yml`.
 - Read the target workflow and compare invoked commands with root `AGENTS.md`.
 - Check whether command changes require dependency updates in `requirements.txt` or `requirements-dev.txt`.
 - Preserve Ruff `0.15.13` unless a repo-wide lint migration is explicitly in scope.
-- For build changes, verify all three entrypoints are still handled: `XTF.py`, `lite/XTF_Sheet.py`, and `lite/XTF_Bitable.py`.
-- For artifact changes, trace individual program ZIPs, per-platform `ALL-XTF-*` bundles, and `FULL-XTF-*` release bundle names.
+- Preserve the build-only `PyInstaller==6.19.0` and `setuptools<82` pins until a separately validated packaging-tool upgrade; setuptools 82 removes the `pkg_resources` API expected by this PyInstaller runtime hook.
+- Before the 1.9 rollback archive gate, keep the transitional legacy jobs usable. After that separately authorized gate, remove them and verify the single `XTF.py` matrix only.
+- For XTF 2.0 artifact changes, trace the per-platform `XTF` ZIP, packaged docs/template/checksum, smoke commands, and any release bundle that consumes it.
 
 ## Do not
 

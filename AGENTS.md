@@ -2,7 +2,7 @@
 
 ## Purpose
 
-XTF is a Python 3.10+ CLI tool that syncs local Excel or CSV data to Feishu Bitable or Feishu Sheet. The repository contains the unified CLI entrypoint, sync engine, reusable Feishu SDK facade and API wrappers, file-reading helpers, pytest suite, documentation, legacy compatibility scripts, and GitHub Actions build workflows.
+XTF is a Python 3.10+ CLI tool that syncs local Excel or CSV data to Feishu Bitable or Feishu Sheet. XTF 2.0 exposes one CLI, strict YAML v2, JSON/exit-code contracts, one typed sync service, internal Feishu clients, file-reading helpers, pytest coverage, documentation, and GitHub Actions workflows. It does not provide a stable Python SDK.
 
 ## Codex startup behavior
 
@@ -18,18 +18,18 @@ XTF is a Python 3.10+ CLI tool that syncs local Excel or CSV data to Feishu Bita
 | --- | --- | --- | --- |
 | `XTF.py` | Thin executable entrypoint that delegates to the XTF 2.0 CLI and exits with its status code. | No | Change the source/PyInstaller entrypoint or process-exit behavior. |
 | `xtf_cli/` | XTF 2.0 command parser, strict config-v2 resolver, command dispatch, output rendering, diagnostics, and version source. | No | Change subcommands, flags, config precedence/discovery, JSON/human output, exit codes, doctor behavior, or CLI versioning. |
-| `core/` | Configuration model, sync engine, field conversion, reader facade, retry/rate-limit strategies, destructive sync behavior, selective sync, Sheet formula protection. | Yes | Change config priority, defaults, validation, sync modes, batching, conversion strategies, selective sync, formula protection, retry, rate limiting, or cross-target engine behavior. |
-| `api/` | Public Feishu SDK facade, typed response/error contracts, auth, transport, pagination/batching helpers, and Bitable/Sheet wrappers. | Yes | Change public exports or constructor compatibility, token handling, typed errors, retry ownership, page tokens, batch failure semantics, Bitable operations, or Sheet ranges/chunks/styles. |
+| `core/` | Immutable runtime config, typed sync service, plans/results, snapshots, reconciliation, target compilers, conversion, retry/rate-limit strategies, and destructive-mode safety. | Yes | Change config semantics, sync modes, plans/results, snapshots, batching, conversion, selective sync, formula protection, retry, rate limiting, or cross-target behavior. |
+| `api/` | Internal typed Feishu contracts, auth, transport, pagination/batching helpers, versioned Bitable backends, and Sheet client. | Yes | Change internal exports, token handling, typed errors, retry ownership, page tokens, batch failure semantics, Bitable operations, or Sheet ranges/chunks/styles. |
 | `utils/` | Side-effect-light helpers, currently Excel engine detection and smart Excel read support. | Yes | Change optional Excel engines, engine fallback, supported formats, import boundaries, helper side effects, or read error behavior. |
-| `tests/` | Pytest suite for config, sync behavior, SDK/API contracts, readers, conversion, retries, and rate limiting. | Yes | Add/change tests, fixtures, mocks, markers, coverage scope, CI assumptions, fake credentials, or test timing. |
+| `tests/` | Pytest suite for v2 config/runtime, sync behavior, typed API contracts, readers, conversion, retries, and rate limiting. | Yes | Add/change tests, fixtures, mocks, markers, coverage scope, CI assumptions, fake credentials, or test timing. |
 | `docs/` | User/developer documentation for architecture, config, sync modes, field strategies, Sheet behavior, and control strategies. | Yes | Edit docs, examples, config references, CLI commands, Feishu OpenAPI claims, destructive-mode warnings, or package defaults wording. |
 | `docs/feishu-openapi-doc/` | Git submodule containing external Feishu OpenAPI reference material. | Covered by `docs/AGENTS.md` | Reading API reference is fine. Do not edit as normal repo documentation unless the user explicitly asks to update the submodule/reference. |
-| `lite/` | Legacy standalone scripts and compatibility release entrypoints. | Yes | Change `XTF_Bitable.py`, `XTF_Sheet.py`, legacy CLI behavior, legacy config compatibility, or legacy artifact names. |
+| `lite/` | Temporarily retained XTF 1.9 rollback material; not an XTF 2.0 product surface. Delete only after the 1.9 four-platform rollback package gate is satisfied. | Yes | Inspect rollback inputs or perform the separately authorized cutover deletion. Do not add XTF 2.0 behavior here. |
 | `.github/` | GitHub Actions quality gates, coverage upload, multi-platform PyInstaller builds, bundles, and release assets. | Yes | Change workflow commands, Python/OS matrix, build entrypoints, artifact names, release upload behavior, secrets, or retention. |
 | `.codex/` | Local agent/tooling metadata. | No | Avoid unless the user explicitly asks for local Codex configuration changes. |
 | `logs/` | Runtime log output. | No | Generated output; do not edit, commit, or use as stable test fixtures. |
 | `htmlcov/`, `.coverage`, `.pytest_cache/`, `.ruff_cache/`, `__pycache__/`, `build/`, `dist/`, `artifacts/` | Coverage, cache, build, and packaging output. | No | Generated output; ignore for implementation and commits. |
-| `config.example.yaml` | Strict nested XTF 2.0 configuration template and packaged main-program config source. | No | Change only with aligned resolver/docs/tests; CI packages it as `config.yaml` for the main XTF artifact. |
+| `config.example.yaml` | Strict nested XTF 2.0 configuration template shipped under the same name. | No | Change only with aligned resolver/docs/tests; a real `config.yaml` is created only by `XTF config init`. |
 | `config.yaml` | Local real config, gitignored. | No | Use only for explicit local manual runs. Never commit or quote real credentials. |
 | `requirements.txt` | Runtime dependency list for the CLI and CI builds. | No | Change runtime dependencies or minimum versions. Keep workflows and docs aligned. |
 | `requirements-dev.txt` | Test/dev dependency list for pytest coverage and mocks. | No | Change pytest, coverage, mock, lint, or typecheck dependency assumptions. |
@@ -51,8 +51,8 @@ cat .github/AGENTS.md
 
 Then read the target module and the smallest related tests, docs, or workflows. Examples:
 
-- `api/sdk.py` or `api/sheet.py` contract changes: read `api/AGENTS.md`, public exports in `api/__init__.py`, relevant `core/engine.py` call sites, and focused API/engine tests and docs.
-- Config defaults or keys: read `core/AGENTS.md`, `core/config.py`, `config.example.yaml`, related docs, and tests in `tests/test_config.py`.
+- `api/sdk.py` or `api/sheet.py` contract changes: read `api/AGENTS.md`, internal exports in `api/__init__.py`, relevant `core/service.py` call sites, and focused API/service tests and docs.
+- Config defaults or keys: read `core/AGENTS.md`, `core/runtime_config.py`, `xtf_cli/config.py`, `config.example.yaml`, related docs, and `tests/test_cli_config.py` plus `tests/test_runtime_core.py`.
 - Workflow command changes: read `.github/AGENTS.md`, the target workflow, root command guidance here, and dependency files.
 
 ## Commands
@@ -78,8 +78,10 @@ If the local machine lacks `python`, run the same module command with `python3` 
 ## CI and build notes
 
 - `.github/workflows/test.yml` pins Ruff `0.15.13`, runs Ruff, Black check, MyPy, and `py_compile` across `core/`, `api/`, `utils/`, and `xtf_cli/` on Python 3.11, then runs pytest with matching coverage on Ubuntu 22.04/Python 3.10-3.13, Ubuntu 24.04/Python 3.11-3.13, Windows/Python 3.10-3.12, and macOS ARM/Python 3.11-3.13.
-- `.github/workflows/multi-platform-build.yml` installs PyInstaller in CI and builds three entrypoints: `XTF.py`, `lite/XTF_Sheet.py` as `XTF-Sheet`, and `lite/XTF_Bitable.py` as `XTF-Bitable`.
-- The main artifact packages `config.example.yaml` as `config.yaml`; legacy artifacts package the target-specific `lite/config.sheet.example.yaml` or `lite/config.bitable.example.yaml`. Changes to any template are release-visible.
+- The target XTF 2.0 workflow builds only `XTF.py` for Linux x64/ARM64, Windows x64, and macOS ARM64. Until the separately authorized 1.9 rollback gate completes, transitional legacy jobs may remain in the workflow but do not define the 2.0 product contract.
+- The XTF 2.0 artifact ships `config.example.yaml`, `README.md`, `QUICKSTART.md`, and `checksums.txt`; it must not contain an auto-discoverable real `config.yaml`.
+- Build jobs pin `PyInstaller==6.19.0` with `setuptools<82`; change that pair only with a binary startup smoke because setuptools 82 removes the `pkg_resources` API used by this PyInstaller runtime hook.
+- `.github/workflows/build-1.9-rollback.yml` is manual-only and checks out exact commit `a22ac8119d33625cbcadbfb18cc2a36538f69b7e`; dispatching it is an external GitHub write that requires separate authorization.
 - Complete PyInstaller builds, platform bundles, release bundles, and release uploads require GitHub Actions. Do not treat them as default local validation.
 
 ## Architecture boundaries
@@ -87,18 +89,18 @@ If the local machine lacks `python`, run the same module command with `python3` 
 - `XTF.py` is a thin executable wrapper. Keep parsing, configuration resolution, command dispatch, rendering, and exit-code mapping in `xtf_cli/`.
 - `core/` owns sync planning and execution. A dry-run may perform remote reads but must never execute field, record, range, style, or validation mutations.
 - `core/` owns configuration semantics and sync behavior. It may call `api/` through explicit clients but must not embed raw Feishu HTTP request details.
-- `api/` owns the public SDK facade, typed Feishu responses/errors, auth headers, HTTP retry behavior, pagination, batch operations, and Sheet range/style/validation API calls. Preserve existing direct `FeishuAuth`/`BitableAPI`/`SheetAPI` construction and `api.__all__` unless a deliberate compatibility change is requested.
+- `api/` owns internal typed Feishu responses/errors, auth headers, HTTP retry behavior, pagination, batch operations, and Sheet range/style/validation calls. These constructors and `api.__all__` are repository-internal contracts, not a stable Python SDK.
 - `utils/` must stay reusable and side-effect-light. It must not import remote sync clients or trigger network behavior.
 - `tests/` validates behavior with pytest and mocks. Unit tests must not require real Feishu APIs, network, local `config.yaml`, runtime logs, or test execution order.
 - `docs/` must describe behavior implemented in code or verified from Feishu OpenAPI reference material.
-- `lite/` is compatibility code. Mainline improvements should not be introduced only in legacy scripts unless the change is explicitly legacy-only.
+- `lite/` is frozen rollback material pending the 1.9 archive gate. Do not port mainline improvements into it.
 - `.github/` is the source of CI command truth. If workflow commands change, update this root router.
 
 ## Global rules
 
 - Configuration is flags-first. `app_secret` priority is CLI > `XTF_APP_SECRET` > YAML; every other value uses CLI > YAML > target-specific defaults. An unqualified command may discover `./config.yaml`, but an explicit missing `--config` path must fail.
 - Treat the XTF 2.0 command/config/output contract as public: main-program examples must use `python XTF.py <subcommand>`, never the removed root-level flat invocation. `sync` owns sync flags; `config init` is the only command that creates a main-program configuration.
-- Main-program user docs and templates use nested YAML v2 paths such as `sync.selective`; flat names such as `selective_sync` and `sheet_protect_formulas` are internal `SyncConfig` attributes and must be labelled as such when they appear in developer documentation. `lite/` remains a separately documented legacy surface with its own flat templates.
+- Main-program user docs and templates use nested YAML v2 paths such as `sync.selective`; flattened resolver names are internal details and must not be presented as supported YAML. Temporarily retained `lite/` files are rollback inputs, not a documented 2.0 surface.
 - Describe `--dry-run` precisely: it performs zero Feishu mutations, but normal runtime initialization can create local logs. A local check or GitHub Actions build proves code/build contracts only, not a remote synchronization, Release, deployment, or business UAT.
 - When a change affects CLI flags, v2 schema/defaults, plan/outcome serialization, or destructive behavior, keep `config.example.yaml`, `README.md`, `docs/CONFIG.md`, `docs/SYNC.md`, relevant architecture docs, parser/config tests, and packaging assumptions aligned as applicable.
 - Supported targets are `bitable` and `sheet`; shared changes must consider both unless the code path is target-specific by construction.
@@ -129,7 +131,7 @@ If the local machine lacks `python`, run the same module command with `python3` 
 - Do not edit `docs/feishu-openapi-doc/` as normal documentation; it is an external submodule reference.
 - Do not weaken validation, lint, typecheck, test workflow settings, matrix coverage, or release artifact coverage without explaining the impact and updating the router/cards.
 - Do not move raw Feishu API details into `core/` or sync orchestration into `api/`.
-- Do not silently break public imports, typed error metadata, direct client construction, pagination completeness, or partial-batch failure reporting.
+- Do not silently break CLI/YAML/JSON/exit-code contracts, typed error metadata, pagination completeness, or partial-batch failure reporting. Python imports and direct typed-client construction are internal and may change with aligned callers/tests.
 - Do not create unit tests that require network, real Feishu state, real credentials, local logs, or test execution order.
 - Do not run manual sync commands against `config.yaml` unless the user explicitly asks for a real local run and accepts remote write/delete risk.
 - Do not publish releases, upload release assets, or alter GitHub secrets from a local session.

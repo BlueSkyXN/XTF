@@ -4,6 +4,10 @@
 
 ## 📚 核心文档
 
+### [../QUICKSTART.md](../QUICKSTART.md) — 快速开始与迁移
+
+单一 XTF 入口、YAML v2 初始化、dry-run、删除授权、JSON 自动化，以及 1.9 到 2.0 的人工迁移映射。
+
 ### [ARCH.md](./ARCH.md) — 系统架构文档 ⭐
 
 XTF 的整体架构设计、核心组件交互、数据处理流水线与扩展机制。
@@ -60,6 +64,10 @@ XTF 的整体架构设计、核心组件交互、数据处理流水线与扩展�
 4. 预置配置方案（保守 / 渐进 / 激进 / 调试）
 5. 参数调优与性能监控
 
+### [RELEASE_NOTES_2_0.md](./RELEASE_NOTES_2_0.md) — 2.0 变更与发布门禁
+
+Breaking changes、数据安全语义、人工迁移入口，以及仍需完成的 RC/UAT/Release 证据。
+
 ---
 
 ## 📦 参考资料
@@ -93,9 +101,11 @@ AI 友好型飞书 OpenAPI Markdown 文档库，便于查阅与扩展开发。
 
 | 文档 | 内容 | 面向读者 |
 |------|------|----------|
+| [../QUICKSTART.md](../QUICKSTART.md) | 快速开始与 1.9→2.0 迁移 | 所有用户 |
 | [ARCH.md](./ARCH.md) | 系统架构与组件设计 | 开发者、架构师 |
 | [CONFIG.md](./CONFIG.md) | 配置参数完整参考 | 所有用户 |
 | [SYNC.md](./SYNC.md) | 同步模式与选择性同步（含 Bitable/Sheet 分版本详解） | 所有用户 |
 | [FIELD_TYPES.md](./FIELD_TYPES.md) | 字段类型策略与转换 | 进阶用户、开发者 |
 | [SHEET.md](./SHEET.md) | 电子表格算法与公式保护 | 进阶用户、开发者 |
 | [CONTROL.md](./CONTROL.md) | 高级重试与频控配置 | 进阶用户 |
+| [RELEASE_NOTES_2_0.md](./RELEASE_NOTES_2_0.md) | 2.0 变更与发布门禁 | 所有用户、发布负责人 |

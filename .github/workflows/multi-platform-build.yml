@@ -2,7 +2,9 @@ name: Multi-Platform Build
 
 on:
   push:
-    branches: [ main, dev ]
+    branches: [ main, dev, codex/xtf-cli-v2 ]
+  pull_request:
+    branches: [ main, dev, codex/xtf-cli-v2 ]
   release:
     types: [ published ]
   workflow_dispatch:
@@ -39,32 +41,21 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
     
-    - name: Set commit version
+    - name: Set XTF version
       id: version
       run: |
-        # Get commit message and sanitize it for filename usage
-        # 1. Get first line of commit message
-        # 2. Replace invalid chars (/:<>|?*" ) with underscore
-        # 3. Truncate to 50 chars to avoid too long filenames
-        RAW_VERSION=$(git log --format=%B -1 | head -1)
-        VERSION=$(echo "$RAW_VERSION" | tr -c '[:alnum:]._-' '_' | sed 's/__*/_/g' | cut -c 1-50)
-
-        # Remove trailing underscores
-        VERSION=${VERSION%_}
-
-        # Fallback if empty
+        VERSION=$(sed -n 's/^VERSION = "\([^"]*\)"/\1/p' xtf_cli/version.py)
         if [ -z "$VERSION" ]; then
-          VERSION="unknown-$(git rev-parse --short HEAD)"
+          echo "Unable to read VERSION from xtf_cli/version.py"
+          exit 1
         fi
-
-        echo "Original version: $RAW_VERSION"
-        echo "Sanitized version: $VERSION"
-        echo "VERSION=$VERSION" >> $GITHUB_ENV
-        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "XTF version: $VERSION"
+        echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
       shell: bash
     
     - name: Set up Python ${{ env.PYTHON_VERSION }}
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
         python-version: ${{ env.PYTHON_VERSION }}
         architecture: ${{ matrix.setup_python_arch }}
@@ -72,22 +63,32 @@ jobs:
     - name: Install dependencies for XTF
       run: |
         python -m pip install --upgrade pip
-        pip install pyinstaller
-        pip install -r requirements.txt
+        python -m pip install "setuptools<82" "pyinstaller==6.19.0"
+        python -m pip install -r requirements.txt
       shell: bash
     
     - name: Build XTF
       run: |
         pyinstaller --onefile \
+          --collect-all=charset_normalizer \
           --hidden-import=core.config \
-          --hidden-import=core.engine \
+          --hidden-import=core.bootstrap \
+          --hidden-import=core.compiler \
+          --hidden-import=core.key_policy \
+          --hidden-import=core.mode_policy \
           --hidden-import=core.plan \
+          --hidden-import=core.reconcile \
+          --hidden-import=core.runtime_config \
+          --hidden-import=core.service \
+          --hidden-import=core.snapshot \
           --hidden-import=core.converter \
           --hidden-import=core.control \
           --hidden-import=core.reader \
           --hidden-import=api.auth \
           --hidden-import=api.base \
-          --hidden-import=api.bitable \
+          --hidden-import=api.bitable_backend \
+          --hidden-import=api.bitable_v1 \
+          --hidden-import=api.bitable_v3 \
           --hidden-import=api.sheet \
           --hidden-import=utils.excel_reader \
           --hidden-import=xtf_cli.runtime \
@@ -102,12 +103,15 @@ jobs:
       run: |
         platform="${{ matrix.platform }}"
         if [[ "${{ matrix.platform }}" == "windows-x64" ]]; then
-          "dist/${platform}/XTF.exe" --version
-          "dist/${platform}/XTF.exe" sync --help
+          executable="dist/${platform}/XTF.exe"
         else
-          "dist/${platform}/XTF" --version
-          "dist/${platform}/XTF" sync --help
+          executable="dist/${platform}/XTF"
         fi
+        "$executable" --version
+        "$executable" sync --help
+        smoke_dir=$(mktemp -d)
+        "$executable" config init --target-type bitable --output "$smoke_dir/config.yaml"
+        test -f "$smoke_dir/config.yaml"
       shell: bash
     
     - name: Prepare XTF artifacts
@@ -115,16 +119,40 @@ jobs:
         platform="${{ matrix.platform }}"
         version="${{ env.VERSION }}"
         
-        mkdir -p "artifacts/XTF_py-${platform}-${version}"
+        package_dir="artifacts/XTF_py-${platform}-${version}"
+        mkdir -p "$package_dir"
         
         if [[ "${{ matrix.platform }}" == "windows-x64" ]]; then
-          cp "dist/${platform}/XTF.exe" "artifacts/XTF_py-${platform}-${version}/"
+          binary_name="XTF.exe"
         else
-          cp "dist/${platform}/XTF" "artifacts/XTF_py-${platform}-${version}/"
-          chmod +x "artifacts/XTF_py-${platform}-${version}/XTF"
+          binary_name="XTF"
         fi
-        
-        cp config.example.yaml "artifacts/XTF_py-${platform}-${version}/config.yaml"
+        cp "dist/${platform}/${binary_name}" "$package_dir/"
+        if [[ "$binary_name" == "XTF" ]]; then
+          chmod +x "$package_dir/XTF"
+        fi
+
+        cp config.example.yaml README.md QUICKSTART.md "$package_dir/"
+        export PACKAGE_DIR="$package_dir"
+        export BINARY_NAME="$binary_name"
+        python - <<'PY'
+        import hashlib
+        import os
+        from pathlib import Path
+
+        package = Path(os.environ["PACKAGE_DIR"])
+        names = [
+            os.environ["BINARY_NAME"],
+            "config.example.yaml",
+            "README.md",
+            "QUICKSTART.md",
+        ]
+        lines = []
+        for name in names:
+            digest = hashlib.sha256((package / name).read_bytes()).hexdigest()
+            lines.append(f"{digest}  {name}")
+        (package / "checksums.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        PY
         
         # Install zip on Windows if needed
         if [[ "${{ matrix.platform }}" == "windows-x64" ]]; then
@@ -172,32 +200,21 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
     
-    - name: Set commit version
+    - name: Set XTF version
       id: version
       run: |
-        # Get commit message and sanitize it for filename usage
-        # 1. Get first line of commit message
-        # 2. Replace invalid chars (/:<>|?*" ) with underscore
-        # 3. Truncate to 50 chars to avoid too long filenames
-        RAW_VERSION=$(git log --format=%B -1 | head -1)
-        VERSION=$(echo "$RAW_VERSION" | tr -c '[:alnum:]._-' '_' | sed 's/__*/_/g' | cut -c 1-50)
-
-        # Remove trailing underscores
-        VERSION=${VERSION%_}
-
-        # Fallback if empty
+        VERSION=$(sed -n 's/^VERSION = "\([^"]*\)"/\1/p' xtf_cli/version.py)
         if [ -z "$VERSION" ]; then
-          VERSION="unknown-$(git rev-parse --short HEAD)"
+          echo "Unable to read VERSION from xtf_cli/version.py"
+          exit 1
         fi
-
-        echo "Original version: $RAW_VERSION"
-        echo "Sanitized version: $VERSION"
-        echo "VERSION=$VERSION" >> $GITHUB_ENV
-        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "XTF version: $VERSION"
+        echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
       shell: bash
     
     - name: Set up Python ${{ env.PYTHON_VERSION }}
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
         python-version: ${{ env.PYTHON_VERSION }}
         architecture: ${{ matrix.setup_python_arch }}
@@ -205,13 +222,14 @@ jobs:
     - name: Install dependencies for XTF-Sheet (minimal)
       run: |
         python -m pip install --upgrade pip
-        pip install pyinstaller
-        pip install pandas requests pyyaml
+        python -m pip install "setuptools<82" "pyinstaller==6.19.0"
+        python -m pip install pandas requests pyyaml
       shell: bash
     
     - name: Build XTF-Sheet
       run: |
         pyinstaller --onefile \
+          --collect-all=charset_normalizer \
           lite/XTF_Sheet.py \
           --name XTF-Sheet \
           --distpath dist/${{ matrix.platform }}
@@ -279,32 +297,21 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
     
-    - name: Set commit version
+    - name: Set XTF version
       id: version
       run: |
-        # Get commit message and sanitize it for filename usage
-        # 1. Get first line of commit message
-        # 2. Replace invalid chars (/:<>|?*" ) with underscore
-        # 3. Truncate to 50 chars to avoid too long filenames
-        RAW_VERSION=$(git log --format=%B -1 | head -1)
-        VERSION=$(echo "$RAW_VERSION" | tr -c '[:alnum:]._-' '_' | sed 's/__*/_/g' | cut -c 1-50)
-
-        # Remove trailing underscores
-        VERSION=${VERSION%_}
-
-        # Fallback if empty
+        VERSION=$(sed -n 's/^VERSION = "\([^"]*\)"/\1/p' xtf_cli/version.py)
         if [ -z "$VERSION" ]; then
-          VERSION="unknown-$(git rev-parse --short HEAD)"
+          echo "Unable to read VERSION from xtf_cli/version.py"
+          exit 1
         fi
-
-        echo "Original version: $RAW_VERSION"
-        echo "Sanitized version: $VERSION"
-        echo "VERSION=$VERSION" >> $GITHUB_ENV
-        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "XTF version: $VERSION"
+        echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
       shell: bash
     
     - name: Set up Python ${{ env.PYTHON_VERSION }}
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
         python-version: ${{ env.PYTHON_VERSION }}
         architecture: ${{ matrix.setup_python_arch }}
@@ -312,13 +319,14 @@ jobs:
     - name: Install dependencies for XTF-Bitable (minimal)
       run: |
         python -m pip install --upgrade pip
-        pip install pyinstaller
-        pip install pandas requests pyyaml
+        python -m pip install "setuptools<82" "pyinstaller==6.19.0"
+        python -m pip install pandas requests pyyaml
       shell: bash
     
     - name: Build XTF-Bitable
       run: |
         pyinstaller --onefile \
+          --collect-all=charset_normalizer \
           lite/XTF_Bitable.py \
           --name XTF-Bitable \
           --distpath dist/${{ matrix.platform }}
@@ -369,28 +377,17 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
     
-    - name: Set commit version
+    - name: Set XTF version
       id: version
       run: |
-        # Get commit message and sanitize it for filename usage
-        # 1. Get first line of commit message
-        # 2. Replace invalid chars (/:<>|?*" ) with underscore
-        # 3. Truncate to 50 chars to avoid too long filenames
-        RAW_VERSION=$(git log --format=%B -1 | head -1)
-        VERSION=$(echo "$RAW_VERSION" | tr -c '[:alnum:]._-' '_' | sed 's/__*/_/g' | cut -c 1-50)
-
-        # Remove trailing underscores
-        VERSION=${VERSION%_}
-
-        # Fallback if empty
+        VERSION=$(sed -n 's/^VERSION = "\([^"]*\)"/\1/p' xtf_cli/version.py)
         if [ -z "$VERSION" ]; then
-          VERSION="unknown-$(git rev-parse --short HEAD)"
+          echo "Unable to read VERSION from xtf_cli/version.py"
+          exit 1
         fi
-
-        echo "Original version: $RAW_VERSION"
-        echo "Sanitized version: $VERSION"
-        echo "VERSION=$VERSION" >> $GITHUB_ENV
-        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "XTF version: $VERSION"
+        echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
       shell: bash
     
     - name: Download all artifacts for platform
@@ -454,28 +451,17 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
     
-    - name: Set commit version
+    - name: Set XTF version
       id: version
       run: |
-        # Get commit message and sanitize it for filename usage
-        # 1. Get first line of commit message
-        # 2. Replace invalid chars (/:<>|?*" ) with underscore
-        # 3. Truncate to 50 chars to avoid too long filenames
-        RAW_VERSION=$(git log --format=%B -1 | head -1)
-        VERSION=$(echo "$RAW_VERSION" | tr -c '[:alnum:]._-' '_' | sed 's/__*/_/g' | cut -c 1-50)
-
-        # Remove trailing underscores
-        VERSION=${VERSION%_}
-
-        # Fallback if empty
+        VERSION=$(sed -n 's/^VERSION = "\([^"]*\)"/\1/p' xtf_cli/version.py)
         if [ -z "$VERSION" ]; then
-          VERSION="unknown-$(git rev-parse --short HEAD)"
+          echo "Unable to read VERSION from xtf_cli/version.py"
+          exit 1
         fi
-
-        echo "Original version: $RAW_VERSION"
-        echo "Sanitized version: $VERSION"
-        echo "VERSION=$VERSION" >> $GITHUB_ENV
-        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "XTF version: $VERSION"
+        echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
       shell: bash
     
     - name: Download all platform bundles
@@ -495,7 +481,7 @@ jobs:
         mkdir -p "FULL-XTF-${version}"
         
         # Extract and organize all platform bundles with error handling
-        for zip_file in ALL-XTF-*-${version}.zip; do
+        for zip_file in ALL-XTF-*-"${version}".zip; do
           if [[ -f "$zip_file" ]]; then
             echo "Extracting $zip_file..."
             if ! 7z x "$zip_file" -y; then
@@ -523,33 +509,24 @@ jobs:
     runs-on: ubuntu-latest
     needs: [create-platform-bundles, create-release-bundle]
     if: github.event_name == 'release'
+    permissions:
+      contents: write
     
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
     
-    - name: Set commit version
+    - name: Set XTF version
       id: version
       run: |
-        # Get commit message and sanitize it for filename usage
-        # 1. Get first line of commit message
-        # 2. Replace invalid chars (/:<>|?*" ) with underscore
-        # 3. Truncate to 50 chars to avoid too long filenames
-        RAW_VERSION=$(git log --format=%B -1 | head -1)
-        VERSION=$(echo "$RAW_VERSION" | tr -c '[:alnum:]._-' '_' | sed 's/__*/_/g' | cut -c 1-50)
-
-        # Remove trailing underscores
-        VERSION=${VERSION%_}
-
-        # Fallback if empty
+        VERSION=$(sed -n 's/^VERSION = "\([^"]*\)"/\1/p' xtf_cli/version.py)
         if [ -z "$VERSION" ]; then
-          VERSION="unknown-$(git rev-parse --short HEAD)"
+          echo "Unable to read VERSION from xtf_cli/version.py"
+          exit 1
         fi
-
-        echo "Original version: $RAW_VERSION"
-        echo "Sanitized version: $VERSION"
-        echo "VERSION=$VERSION" >> $GITHUB_ENV
-        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "XTF version: $VERSION"
+        echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
       shell: bash
     
     - name: Download all artifacts
@@ -573,7 +550,7 @@ jobs:
       shell: bash
     
     - name: Upload release assets
-      uses: softprops/action-gh-release@v1
+      uses: softprops/action-gh-release@v2
       with:
         files: |
           ALL-XTF-linux-x64-${{ env.VERSION }}.zip

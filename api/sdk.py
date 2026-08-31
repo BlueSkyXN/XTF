@@ -7,7 +7,6 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 import math
 from typing import (
-    TYPE_CHECKING,
     Any,
     Callable,
     Dict,
@@ -19,13 +18,6 @@ from typing import (
 )
 
 import requests  # type: ignore[import-untyped]
-
-if TYPE_CHECKING:
-    from .auth import FeishuAuth
-    from .base import RetryableAPIClient
-    from .bitable import BitableAPI
-    from .sheet import SheetAPI
-    from .bitable_backend import BitableBackend, BitableBackendKind, UserIDType
 
 T = TypeVar("T")
 R = TypeVar("R")
@@ -254,92 +246,6 @@ class FeishuResponseParser:
                 except (TypeError, ValueError, OverflowError):
                     continue
         return None
-
-
-class XTFFeishuClient:
-    """兼容式统一入口：共享认证和 transport，并按需创建目标 API。"""
-
-    def __init__(
-        self,
-        app_id: str,
-        app_secret: str,
-        *,
-        max_retries: int = 3,
-        rate_limit_delay: float = 0.5,
-        api_client: Optional["RetryableAPIClient"] = None,
-        controller: Optional[Any] = None,
-    ):
-        """创建统一 client；传入 api_client 时重试和频控参数由该实例负责。"""
-        from .auth import FeishuAuth
-        from .base import RateLimiter, RetryableAPIClient
-
-        self.api_client = api_client or RetryableAPIClient(
-            max_retries=max_retries,
-            rate_limiter=RateLimiter(rate_limit_delay),
-            controller=controller,
-        )
-        self.auth: FeishuAuth = FeishuAuth(
-            app_id,
-            app_secret,
-            api_client=self.api_client,
-        )
-
-    def bitable(self) -> "BitableAPI":
-        """创建与本 client 共享认证和 transport 的 BitableAPI。"""
-        from .bitable import BitableAPI
-
-        return BitableAPI(self.auth, self.api_client)
-
-    def bitable_backend(
-        self,
-        backend: "BitableBackendKind | str" = "base_v3",
-        user_id_type: "UserIDType | str" = "open_id",
-    ) -> "BitableBackend":
-        """创建显式选择的 typed Bitable backend；失败时绝不切换 API family。"""
-        from .bitable_backend import BitableBackendKind, as_backend_kind
-        from .bitable_v1 import BitableV1Backend
-        from .bitable_v3 import BaseV3Backend
-
-        backend_kind = as_backend_kind(backend)
-        if backend_kind == BitableBackendKind.BASE_V3:
-            return BaseV3Backend(
-                self.auth,
-                self.api_client,
-                user_id_type=user_id_type,
-            )
-        return BitableV1Backend(
-            self.auth,
-            self.api_client,
-            user_id_type=user_id_type,
-        )
-
-    def sheet(
-        self,
-        *,
-        start_row: int = 1,
-        start_column: str = "A",
-        scan_max_rows: Optional[int] = None,
-        scan_max_cols: Optional[int] = None,
-        write_max_rows: Optional[int] = None,
-        write_max_cols: Optional[int] = None,
-        value_render_option: Optional[str] = None,
-        datetime_render_option: Optional[str] = None,
-    ) -> "SheetAPI":
-        """创建与本 client 共享认证和 transport 的 SheetAPI。"""
-        from .sheet import SheetAPI
-
-        return SheetAPI(
-            self.auth,
-            self.api_client,
-            start_row=start_row,
-            start_column=start_column,
-            scan_max_rows=scan_max_rows,
-            scan_max_cols=scan_max_cols,
-            write_max_rows=write_max_rows,
-            write_max_cols=write_max_cols,
-            value_render_option=value_render_option,
-            datetime_render_option=datetime_render_option,
-        )
 
 
 class Paginator(Generic[T]):

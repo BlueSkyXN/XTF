@@ -1,9 +1,7 @@
 """Typed, protocol-neutral contracts for Feishu Bitable backends.
 
-The legacy :class:`api.bitable.BitableAPI` facade is intentionally not imported
-here.  This module contains only the small canonical model shared by the
-versioned wire clients, so Base v3 and Bitable v1 cannot accidentally share
-request or response shapes.
+This module contains the canonical model shared by the versioned wire clients,
+so Base v3 and Bitable v1 do not share request or response shapes accidentally.
 """
 
 from dataclasses import dataclass, field
@@ -138,7 +136,7 @@ class MutationReceipt:
 
     @property
     def applied_count(self) -> int:
-        """Compatibility spelling used by the implementation plan."""
+        """Number of units accepted by the remote mutation."""
 
         return self.accepted_count
 
