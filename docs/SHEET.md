@@ -13,7 +13,7 @@
 - [5. 公式保护与双读验证](#5-公式保护与双读验证)
 - [6. 列级差异检测报告](#6-列级差异检测报告)
 - [7. 网格限制处理](#7-网格限制处理)
-- [8. 性能基准](#8-性能基准)
+- [8. 调优起点（非性能保证）](#8-调优起点非性能保证)
 
 ---
 
@@ -304,23 +304,19 @@ actual range 时不会猜测落点或改扫全表，而是报告验证范围未�
 
 ---
 
-## 8. 性能基准
+## 8. 调优起点（非性能保证）
 
-不同数据规模下的参考性能（网络状况良好时）：
-
-| 数据规模 | 推荐 batch_size | 推荐分块行数 | 预计耗时 |
-|----------|----------------|-------------|----------|
-| 1K 行 × 20 列 | 1000 | 5000 | < 10s |
-| 5K 行 × 50 列 | 500 | 5000 | 30-60s |
-| 10K 行 × 50 列 | 500 | 3000 | 1-3min |
-| 50K 行 × 100 列 | 200 | 2000 | 5-15min |
+对 Sheet 目标，`config init --target-type sheet` 的初始值为 `control.batch_size: 1000`、
+`control.rate_limit_delay: 0.1`，以及 `target.sheet` 的读写窗口 `5000` 行 × `100` 列。这些
+是可修改的起点，不是性能基准、时延承诺或 Feishu 服务等级保证。实际吞吐会受数据形状、目标表状态、
+网络、限流和 API 响应影响；应先用 dry-run 和运行结果调整。
 
 **优化建议**：
 
 | 场景 | 建议 |
 |------|------|
-| 频繁超时 | 降低 `sheet_write_max_rows`，增大 `max_retries` |
-| 90227 错误频繁 | 降低 `batch_size` 和分块参数 |
-| 限流 429 | 增大 `rate_limit_delay`，或启用高级频控 |
-| 选择性同步 | 使用 `selective_sync` 减少同步列数 |
-| 公式保护 | 启用 `sheet_protect_formulas` 避免不必要的覆盖 |
+| 频繁超时 | 降低 `target.sheet.write_max_rows`，增大 `control.max_retries` |
+| 90227 错误频繁 | 降低 `control.batch_size` 和 Sheet 读写窗口 |
+| 限流 429 | 增大 `control.rate_limit_delay`，或启用高级频控 |
+| 选择性同步 | 使用 `sync.selective` 或 `--selective --column NAME` 减少同步列数 |
+| 公式保护 | 启用 `target.sheet.protect_formulas` 或 `--sheet-protect-formulas` 避免不必要的覆盖 |

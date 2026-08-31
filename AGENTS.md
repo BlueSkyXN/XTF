@@ -97,10 +97,14 @@ If the local machine lacks `python`, run the same module command with `python3` 
 ## Global rules
 
 - Configuration is flags-first. `app_secret` priority is CLI > `XTF_APP_SECRET` > YAML; every other value uses CLI > YAML > target-specific defaults. An unqualified command may discover `./config.yaml`, but an explicit missing `--config` path must fail.
+- Treat the XTF 2.0 command/config/output contract as public: main-program examples must use `python XTF.py <subcommand>`, never the removed root-level flat invocation. `sync` owns sync flags; `config init` is the only command that creates a main-program configuration.
+- Main-program user docs and templates use nested YAML v2 paths such as `sync.selective`; flat names such as `selective_sync` and `sheet_protect_formulas` are internal `SyncConfig` attributes and must be labelled as such when they appear in developer documentation. `lite/` remains a separately documented legacy surface with its own flat templates.
+- Describe `--dry-run` precisely: it performs zero Feishu mutations, but normal runtime initialization can create local logs. A local check or GitHub Actions build proves code/build contracts only, not a remote synchronization, Release, deployment, or business UAT.
+- When a change affects CLI flags, v2 schema/defaults, plan/outcome serialization, or destructive behavior, keep `config.example.yaml`, `README.md`, `docs/CONFIG.md`, `docs/SYNC.md`, relevant architecture docs, parser/config tests, and packaging assumptions aligned as applicable.
 - Supported targets are `bitable` and `sheet`; shared changes must consider both unless the code path is target-specific by construction.
 - Sync modes are `full`, `incremental`, `overwrite`, and `clone`.
 - Treat `overwrite` and `clone` as destructive remote-data modes. Preserve clear logging, batching semantics, deletion scope, failure handling, and user-facing risk wording when touching them.
-- `selective_sync.enabled` is incompatible with `clone`; keep column validation, duplicate checks, and `max_gap_for_merge` bounds intact.
+- `sync.selective.enabled` is incompatible with `clone`; keep the underlying `selective_sync` column validation, duplicate checks, and `max_gap_for_merge` bounds intact.
 - Sheet formula protection is valid only for `full` with a non-empty `index_column`; it depends on dual reads using `Formula` and `FormattedValue`, and enabling it also enables result validation. A failed or incomplete formula/result read must stop the write, and protected formula columns must not be rewritten.
 - Bitable field type behavior is strategy-based: `raw`, `base`, `auto`, `intelligence`. Preserve conservative defaults unless a config, docs, and test change explicitly covers the behavior shift.
 - Transport owns request exceptions and HTTP 429/5xx retry. Bitable business retry handles retryable Feishu business codes returned in parsed responses; do not multiply the two retry budgets.

@@ -173,7 +173,9 @@ XTF 2.0 对每个有效 `SyncConfig` leaf 提供显式 override，并按功能�
 
 ### 3.1 SyncConfig 数据类
 
-`SyncConfig` 是整个系统的配置核心，使用 Python `@dataclass` 实现：
+`SyncConfig` 是整个系统的运行时配置核心，使用 Python `@dataclass` 实现。它接收 CLI/ENV/YAML v2
+解析后的扁平化字段；这不是用户应手写的 YAML 格式。用户配置路径以 [CONFIG.md](./CONFIG.md) 的嵌套
+schema v2 为准，例如运行时 `selective_sync` 对应 YAML `sync.selective`。
 
 ```python
 @dataclass
@@ -206,9 +208,9 @@ class SyncConfig:
     # 字段类型策略
     field_type_strategy: FieldTypeStrategy  # raw | base | auto | intelligence
 
-    # 性能设置
-    batch_size: int                   # 批处理大小 (bitable=500, sheet=1000)
-    rate_limit_delay: float           # API 间隔 (bitable=0.01s, sheet=0.1s)
+    # 性能设置（默认值由目标类型决定；YAML v2 路径见 CONFIG.md）
+    batch_size: int                   # 批处理大小
+    rate_limit_delay: float           # API 调用间隔
     max_retries: int                  # 最大重试次数 (默认 3)
 
     # 高级控制
@@ -225,7 +227,7 @@ app_secret: CLI → XTF_APP_SECRET → YAML → missing error
 其他配置:   CLI → YAML → target-specific defaults
 ```
 
-**目标默认示例**：
+**目标默认示例**（以下均为运行时 `SyncConfig` 字段名，不是 YAML v2 路径）：
 - Bitable 默认 `batch_size=500`，`rate_limit_delay=0.01`
 - Sheet 默认 `batch_size=1000`，`rate_limit_delay=0.1`
 - `sheet_protect_formulas=True` 时自动启用 `sheet_validate_results=True`
@@ -468,7 +470,7 @@ Sheet 元数据不可用时可以用配置化窗口做有界诊断读取，但�
 
 第2步：读取数据
   ExcelReader → 读取 Excel/CSV → pandas DataFrame
-  ├─ .xlsx/.xls: 优先 Calamine 引擎 (4-20x 加速)，失败回退 OpenPyXL
+  ├─ .xlsx/.xls: 优先使用可用的 Calamine 引擎，失败回退 OpenPyXL
   └─ .csv: UTF-8 优先，失败自动尝试 GBK
 
 第3步：初始化引擎
@@ -519,7 +521,7 @@ XTF 采用多层错误处理策略：
 
 | 错误类型 | 处理方式 |
 |----------|----------|
-| 配置缺失/非法 | 启动时即报错，生成示例配置 |
+| 配置缺失/非法 | 启动时即报错；仅 `config init` 可显式生成 v2 模板 |
 | 文件不存在 | 明确错误提示和路径建议 |
 | 用户中断 (Ctrl+C) | 优雅退出，输出已完成部分 |
 

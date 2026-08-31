@@ -79,9 +79,13 @@ AI 友好型飞书 OpenAPI Markdown 文档库，便于查阅与扩展开发。
 1. 安装依赖：`pip install -r requirements.txt`
 2. 查看命令：`python3 XTF.py --help`
 3. 生成 v2 配置：`python3 XTF.py config init --target-type bitable`
-4. 本地验证：`python3 XTF.py config validate --config config.yaml`
-5. 精确只读计划：`python3 XTF.py sync --config config.yaml --dry-run`
-6. 正式同步：`python3 XTF.py sync --config config.yaml`
+4. 填入实际资源标识，并通过 `--app-secret` 或 `XTF_APP_SECRET` 提供 secret；模板占位值不可直接用于远端操作。
+5. 本地验证：`python3 XTF.py config validate --config config.yaml`，再运行 `python3 XTF.py doctor --config config.yaml`。
+6. 需要验证远端只读可达性时：`python3 XTF.py doctor --config config.yaml --network`。
+7. 精确只读计划：`python3 XTF.py sync --config config.yaml --dry-run --json`。
+8. 审阅 plan 后才正式同步：`python3 XTF.py sync --config config.yaml`；任何 destructive plan 都必须额外传 `--allow-delete`。
+
+`--dry-run` 可进行远端只读调用，但不执行 Feishu mutation；它仍可能创建本地运行日志，且不构成真实业务 UAT。
 
 ---
 

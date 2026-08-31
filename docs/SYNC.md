@@ -35,11 +35,16 @@ XTF 支持四种同步模式，通过 YAML v2 的 `sync.mode` 或 `XTF sync --mo
 > **索引列说明**：索引列（`sync.index.column` / `--index-column`）用于建立匹配关系，值必须唯一。日期时间默认统一到 UTC 后按完整毫秒匹配，只有显式选择 `day` 才按本地日期匹配。
 
 ```bash
-# 使用方式
-python3 XTF.py sync --mode full --index-column "ID"
-python3 XTF.py sync --mode clone --dry-run
-python3 XTF.py sync --mode clone --allow-delete
+# 使用方式：同步参数属于 `sync` 子命令；这里以 v2 配置为例
+python3 XTF.py sync --config config.yaml --mode full --index-column "ID"
+python3 XTF.py sync --config config.yaml --mode clone --dry-run
+python3 XTF.py sync --config config.yaml --mode clone --allow-delete
 ```
+
+先用 `config validate` 和默认离线的 `doctor` 检查本地条件；只有需要读取远端认证、字段或
+工作表 metadata 时才传 `doctor --network`。每次正式同步都会先生成 `SyncPlan`；`--dry-run`
+只返回该计划，不执行 Feishu mutation。Sheet 的 full/incremental 在无法安全按索引匹配时可能
+形成 effective `clone`，计划会显式标记 destructive action，正式执行必须传 `--allow-delete`。
 
 ---
 
@@ -115,7 +120,7 @@ python3 XTF.py sync --source-type bitable --mode full --config config.yaml --dry
 
 **特点**：
 - 远程表中未匹配的记录完全不受影响
-- 支持选择性列同步（`selective_sync`），选择性模式下仅获取索引列+指定列
+- 支持选择性列同步（v2 YAML 的 `sync.selective`，或 `--selective --column NAME`），选择性模式下仅获取索引列+指定列
 - 无索引列时退化为纯新增操作
 
 ### Sheet 版本
@@ -127,9 +132,9 @@ python3 XTF.py sync --source-type bitable --mode full --config config.yaml --dry
 4. 不匹配的行 → 追加到末尾 (`values_append`)
 
 **特点**：
-- 支持结果检测（`sheet_validate_results`）和公式保护（`sheet_protect_formulas`）
+- 支持结果检测（`target.sheet.validate_results`）和公式保护（`target.sheet.protect_formulas`）
 - 支持选择性列同步，只更新指定列的单元格
-- 无索引列时退化为克隆模式
+- 无有效索引列时，full/incremental 的计划可能显式转为 destructive clone；先用 dry-run 审核，正式执行必须传 `--allow-delete`
 
 ### 适用场景
 
@@ -573,8 +578,8 @@ sync:
 
 ```bash
 # 命令行快速使用
-python3 XTF.py sync --mode full --index-column "ID"
-python3 XTF.py sync --mode incremental --index-column "ID"
-python3 XTF.py sync --mode clone --dry-run
-python3 XTF.py sync --mode clone --allow-delete
+python3 XTF.py sync --config config.yaml --mode full --index-column "ID"
+python3 XTF.py sync --config config.yaml --mode incremental --index-column "ID"
+python3 XTF.py sync --config config.yaml --mode clone --dry-run
+python3 XTF.py sync --config config.yaml --mode clone --allow-delete
 ```

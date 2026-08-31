@@ -17,7 +17,7 @@ XTF 是一个 flags-first 的数据同步 CLI，将本地 Excel/CSV 或另一张
 - **公式保护** — `full` 模式双读检测云端公式，无法确认公式状态时停止写入
 - **三层上传保障** — 预分块 → 自动二分重试 → 智能频控，确保大数据稳定处理
 - **高级频控** — 3 种重试策略 × 3 种频控策略，9 种组合灵活配置
-- **高性能读取** — Calamine 引擎（Rust 实现），Excel 读取加速 4-20x
+- **Excel 引擎回退** — 优先使用可用的 Calamine 引擎，必要时回退 OpenPyXL
 
 ## 快速开始
 
@@ -78,6 +78,29 @@ python3 XTF.py sync \
 # destructive 模式必须显式授权删除
 python3 XTF.py sync --config config.yaml --mode clone --allow-delete
 ```
+
+### 推荐的安全操作顺序
+
+`config init` 生成的是包含占位值的 v2 模板；请先填入实际资源标识，并通过
+`--app-secret` 或 `XTF_APP_SECRET` 提供 secret。不要把真实 secret 写入示例、提交或日志。
+
+```bash
+# 仅验证 schema、组合和本地输入
+python3 XTF.py config validate --config config.yaml
+python3 XTF.py doctor --config config.yaml
+
+# 可选：认证并读取字段/工作表 metadata；仍不执行 Feishu mutation
+python3 XTF.py doctor --config config.yaml --network
+
+# 先获取与正式执行使用同一 planner 生成的计划
+python3 XTF.py sync --config config.yaml --dry-run --json > sync-plan.json
+
+# 审核计划后再执行。只有计划或 mode 需要删除时才传 --allow-delete。
+python3 XTF.py sync --config config.yaml
+```
+
+`--dry-run` 的“零写入”只指 Feishu mutation；运行时仍可能创建本地 `logs/` 文件。计划和
+JSON 结果不会包含完整 token、secret、记录正文或 mutation payload，但 dry-run 也不替代真实业务验收。
 
 ### Python SDK
 
@@ -142,7 +165,7 @@ python3 XTF.py sync --field-type-strategy intelligence  # 全面智能
 
 | 格式 | 扩展名 | 状态 | 读取引擎 |
 |------|--------|------|----------|
-| Excel 2007+ | `.xlsx` | ✅ 生产就绪 | Calamine (Rust, 4-20x 加速) → 回退 OpenPyXL |
+| Excel 2007+ | `.xlsx` | ✅ 生产就绪 | Calamine（可用时）→ 回退 OpenPyXL |
 | Excel 97-2003 | `.xls` | ✅ 生产就绪 | Calamine → 回退 OpenPyXL |
 | CSV | `.csv` | 🧪 实验性 | pandas（UTF-8/GBK 自动检测） |
 

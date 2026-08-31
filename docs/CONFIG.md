@@ -1,6 +1,6 @@
 # XTF 2.0 配置与 CLI 覆盖
 
-XTF 2.0 使用严格的嵌套 YAML schema v2，同时允许 `sync` 和 `doctor` 通过命令行覆盖所有有效配置。旧 flat YAML 不再兼容，也不会自动迁移。
+XTF 2.0 使用严格的嵌套 YAML schema v2。`sync` 暴露所有有效配置 leaf 的命令行覆盖；`doctor` 使用同一解析规则进行本地或只读远端预检。旧 flat YAML 不再兼容，也不会自动迁移。
 
 ## 1. 配置来源与优先级
 
@@ -32,6 +32,11 @@ python3 XTF.py config show --config config.yaml --json
 ```
 
 `config init` 默认输出 `config.yaml`，存在时拒绝覆盖；`sync` 不生成、不迁移也不改写配置。仓库没有 `config migrate` 命令。
+
+`config init` 只创建带占位值的 preset，不验证 Feishu 凭据或资源可达性。填写实际资源标识后，先运行
+`config validate` 和默认离线的 `doctor`；需要认证和读取字段/工作表 metadata 时，再显式运行
+`doctor --network`。所有下面单独列出的 flag 都是 `XTF sync`（或 `XTF doctor` 预检）选项片段，
+不能作为根命令调用。
 
 ## 3. YAML schema v2
 
@@ -248,7 +253,7 @@ python3 XTF.py sync -c config.yaml --dry-run --json
 python3 XTF.py sync -c config.yaml --mode clone --allow-delete
 ```
 
-`--dry-run` 可以读取 Feishu 字段、记录和 Sheet metadata，但不会创建字段、写记录、清空范围、写单元格或设置样式/验证。
+`--dry-run` 可以读取 Feishu 字段、记录和 Sheet metadata，但不会创建字段、写记录、清空范围、写单元格或设置样式/验证。它使用与正式执行相同的 planner；运行时初始化仍可能创建本地日志，这不属于 Feishu mutation。
 
 正式执行满足任一条件时必须有 `--allow-delete`：
 
