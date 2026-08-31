@@ -18,6 +18,7 @@ Key files: `workflows/test.yml`, `workflows/multi-platform-build.yml`, and the m
 - Preserve Ruff `0.15.13` unless a repo-wide lint migration is explicitly in scope.
 - Preserve the build-only `PyInstaller==6.19.0` and `setuptools<82` pins until a separately validated packaging-tool upgrade; setuptools 82 removes the `pkg_resources` API expected by this PyInstaller runtime hook.
 - Before the 1.9 rollback archive gate, keep the transitional legacy jobs usable. After that separately authorized gate, remove them and verify the single `XTF.py` matrix only.
+- Before this new rollback workflow exists on the default branch, dispatch the already-registered `multi-platform-build.yml` at the cutover branch with `build_1_9_rollback=true`; it calls the same local reusable workflow and skips the normal 2.0/legacy bundle jobs.
 - For XTF 2.0 artifact changes, trace the per-platform `XTF` ZIP, packaged docs/template/checksum, smoke commands, and any release bundle that consumes it.
 
 ## Do not

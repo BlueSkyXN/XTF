@@ -8,6 +8,12 @@ on:
   release:
     types: [ published ]
   workflow_dispatch:
+    inputs:
+      build_1_9_rollback:
+        description: Build the exact XTF 1.9 rollback package instead of XTF 2.0 artifacts
+        required: false
+        default: false
+        type: boolean
 
 env:
   PYTHON_VERSION: '3.11'
@@ -15,6 +21,7 @@ env:
 jobs:
   build-xtf:
     name: Build XTF
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.build_1_9_rollback }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -174,6 +181,7 @@ jobs:
 
   build-xtf-sheet:
     name: Build XTF-Sheet (Legacy)
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.build_1_9_rollback }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -271,6 +279,7 @@ jobs:
 
   build-xtf-bitable:
     name: Build XTF-Bitable (Legacy)
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.build_1_9_rollback }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -560,3 +569,10 @@ jobs:
           FULL-XTF-${{ env.VERSION }}.zip
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-1-9-rollback:
+    name: Build XTF 1.9 Rollback Package
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_1_9_rollback }}
+    uses: ./.github/workflows/build-1.9-rollback.yml
+    permissions:
+      contents: read

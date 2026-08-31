@@ -81,7 +81,7 @@ If the local machine lacks `python`, run the same module command with `python3` 
 - The target XTF 2.0 workflow builds only `XTF.py` for Linux x64/ARM64, Windows x64, and macOS ARM64. Until the separately authorized 1.9 rollback gate completes, transitional legacy jobs may remain in the workflow but do not define the 2.0 product contract.
 - The XTF 2.0 artifact ships `config.example.yaml`, `README.md`, `QUICKSTART.md`, and `checksums.txt`; it must not contain an auto-discoverable real `config.yaml`.
 - Build jobs pin `PyInstaller==6.19.0` with `setuptools<82`; change that pair only with a binary startup smoke because setuptools 82 removes the `pkg_resources` API used by this PyInstaller runtime hook.
-- `.github/workflows/build-1.9-rollback.yml` is manual-only and checks out exact commit `a22ac8119d33625cbcadbfb18cc2a36538f69b7e`; dispatching it is an external GitHub write that requires separate authorization.
+- `.github/workflows/build-1.9-rollback.yml` is manual/reusable only and checks out exact commit `a22ac8119d33625cbcadbfb18cc2a36538f69b7e`. Before that new workflow exists on the default branch, the authorized gate is dispatched through the existing `multi-platform-build.yml` at the cutover ref with input `build_1_9_rollback=true`; either dispatch is an external GitHub write requiring separate authorization.
 - Complete PyInstaller builds, platform bundles, release bundles, and release uploads require GitHub Actions. Do not treat them as default local validation.
 
 ## Architecture boundaries

@@ -1,6 +1,7 @@
 name: Build XTF 1.9 Rollback Package
 
 on:
+  workflow_call:
   workflow_dispatch:
 
 permissions:
