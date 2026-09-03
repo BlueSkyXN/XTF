@@ -197,12 +197,22 @@ jobs:
           for name in XTF XTF-Sheet XTF-Bitable; do
             cp "dist/$platform/$name$suffix" "$package/"
           done
-          cp "build/smoke-configs/$platform/XTF.config.yaml" \
-            "$package/config.XTF.1.9.example.yaml"
-          cp "build/smoke-configs/$platform/XTF-Sheet.config.yaml" \
-            "$package/config.XTF-Sheet.1.9.example.yaml"
-          cp "build/smoke-configs/$platform/XTF-Bitable.config.yaml" \
-            "$package/config.XTF-Bitable.1.9.example.yaml"
+          # Config templates: prefer the smoke-generated files (they prove the
+          # binary actually ran and wrote them). On Windows the 1.9 binary
+          # crashes on the Chinese welcome banner before reaching the config-
+          # generation code, so the smoke files do not exist. Fall back to the
+          # 1.9 source tree's own config.example.yaml, which is the same flat-
+          # schema template the binary would have written. ROLLBACK.md already
+          # documents the Windows limitation for restore operators.
+          for name in XTF XTF-Sheet XTF-Bitable; do
+            src="build/smoke-configs/$platform/$name.config.yaml"
+            dst="$package/config.$name.1.9.example.yaml"
+            if [ -f "$src" ]; then
+              cp "$src" "$dst"
+            else
+              cp config.example.yaml "$dst"
+            fi
+          done
           cat > "$package/ROLLBACK.md" <<'EOF'
           # XTF 1.9.0 rollback package
 
