@@ -127,18 +127,16 @@ class TestRetryableAPIClientInit:
 
     def test_init_default_values(self):
         """测试默认值"""
-        client = RetryableAPIClient(use_global_controller=False)
+        client = RetryableAPIClient()
 
         assert client.max_retries == 3
         assert client.rate_limiter is not None
-        assert client.use_global_controller is False
+        assert client._controller is None
 
     def test_init_custom_values(self):
         """测试自定义值"""
         limiter = RateLimiter(delay=1.0)
-        client = RetryableAPIClient(
-            max_retries=5, rate_limiter=limiter, use_global_controller=False
-        )
+        client = RetryableAPIClient(max_retries=5, rate_limiter=limiter)
 
         assert client.max_retries == 5
         assert client.rate_limiter.delay == 1.0
@@ -154,7 +152,7 @@ class TestRetryableAPIClientCallAPI:
         mock_response.status_code = 200
         mock_request.return_value = mock_response
 
-        client = RetryableAPIClient(use_global_controller=False)
+        client = RetryableAPIClient()
         response = client.call_api("GET", "http://example.com/api")
 
         assert response.status_code == 200
@@ -167,7 +165,7 @@ class TestRetryableAPIClientCallAPI:
         mock_response.status_code = 200
         mock_request.return_value = mock_response
 
-        client = RetryableAPIClient(use_global_controller=False)
+        client = RetryableAPIClient()
         client.call_api(
             "POST",
             "http://example.com/api",
@@ -195,7 +193,7 @@ class TestRetryableAPIClientCallAPI:
 
         mock_request.side_effect = [mock_response_error, mock_response_success]
 
-        client = RetryableAPIClient(max_retries=3, use_global_controller=False)
+        client = RetryableAPIClient(max_retries=3)
         response = client.call_api("GET", "http://example.com/api")
 
         assert response.status_code == 200
@@ -213,7 +211,7 @@ class TestRetryableAPIClientCallAPI:
 
         mock_request.side_effect = [mock_response_rate_limited, mock_response_success]
 
-        client = RetryableAPIClient(max_retries=3, use_global_controller=False)
+        client = RetryableAPIClient(max_retries=3)
         response = client.call_api("GET", "http://example.com/api")
 
         assert response.status_code == 200
@@ -233,7 +231,6 @@ class TestRetryableAPIClientCallAPI:
         client = RetryableAPIClient(
             max_retries=1,
             rate_limiter=RateLimiter(0),
-            use_global_controller=False,
             jitter_ratio=0,
         )
         client.call_api("GET", "http://example.com/api")
@@ -244,7 +241,7 @@ class TestRetryableAPIClientCallAPI:
         """本地 jitter 只增加有限随机量，不会低于指数退避基线。"""
         response = Mock()
         response.headers = {}
-        client = RetryableAPIClient(use_global_controller=False, jitter_ratio=0.1)
+        client = RetryableAPIClient(jitter_ratio=0.1)
 
         with patch("api.base.random.uniform", return_value=0.4) as uniform:
             delay = client._retry_delay(response, attempt=2)
@@ -261,7 +258,7 @@ class TestRetryableAPIClientCallAPI:
 
         mock_request.return_value = mock_response
 
-        client = RetryableAPIClient(max_retries=2, use_global_controller=False)
+        client = RetryableAPIClient(max_retries=2)
 
         # 应该返回最后一次失败的响应，而不是抛出异常
         response = client.call_api("GET", "http://example.com/api")
@@ -284,7 +281,7 @@ class TestRetryableAPIClientCallAPI:
             mock_response_success,
         ]
 
-        client = RetryableAPIClient(max_retries=3, use_global_controller=False)
+        client = RetryableAPIClient(max_retries=3)
         response = client.call_api("GET", "http://example.com/api")
 
         assert response.status_code == 200
@@ -298,7 +295,7 @@ class TestRetryableAPIClientCallAPI:
             "Connection failed"
         )
 
-        client = RetryableAPIClient(max_retries=2, use_global_controller=False)
+        client = RetryableAPIClient(max_retries=2)
 
         with pytest.raises(FeishuAPIError) as exc_info:
             client.call_api("GET", "http://example.com/api")
@@ -311,7 +308,7 @@ class TestRetryableAPIClientCallAPI:
         self, mock_request
     ):
         mock_request.side_effect = requests.exceptions.ConnectionError("offline")
-        client = RetryableAPIClient(max_retries=3, use_global_controller=False)
+        client = RetryableAPIClient(max_retries=3)
 
         with pytest.raises(FeishuAPIError) as exc_info:
             client.call_api(
@@ -329,9 +326,7 @@ class TestRetryableAPIClientCallAPI:
         rate_limit = Mock()
         rate_limit.wait_if_needed.return_value = False
         controller = Mock(rate_limit_strategy=rate_limit)
-        client = RetryableAPIClient(use_global_controller=False)
-        client.use_global_controller = True
-        client._controller = controller
+        client = RetryableAPIClient(controller=controller)
 
         with pytest.raises(FeishuAPIError) as exc_info:
             client.call_api(
@@ -344,7 +339,7 @@ class TestRetryableAPIClientCallAPI:
 
     @patch("time.sleep")
     @patch("requests.request")
-    def test_global_controller_returns_final_http_response(
+    def test_explicit_controller_returns_final_http_response(
         self, mock_request, mock_sleep
     ):
         response = Mock()
@@ -354,9 +349,7 @@ class TestRetryableAPIClientCallAPI:
         controller = RequestController(
             FixedWaitRetry(RetryConfig(initial_delay=0, max_retries=1)), None
         )
-        client = RetryableAPIClient(max_retries=1, use_global_controller=False)
-        client.use_global_controller = True
-        client._controller = controller
+        client = RetryableAPIClient(max_retries=1, controller=controller)
 
         result = client.call_api("GET", "http://example.com/api")
 
@@ -365,14 +358,12 @@ class TestRetryableAPIClientCallAPI:
 
     @patch("time.sleep")
     @patch("requests.request")
-    def test_global_controller_wraps_network_failure(self, mock_request, mock_sleep):
+    def test_explicit_controller_wraps_network_failure(self, mock_request, mock_sleep):
         mock_request.side_effect = requests.exceptions.ConnectionError("offline")
         controller = RequestController(
             FixedWaitRetry(RetryConfig(initial_delay=0, max_retries=1)), None
         )
-        client = RetryableAPIClient(max_retries=1, use_global_controller=False)
-        client.use_global_controller = True
-        client._controller = controller
+        client = RetryableAPIClient(max_retries=1, controller=controller)
 
         with pytest.raises(FeishuAPIError) as exc_info:
             client.call_api("GET", "http://example.com/api")
@@ -381,7 +372,7 @@ class TestRetryableAPIClientCallAPI:
 
     @patch("time.sleep")
     @patch("requests.request")
-    def test_global_controller_does_not_return_stale_response_after_network_failure(
+    def test_explicit_controller_does_not_return_stale_response_after_network_failure(
         self, mock_request, mock_sleep
     ):
         response = Mock()
@@ -394,21 +385,17 @@ class TestRetryableAPIClientCallAPI:
         controller = RequestController(
             FixedWaitRetry(RetryConfig(initial_delay=0, max_retries=1)), None
         )
-        client = RetryableAPIClient(max_retries=1, use_global_controller=False)
-        client.use_global_controller = True
-        client._controller = controller
+        client = RetryableAPIClient(max_retries=1, controller=controller)
 
         with pytest.raises(FeishuAPIError) as exc_info:
             client.call_api("GET", "http://example.com/api")
 
         assert exc_info.value.kind == "transport"
 
-    def test_global_controller_wraps_controller_failure(self):
+    def test_explicit_controller_wraps_controller_failure(self):
         controller = Mock()
         controller.execute_request.side_effect = RuntimeError("rate limiter failed")
-        client = RetryableAPIClient(max_retries=1, use_global_controller=False)
-        client.use_global_controller = True
-        client._controller = controller
+        client = RetryableAPIClient(max_retries=1, controller=controller)
 
         with pytest.raises(FeishuAPIError) as exc_info:
             client.call_api("GET", "http://example.com/api")
@@ -426,7 +413,7 @@ class TestRetryableAPIClientHTTPMethods:
         mock_response.status_code = 200
         mock_request.return_value = mock_response
 
-        client = RetryableAPIClient(use_global_controller=False)
+        client = RetryableAPIClient()
         client.call_api("GET", "http://example.com/api")
 
         mock_request.assert_called_with("GET", "http://example.com/api", timeout=60)
@@ -438,7 +425,7 @@ class TestRetryableAPIClientHTTPMethods:
         mock_response.status_code = 201
         mock_request.return_value = mock_response
 
-        client = RetryableAPIClient(use_global_controller=False)
+        client = RetryableAPIClient()
         client.call_api("POST", "http://example.com/api", json={"data": "test"})
 
         mock_request.assert_called_with(
@@ -452,7 +439,7 @@ class TestRetryableAPIClientHTTPMethods:
         mock_response.status_code = 200
         mock_request.return_value = mock_response
 
-        client = RetryableAPIClient(use_global_controller=False)
+        client = RetryableAPIClient()
         client.call_api("PUT", "http://example.com/api", json={"data": "update"})
 
         mock_request.assert_called_with(
@@ -466,7 +453,7 @@ class TestRetryableAPIClientHTTPMethods:
         mock_response.status_code = 204
         mock_request.return_value = mock_response
 
-        client = RetryableAPIClient(use_global_controller=False)
+        client = RetryableAPIClient()
         client.call_api("DELETE", "http://example.com/api/1")
 
         mock_request.assert_called_with(
@@ -485,7 +472,7 @@ class TestRetryableAPIClientExponentialBackoff:
         mock_response.status_code = 500
         mock_request.return_value = mock_response
 
-        client = RetryableAPIClient(max_retries=3, use_global_controller=False)
+        client = RetryableAPIClient(max_retries=3)
 
         # 调用会重试直到达到最大次数，然后返回最后的响应
         response = client.call_api("GET", "http://example.com/api")

@@ -1,563 +1,267 @@
-# XTF 系统架构文档
+# XTF 2.0 架构
 
-> 源码位置：[`XTF.py`](../XTF.py) · [`core/`](../core/) · [`api/`](../api/) · [`utils/`](../utils/)
+> 关键源码：[`XTF.py`](../XTF.py) · [`xtf_cli/`](../xtf_cli/) ·
+> [`core/`](../core/) · [`api/`](../api/) · [`utils/`](../utils/)
 
----
+## 1. 架构边界
 
-## 目录
+XTF 2.0 是模块化单体 CLI。正式产品只有一个入口、一套配置和一条 typed 同步主干：
 
-- [1. 系统概览](#1-系统概览)
-  - [1.1 系统定位](#11-系统定位)
-  - [1.2 设计哲学](#12-设计哲学)
-  - [1.3 四层架构](#13-四层架构)
-  - [1.4 核心组件交互](#14-核心组件交互)
-- [2. 入口层](#2-入口层)
-  - [2.1 统一入口 XTF.py](#21-统一入口-xtfpy)
-  - [2.2 目标类型自动推断](#22-目标类型自动推断)
-  - [2.3 CLI 参数体系](#23-cli-参数体系)
-- [3. 配置层](#3-配置层)
-  - [3.1 SyncConfig 数据类](#31-syncconfig-数据类)
-  - [3.2 配置优先级](#32-配置优先级)
-  - [3.3 配置验证](#33-配置验证)
-- [4. 引擎层](#4-引擎层)
-  - [4.1 XTFSyncEngine](#41-xtfsyncengine)
-  - [4.2 DataConverter](#42-dataconverter)
-  - [4.3 高级控制器](#43-高级控制器)
-- [5. API 层](#5-api-层)
-  - [5.1 认证模块](#51-认证模块)
-  - [5.2 基础客户端](#52-基础客户端)
-  - [5.3 专用 SDK 契约](#53-专用-sdk-契约)
-  - [5.4 Bitable API](#54-bitable-api)
-  - [5.5 Sheet API](#55-sheet-api)
-- [6. 数据处理流水线](#6-数据处理流水线)
-- [7. 错误处理架构](#7-错误处理架构)
-- [8. 扩展指南](#8-扩展指南)
-
----
-
-## 1. 系统概览
-
-### 1.1 系统定位
-
-XTF (Excel To Feishu) 是一个企业级数据同步工具，将本地 Excel/CSV 文件智能同步到飞书平台。支持多维表格 (Bitable) 和电子表格 (Sheet) 两种目标，通过统一引擎实现四种同步模式。
-
-### 1.2 设计哲学
-
-| 原则 | 实现方式 |
-|------|----------|
-| **统一入口** | 单个 `XTF.py` 统一处理 Bitable 和 Sheet 两种目标 |
-| **策略模式** | 同步模式、字段类型策略、重试策略均可配置切换 |
-| **渐进增强** | 从基础功能（raw/base）到高级功能（intelligence/advanced_control）逐步开启 |
-| **防御式编程** | 三层上传保障、自动分块、二分重试、频控保护 |
-| **配置驱动** | YAML 配置 + CLI 覆盖，支持多环境灵活切换 |
-
-### 1.3 四层架构
-
-```
-┌─────────────────────────────────────────────────────────┐
-│                    入口层 (Entry)                         │
-│   XTF.py — CLI 解析、配置加载、流程编排                     │
-├─────────────────────────────────────────────────────────┤
-│                    配置层 (Config)                        │
-│   core/config.py — SyncConfig 数据类、验证、优先级合并       │
-├─────────────────────────────────────────────────────────┤
-│                    引擎层 (Engine)                        │
-│   core/engine.py    — XTFSyncEngine 同步引擎              │
-│   core/converter.py — DataConverter 数据转换器             │
-│   core/control.py   — 高级重试与频控控制器                  │
-├─────────────────────────────────────────────────────────┤
-│                    API 层 (API)                           │
-│   api/auth.py    — 飞书认证 (tenant_access_token)         │
-│   api/base.py    — RetryableAPIClient 基础客户端           │
-│   api/sdk.py     — 响应、错误、分页、批处理统一契约         │
-│   api/bitable.py — BitableAPI 多维表格操作                 │
-│   api/sheet.py   — SheetAPI 电子表格操作                   │
-└─────────────────────────────────────────────────────────┘
+```text
+XTF.py / XTF
+    ↓
+xtf_cli
+    ↓
+bootstrap_runtime
+    ↓
+SyncService
+    ↓
+ExecutionPlan → Executor + Verifier → SyncResult
 ```
 
-### 1.4 核心组件交互
+稳定公共契约限定为：
 
-```
-XTF.py (入口)
-  │
-  ├─→ ConfigManager.load_config()
-  │     └─→ SyncConfig (配置数据类)
-  │
-  ├─→ XTFSyncEngine(config)
-  │     ├─→ RetryableAPIClient (共享重试、频控)
-  │     ├─→ FeishuAuth(app_id, app_secret, api_client)
-  │     │     └─→ tenant_access_token (自动缓存 & 刷新)
-  │     │
-  │     ├─→ BitableAPI(auth, api_client) 或 SheetAPI(auth, api_client)
-  │     │
-  │     ├─→ DataConverter(strategy, config)
-  │     │     └─→ 字段类型分析 → 数据转换
-  │     │
-  │     └─→ AdvancedController (可选)
-  │           ├─→ RetryStrategy (指数/线性/固定)
-  │           └─→ RateLimitStrategy (固定/滑动窗/固定窗)
-  │
-  └─→ engine.sync(DataFrame)
-        ├─→ sync_full()
-        ├─→ sync_incremental()
-        ├─→ sync_overwrite()
-        └─→ sync_clone()
+```text
+CLI 命令
+YAML schema v2
+JSON output envelope
+exit code contract
 ```
 
----
+`SyncService`、`core.*`、`api.*` 和 typed client constructor 是仓库内部接口，不构成
+稳定 Python SDK。XTF 2.0 不保留旧 flat config、旧 bool facade 或旧独立二进制入口。
 
-## 2. 入口层
+## 2. 模块职责
 
-> 源码：[`XTF.py`](../XTF.py)
+| 模块 | 职责 | 禁止事项 |
+| --- | --- | --- |
+| `XTF.py` | 调用 `xtf_cli.main()` 并返回进程退出码 | 不解析配置，不装配 client，不执行同步 |
+| `xtf_cli/` | parser、YAML v2、precedence、source tracking、dispatch、human/JSON render、exit mapping | 不包含同步算法或 Feishu wire 细节 |
+| `core/` | runtime config、key、snapshot、reconcile、mode、target compiler、plan、execute、verify | 不直接拼 Feishu HTTP 请求 |
+| `api/` | auth、transport、typed error、pagination、Bitable v1/Base v3/Sheet wire contract | 不决定同步 mode 或业务 action 顺序 |
+| `utils/` | side-effect-light 文件读取辅助 | 不装配远端 client，不触发网络 |
 
-### 2.1 统一入口 XTF.py
+物理目录仍保持 `xtf_cli/`、`core/`、`api/`，不为形式拆微服务或建立第二条产品路径。
 
-`XTF.py` 是整个系统的唯一入口，负责：
+## 3. 启动与配置
 
-1. **初始化日志**：创建控制台 + 文件双输出（`logs/xtf_{target}_{timestamp}.log`）
-2. **打印横幅**：显示版本号、Excel 引擎信息、支持特性
-3. **加载配置**：解析 CLI 参数 → 合并 YAML 配置 → 构建 `SyncConfig`
-4. **读取数据**：使用 `ExcelReader` 读取 Excel/CSV 为 DataFrame
-5. **执行同步**：调用 `XTFSyncEngine.sync(df)` 完成同步
-6. **输出报告**：显示同步结果、耗时、飞书文档链接
+### 3.1 CLI 解析
 
-### 2.2 目标类型自动推断
+`xtf_cli.parser` 提供以下命令：
 
-当用户未指定 `--target-type` 时，系统按以下顺序推断：
-
-```
-1. CLI 参数 --target-type          (最高优先级)
-2. 配置文件 target_type 字段
-3. 智能推断：
-   ├─ 有 app_token + table_id      → bitable
-   └─ 有 spreadsheet_token + sheet_id → sheet
-4. 默认值：bitable                  (最低优先级)
+```text
+XTF sync
+XTF config init|validate|show
+XTF doctor
+XTF --version
 ```
 
-> 源码：`core/config.py` → `parse_target_type()`
+同步参数只能出现在 `sync` 子命令下。旧根级 flat invocation 是 usage error。
 
-### 2.3 CLI 参数体系
+### 3.2 配置解析
 
-XTF 支持 20+ CLI 参数，覆盖配置文件中的大部分选项：
+`xtf_cli.config` 负责：
 
-| 分类 | 参数 | 说明 |
-|------|------|------|
-| **基础** | `--config`, `--file-path`, `--app-id`, `--app-secret`, `--target-type` | 必要连接信息 |
-| **Bitable** | `--app-token`, `--table-id`, `--create-missing-fields`, `--no-create-fields` | 多维表格专用 |
-| **Sheet** | `--spreadsheet-token`, `--sheet-id`, `--start-row`, `--start-column` | 电子表格专用 |
-| **同步** | `--sync-mode`, `--index-column` | 同步行为控制 |
-| **性能** | `--batch-size`, `--rate-limit-delay`, `--max-retries` | 性能调优 |
-| **策略** | `--field-type-strategy` | 字段类型策略 |
-| **日志** | `--log-level` | 日志级别 |
+1. 读取并严格验证 `schema_version: 2`。
+2. 拒绝未知 key、错误 leaf type 和非空 inactive source/target branch。
+3. 按 `CLI > YAML > target defaults` 合并普通字段。
+4. 按 `CLI > XTF_APP_SECRET > YAML` 合并 `app_secret`。
+5. 记录每个最终值的来源。
+6. 构造 `core.runtime_config.RuntimeConfig`。
 
-> 详细参数说明：[CONFIG.md](./CONFIG.md)
+`RuntimeConfig` 是嵌套 frozen dataclass graph：
 
----
-
-## 3. 配置层
-
-> 源码：[`core/config.py`](../core/config.py)
-
-### 3.1 SyncConfig 数据类
-
-`SyncConfig` 是整个系统的配置核心，使用 Python `@dataclass` 实现：
-
-```python
-@dataclass
-class SyncConfig:
-    # 基础配置（必需）
-    file_path: str
-    app_id: str
-    app_secret: str
-    target_type: TargetType           # bitable | sheet
-
-    # 多维表格配置
-    app_token: Optional[str]          # 多维表格应用 Token
-    table_id: Optional[str]           # 数据表 ID
-    create_missing_fields: bool       # 自动创建缺失字段 (默认 True)
-
-    # 电子表格配置
-    spreadsheet_token: Optional[str]  # 电子表格 Token
-    sheet_id: Optional[str]           # 工作表 ID
-    start_row: int                    # 起始行 (默认 1)
-    start_column: str                 # 起始列 (默认 "A")
-
-    # 同步设置
-    sync_mode: SyncMode               # full | incremental | overwrite | clone
-    index_column: Optional[str]       # 索引列名
-
-    # 字段类型策略
-    field_type_strategy: FieldTypeStrategy  # raw | base | auto | intelligence
-
-    # 性能设置
-    batch_size: int                   # 批处理大小 (bitable=500, sheet=1000)
-    rate_limit_delay: float           # API 间隔 (bitable=0.01s, sheet=0.1s)
-    max_retries: int                  # 最大重试次数 (默认 3)
-
-    # 高级控制
-    enable_advanced_control: bool     # 是否启用高级重试/频控
-    selective_sync: SelectiveSyncConfig  # 选择性同步配置
-
-    # ... 更多字段见 CONFIG.md
+```text
+RuntimeConfig
+├── auth
+├── source
+├── target (RuntimeBitableTarget | RuntimeSheetTarget)
+├── sync
+│   ├── index
+│   └── selective
+├── conversion
+├── control
+│   ├── retry
+│   └── rate_limit
+└── output
 ```
 
-### 3.2 配置优先级
+secret/token 字段不出现在 dataclass repr。planner、bootstrap 和 executor 直接消费这个
+不可变配置，不再通过 mutable `SyncConfig` adapter 或全局 singleton 传递运行时状态。
 
-```
-CLI 参数 (最高)  →  YAML 配置文件  →  智能推断  →  系统默认值 (最低)
-```
+### 3.3 Bootstrap
 
-**智能推断示例**：
-- Bitable 默认 `batch_size=500`，`rate_limit_delay=0.01`
-- Sheet 默认 `batch_size=1000`，`rate_limit_delay=0.1`
-- `sheet_protect_formulas=True` 时自动启用 `sheet_validate_results=True`
-- `sheet_protect_formulas=True` 仅支持 `full`，并在配置加载时要求有效索引列
+`core.bootstrap.bootstrap_runtime()` 显式装配一次运行所需依赖：
 
-### 3.3 配置验证
-
-`SyncConfig.__post_init__()` 执行全面验证：
-
-| 验证项 | 规则 | 错误类型 |
-|--------|------|----------|
-| 目标类型 | 必须为 `bitable` 或 `sheet` | `ValueError` |
-| Bitable 必填 | `app_token` + `table_id` 不能为空 | `ValueError` |
-| Sheet 必填 | `spreadsheet_token` + `sheet_id` 不能为空 | `ValueError` |
-| 选择性同步 | `columns` 非空列表；不含重复项；不支持 clone 模式 | `ValueError` |
-| 分块参数 | `sheet_scan_max_rows/cols > 0`，`sheet_write_max_rows/cols > 0` | `ValueError` |
-| 合并间隔 | `max_gap_for_merge` 范围 0-50 | `ValueError` |
-| 渲染选项 | 映射到标准值（大小写不敏感） | 自动修正 |
-
----
-
-## 4. 引擎层
-
-### 4.1 XTFSyncEngine
-
-> 源码：[`core/engine.py`](../core/engine.py)
-
-`XTFSyncEngine` 是系统的核心调度器，统一管理 Bitable 和 Sheet 两种目标的同步逻辑。
-
-**核心方法**：
-
-| 方法 | 签名 | 说明 |
-|------|------|------|
-| `sync()` | `(df: DataFrame) → bool` | 主入口，根据 sync_mode 分发 |
-| `sync_full()` | `(df: DataFrame) → bool` | 全量同步 |
-| `sync_incremental()` | `(df: DataFrame) → bool` | 增量同步 |
-| `sync_overwrite()` | `(df: DataFrame) → bool` | 覆盖同步 |
-| `sync_clone()` | `(df: DataFrame) → bool` | 克隆同步 |
-| `ensure_fields_exist()` | `(df: DataFrame) → Tuple[bool, Dict]` | 确保字段存在（Bitable） |
-| `get_all_bitable_records()` | `() → List[Dict]` | 获取全部 Bitable 记录 |
-| `get_current_sheet_data()` | `() → DataFrame` | 获取当前 Sheet 数据 |
-| `process_in_batches()` | `(items, batch_size, func) → bool` | 通用批处理 |
-
-**同步分发逻辑**：
-
-```python
-def sync(self, df):
-    if self.config.target_type == TargetType.BITABLE:
-        # Bitable 前置：确保字段存在 → 字段类型分析 → 数据转换
-        self.ensure_fields_exist(df)
-    # 按模式分发
-    mode_map = {
-        SyncMode.FULL: self.sync_full,
-        SyncMode.INCREMENTAL: self.sync_incremental,
-        SyncMode.OVERWRITE: self.sync_overwrite,
-        SyncMode.CLONE: self.sync_clone,
-    }
-    return mode_map[self.config.sync_mode](df)
+```text
+RuntimeConfig
+  ├── Logger / handlers（每次 runtime 显式配置）
+  ├── RequestController（advanced 启用时，每次 runtime 独立）
+  ├── RetryableAPIClient
+  ├── FeishuAuth
+  └── BaseV3Backend | BitableV1Backend | SheetAPI
 ```
 
-> 详细同步逻辑：[SYNC.md](./SYNC.md)
+`api/` 不反向导入 `core.control`，也不读取进程全局 controller。
 
-### 4.2 DataConverter
+## 4. 单一 typed 数据流
 
-> 源码：[`core/converter.py`](../core/converter.py)
-
-`DataConverter` 负责智能字段类型分析和数据转换，是 XTF 的数据处理核心。
-
-**职责**：
-1. **字段类型分析**：根据策略（raw/base/auto/intelligence）分析 DataFrame 列类型
-2. **类型推荐**：为每个字段生成推荐类型、置信度、推荐理由
-3. **数据转换**：将原始数据转换为目标类型所需的格式
-4. **转换统计**：生成完整的转换成功率和问题分析报告
-
-**支持的目标类型**（Bitable）：
-
-| 类型 ID | 类型名称 | 适用策略 |
-|---------|----------|----------|
-| 1 | 文本 | raw, base, auto, intelligence |
-| 2 | 数字 | base, auto, intelligence |
-| 5 | 日期 | base, auto, intelligence |
-| 3 | 单选 | auto, intelligence |
-| 4 | 多选 | auto, intelligence |
-| 7 | 复选框 | intelligence |
-| 11 | 人员 | intelligence |
-| 15 | 超链接 | intelligence |
-
-> 详细策略说明：[FIELD_TYPES.md](./FIELD_TYPES.md)
-
-### 4.3 高级控制器
-
-> 源码：[`core/control.py`](../core/control.py)
-
-当 `enable_advanced_control: true` 时，系统使用高级控制器替代默认的简单重试和固定延迟。
-
-**组件架构**：
-
-```
-AdvancedController (线程安全单例)
-  ├─→ RetryStrategy
-  │     ├─ ExponentialBackoffStrategy  (指数退避)
-  │     ├─ LinearGrowthStrategy        (线性增长)
-  │     └─ FixedWaitStrategy           (固定等待)
-  └─→ RateLimitStrategy
-        ├─ FixedWaitStrategy           (固定等待)
-        ├─ SlidingWindowStrategy       (滑动窗口)
-        └─ FixedWindowStrategy         (固定窗口)
+```text
+SourceReader → SourceTable → TargetInspector → TargetSnapshot
+→ KeyPolicy + Reconciler → ModePolicy
+→ BitablePlanCompiler / SheetPlanCompiler
+→ ExecutionPlan → Executor + Verifier → SyncResult
 ```
 
-> 详细配置：[CONTROL.md](./CONTROL.md)
+### 4.1 SourceTable
 
----
+本地 `DataFrame` 会先转换为不可变 `SourceTable`；后续对原 `DataFrame` 的修改不会改变
+已捕获的 source。Bitable source 由 typed backend 完整读取并转换为 canonical records。
 
-## 5. API 层
+### 4.2 TargetSnapshot
 
-### 5.1 认证模块
+`BitableSnapshot` 保留：
 
-> 源码：[`api/auth.py`](../api/auth.py)
+- backend、revision、timezone；
+- canonical schema 和 records；
+- `complete`、`ignored_fields`、inspected time；
+- 内容 fingerprint。
 
-`FeishuAuth` 管理飞书 API 的认证令牌：
+`SheetSnapshot` 保留：
 
-- **认证方式**：使用 `app_id` + `app_secret` 获取 `tenant_access_token`
-- **令牌缓存**：自动缓存令牌，过期前 5 分钟自动刷新
-- **错误处理**：认证失败时抛出明确的异常信息
+- 实际读取 range、grid、header；
+- index key→row mapping；
+- 公式/保护列；
+- complete、inspected time 和内容 fingerprint。
 
-### 5.2 基础客户端
+无法证明读取完整时，不允许把已读前缀当作完整目标状态。
 
-> 源码：[`api/base.py`](../api/base.py)
+### 4.3 KeyPolicy 与 ModePolicy
 
-`RetryableAPIClient` 是所有 API 调用的基础层：
+`KeyPolicy` 集中处理空 key、重复 key、数字、文本和 DATETIME：
 
-- **自动重试**：可配置重试次数和延迟
-- **频率控制**：内置请求间隔控制
-- **错误分类**：区分 429（限流）、5xx（服务器错误）等
-- **日志记录**：详细的请求/响应日志
+- 本地空 key、本地重复 key、远端重复 key在 mutation 前失败；
+- by-key 模式保留远端空 key并产生 warning；
+- `int`、`Decimal` 和数字文本做无损十进制规范化；
+- 已经以高风险 `float` 进入程序的大整数 fail closed；
+- DATETIME `exact` 使用 UTC 毫秒，naive 值按 UTC；
+- DATETIME `day` 要求显式 IANA timezone。
 
-`FeishuAuth` 与 Bitable/Sheet 共用同一个 `RetryableAPIClient`，认证请求不会绕过
-配置的重试和频控。HTTP 429/5xx 退避优先读取 `X-Ogw-Ratelimit-Reset` 或
-`Retry-After`，没有服务端提示时再使用带少量 jitter 的指数退避。
-transport 独占网络异常和 HTTP 429/5xx 重试；Bitable 只重试 HTTP 200 中的明确
-业务错误码，避免嵌套重试放大非幂等 POST。高级 controller 耗尽后保留最终
-HTTP response；完全没有 response 的网络失败会转为 typed transport error。
+`ModePolicy` 固定模式/策略矩阵：
 
-### 5.3 专用 SDK 契约
+| mode | strategy |
+| --- | --- |
+| `full` | `by_key` |
+| `incremental` | `by_key` 或 `append_only` |
+| `overwrite` | `by_key` |
+| `clone` | 内部 `replace_all`，配置中省略 `match_strategy` |
 
-> 源码：[`api/sdk.py`](../api/sdk.py)
+planner 不根据目标为空、Sheet 无 index 或其他运行时条件隐式改成 clone。
 
-`api/sdk.py` 是 XTF 的 Python SDK facade，不依赖 `lark-cli` 进程或 Go SDK：
+## 5. ExecutionPlan 与公开 PlanDocument
 
-- `XTFFeishuClient`：以 additive facade 统一装配认证和 transport。`bitable()` 继续
-  返回 Bitable v1 legacy `BitableAPI`；同步引擎改用
-  `bitable_backend(backend="base_v3" | "bitable_v1")` 的 typed backend；`sheet()`
-  保持现有 `SheetAPI`。既有类和构造方式继续可用。注入自定义 `api_client`
-  时，`max_retries` / `rate_limit_delay` 由该 transport 自身负责。
-- `FeishuResponseParser`：统一处理 Bitable/Sheet 业务响应的 HTTP 状态、飞书业务码、
-  `log_id`、`retryable` 与 `retry_after`；transport 无 response 时由
-  `FeishuAPIError(kind="transport")` 保留统一异常边界。认证令牌响应暂时保留既有
-  异常文本契约。
-- `Paginator` / `Page`：显式表达 `has_more` 与 `page_token`；缺失/重复游标、
-  `data/items` 类型错误直接失败，不把不完整或畸形响应当成完整结果。
-- `run_batches` / `PartialBatchError`：批次首个失败即停止，明确报告已应用前缀；
-  不假设服务端会回滚成功批次。
-- Bitable 的 `create/update/delete` 等布尔接口保留既有 `False` 失败契约；
-  查询接口则暴露带诊断元数据的 typed exception。
+内部 `ExecutionPlan` 包含：
 
-`api/bitable_backend.py` 定义 canonical `FieldSchema` / `CanonicalRecord`、typed
-`RecordReadResult` / `MutationReceipt` 和 Protocol；`api/bitable_v1.py` 与
-`api/bitable_v3.py` 分别拥有自己的 wire schema、分页和批处理。Base v3 严格解码
-matrix，并以单批 200 条为上限；任何 auth、权限、404、429、5xx、timeout、业务码或
-schema 错误都不会回退到 v1。
+- typed action union；
+- mutation payload；
+- snapshot precondition；
+- verification policy；
+- requested/effective mode 和配置来源。
 
-同步模式、字段转换、公式保护和远程删除仍归 `core/engine.py`，不会下沉到 SDK。
-现有 `BitableAPI` / `SheetAPI` 公共调用方式保持不变。
+`ExecutionPlan` 仅存在于当前进程，executor 只接受该对象。`to_public()` 生成不可重放的
+`PlanDocument(schema_version=1)`；公开 action 只包含：
 
-Sheet 元数据不可用时可以用配置化窗口做有界诊断读取，但该读取会标记为不完整；
-`full` / `incremental` / `overwrite` 等依赖远端索引的路径会停止写入，避免把截断结果
-误判为完整远端状态。`clone` 仍要求先取得网格属性并成功清空后才写入。
-启用公式保护时只允许 `full`，且双读无法确认公式状态时停止写入；成功识别后改走
-精确列写入，不再整表回写。选择性范围只合并真正相邻的目标列，不会跨过未选择列
-填入空值。
-
-### 5.4 Bitable API
-
-> 源码：[`api/bitable.py`](../api/bitable.py)
-
-`BitableAPI` 封装飞书多维表格的全部操作：
-
-| 方法 | 说明 |
-|------|------|
-| `list_fields()` | 获取表格字段列表 |
-| `create_field()` | 创建新字段 |
-| `search_records()` | 搜索/分页获取记录 |
-| `batch_create_records()` | 批量创建记录 |
-| `batch_update_records()` | 批量更新记录 |
-| `batch_delete_records()` | 批量删除记录 |
-
-**特性**：
-- 分页获取支持循环检测（防止无限翻页）
-- 批量操作自动按 `batch_size` 分片
-- 富文本字段自动处理 `[{"text": "...", "type": "text"}]` 格式
-- legacy facade 的 `bool` / `tuple` / `dict` 返回契约永久保留；typed receipt 的
-  `accepted` 只表示请求被服务端接受，只有可选读回通过才表示一致
-
-### 5.5 Sheet API
-
-> 源码：[`api/sheet.py`](../api/sheet.py)
-
-`SheetAPI` 封装飞书电子表格的全部操作：
-
-| 方法 | 说明 |
-|------|------|
-| `get_sheet_info()` | 获取工作表元信息（行列数） |
-| `get_sheet_data()` | 读取指定范围数据 |
-| `write_sheet_data()` | 写入指定范围数据 |
-| `append_data()` | 追加数据到末尾 |
-| `batch_update()` | 批量更新多个范围 |
-| `set_cell_format()` | 设置单元格格式 |
-| `create_data_validation()` | 创建数据验证（下拉列表） |
-
-**特性**：
-- 智能分块：超过行/列限制时自动拆分请求
-- 二分重试：遇到 90227（请求过大）错误时自动减半重试
-- 范围验证：自动检查和修正 A1 记法范围
-- 公式识别：支持 `identify_formula_columns()` 检测公式列
-
----
-
-## 6. 数据处理流水线
-
-完整的数据同步流程（以 Full 模式为例）：
-
-```
-第1步：初始化
-  XTF.py → 解析 CLI → 加载 YAML → 构建 SyncConfig → 初始化日志
-
-第2步：读取数据
-  ExcelReader → 读取 Excel/CSV → pandas DataFrame
-  ├─ .xlsx/.xls: 优先 Calamine 引擎 (4-20x 加速)，失败回退 OpenPyXL
-  └─ .csv: UTF-8 优先，失败自动尝试 GBK
-
-第3步：初始化引擎
-  XTFSyncEngine(config) → 初始化 FeishuAuth → 初始化 API 客户端
-
-第4步：字段准备 (仅 Bitable)
-  ├─ 获取远程字段列表
-  ├─ DataConverter 分析 DataFrame 列类型
-  ├─ 创建缺失字段 (如 create_missing_fields=True)
-  └─ 生成字段类型映射
-
-第5步：数据同步
-  ├─ 获取远程现有数据
-  ├─ 构建索引映射 (index_column → 记录ID/行号)
-  ├─ 数据分类：更新 vs 新增
-  ├─ 应用选择性同步过滤 (如启用)
-  ├─ 应用字段类型转换
-  └─ 批量执行 API 操作
-
-第6步：结果报告
-  ├─ 转换统计报告（成功率、问题字段）
-  ├─ 同步统计（更新/新增/删除数量）
-  ├─ 列差异报告（如启用公式保护）
-  └─ 输出飞书文档链接
+```text
+kind
+count
+unit
+scope
+destructive
+clears_values
 ```
 
----
+公开 JSON 不包含凭据、记录正文、mutation payload、snapshot precondition 或 verification
+policy。dry-run 与正式执行共享 planner，但 dry-run 永远不调用 executor。
 
-## 7. 错误处理架构
+## 6. Target-specific compiler 与执行
 
-XTF 采用多层错误处理策略：
+### 6.1 Bitable
 
-### 第一层：API 级别
+`BitablePlanCompiler` 生成 field/record action。Base v3 和 Bitable v1 各自拥有 wire、分页、
+schema decode、batch limit 和业务重试，不调用已删除的 legacy API 私有方法。
 
-| 错误类型 | 处理方式 |
-|----------|----------|
-| 认证失败 | 自动刷新 token，重试请求 |
-| 429 限流 | 等待后重试，使用频控策略 |
-| 5xx 服务器错误 | 指数退避重试 |
-| 网络超时 | 重试至 max_retries |
+执行前的新鲜度检查：
 
-### 第二层：数据级别
+- Base v3 比较当前 revision；
+- create 再确认 key 仍不存在；
+- update/delete 再确认 record ID→key 未漂移；
+- schema action 比较 schema fingerprint。
 
-| 错误类型 | 处理方式 |
-|----------|----------|
-| 90227 请求过大 | 自动二分（行 → 列）减半重试 |
-| 字段类型不匹配 | 强制转换，记录警告 |
-| 数据格式异常 | 跳过并记录，不阻断整体同步 |
+每次确认成功的 mutation 用 receipt/readback 推进 expected snapshot/revision。无法推进时停止
+后续 action。
 
-### 第三层：流程级别
+### 6.2 Sheet
 
-| 错误类型 | 处理方式 |
-|----------|----------|
-| 配置缺失/非法 | 启动时即报错，生成示例配置 |
-| 文件不存在 | 明确错误提示和路径建议 |
-| 用户中断 (Ctrl+C) | 优雅退出，输出已完成部分 |
+`SheetPlanCompiler` 生成 target-specific range/row/column action。`RangeChunker` 是 A1 range、
+矩阵切片和 applied range 的唯一分块实现：
 
----
+- write 最多 `5000` 行 × `100` 列；
+- clear 逐块惰性创建空矩阵；
+- batch update 将每个 logical range 拆成合规块并顺序提交；
+- wide append 先追加不超过 `100` 列的 anchor band，再按服务端 actual range 固定写剩余列。
 
-## 8. 扩展指南
+wide append 缺失可证明的 actual range 时，不猜测落点，返回 `indeterminate` 并停止。
 
-### 添加新的同步模式
+Sheet action 执行前按风险重读 header、index key→row mapping 或关键 range fingerprint，防止
+计划后插行、换表头或目标范围漂移。数据写入、公式保护、公式验证和配置要求的 readback
+属于 required；样式和自动下拉等 enrichment 属于 best effort，只能产生 warning。
 
-1. 在 `core/config.py` 中扩展 `SyncMode` 枚举
-2. 在 `core/engine.py` 中实现 `sync_{mode_name}()` 方法
-3. 分别实现 `_sync_{mode_name}_bitable()` 和 `_sync_{mode_name}_sheet()`
-4. 在 `sync()` 分发逻辑中注册新模式
+## 7. 结果与错误优先级
 
-### 添加新的字段类型
+`SyncResult` 的 wire status 固定为：
 
-1. 在 `core/converter.py` 中添加类型检测逻辑
-2. 实现对应的数据转换方法
-3. 在各策略（base/auto/intelligence）中注册
-
-### 添加新的 API 操作
-
-1. 在 `api/bitable.py` 或 `api/sheet.py` 中添加方法
-2. 使用 `RetryableAPIClient` 基础设施（自动重试/频控）
-3. 在 `core/engine.py` 中调用新 API
-
-### 添加新的重试/频控策略
-
-1. 在 `core/control.py` 中继承 `RetryStrategy` 或 `RateLimitStrategy`
-2. 实现 `calculate_delay()` 或 `wait_if_needed()` 方法
-3. 在策略工厂中注册新策略名称
-
----
-
-## 文件结构总览
-
+```text
+success | noop | failed | partial | indeterminate
 ```
-XTF/
-├── XTF.py                    # 统一入口：CLI 解析、流程编排
-├── core/
-│   ├── config.py             # 配置管理：SyncConfig、验证、优先级
-│   ├── engine.py             # 同步引擎：四种模式、选择性同步、公式保护
-│   ├── converter.py          # 数据转换：类型分析、转换、统计报告
-│   └── control.py            # 高级控制：重试策略、频控策略
-├── api/
-│   ├── auth.py               # 认证：tenant_access_token 管理
-│   ├── base.py               # 基础客户端：重试、频控、日志
-│   ├── bitable.py            # 多维表格 API：字段/记录 CRUD
-│   └── sheet.py              # 电子表格 API：范围读写、格式化、分块
-├── utils/
-│   └── excel_reader.py       # Excel/CSV 读取器：Calamine 加速
-├── lite/                     # 旧版独立脚本（兼容保留）
-│   ├── XTF_Bitable.py
-│   └── XTF_Sheet.py
-├── config.example.yaml       # 配置模板
-├── requirements.txt          # 生产依赖
-├── requirements-dev.txt      # 开发依赖
-├── docs/                     # 文档目录
-│   └── feishu-openapi-doc/   # 飞书 OpenAPI 参考文档
-└── logs/                     # 运行日志
+
+判定规则：
+
+- `failed`：没有确认成功的 mutation，发生确定性失败；
+- `partial`：已有确认成功前缀，后续发生确定性 mutation 或 verification 失败；
+- `indeterminate`：任一已发送 mutation 的远端结果未知，不论此前是否有成功前缀；
+- best-effort warning 不覆盖已确认的数据成功状态。
+
+每个 action receipt 保留 requested/accepted unit、actual ranges、failed batch index、readback
+和 unknown scope。executor 首错停止，不把已应用前缀报告成完整成功。
+
+CLI 将错误类别映射为 `0/1/2/3/4/5/6/7/8/130`。退出码用于故障类别；需要精确区分
+`failed`、`partial`、`indeterminate` 时读取 `--json`。
+
+## 8. Retry ownership
+
+```text
+RequestController / RateLimiter
+    ↓
+RetryableAPIClient：request exception、HTTP 429/5xx
+    ↓
+Bitable backend：HTTP 成功响应中的明确 retryable business code
 ```
+
+同一个 HTTP 失败不能同时消耗 transport 和 Bitable 两套预算。缺少幂等依据且 response
+丢失的 mutation 不盲目重放，而是返回 unknown outcome。
+
+## 9. 验证边界
+
+默认单元测试使用 mock，不依赖真实 Feishu、真实凭据、网络、`config.yaml` 或执行顺序。
+本地测试、lint、typecheck 和 PyInstaller smoke 只证明代码/构建契约；不能替代：
+
+```text
+GitHub exact-head CI
+artifact 下载回读
+真实 Feishu mutation/readback
+业务 UAT
+Release/部署
+```
+
+正式版本必须使用有 checksum 的 RC artifact 在隔离 Feishu 资源上完成 UAT。生产同步、
+生产 delete/clear、合并、tag 和 Release 都是独立授权层。

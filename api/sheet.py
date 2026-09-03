@@ -1,104 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-电子表格 API 模块
+"""Typed Feishu Sheet reads, mutations, ranges, receipts, and enrichment helpers.
 
-模块概述：
-    此模块封装了飞书电子表格（Sheets）的 API 操作，提供电子表格的
-    读取和写入功能。电子表格是飞书的在线表格产品，类似于 Excel Online
-    或 Google Sheets。
-
-主要功能：
-    1. 获取电子表格信息
-    2. 读取指定范围的数据
-    3. 写入数据（支持大数据量自动分块）
-    4. 批量单元格操作
-    5. 行列操作（清空、删除、追加）
-    6. 选择性列同步
-    7. 范围优化（合并相邻列）
-
-核心类：
-    SheetAPI:
-        飞书电子表格 API 客户端，封装所有电子表格相关的 API 调用。
-        支持配置起始位置（start_row, start_column）。
-
-写入策略：
-    1. 预分块：将大数据量按行和列预先分割
-    2. 自动二分重试：遇到"请求过大"错误时自动缩小批次
-    3. 频率控制：请求间自动添加延迟避免限流
-
-范围表示法：
-    使用 A1 表示法：{sheet_id}!{start_col}{start_row}:{end_col}{end_row}
-    示例：Sheet1!A1:C10 表示 Sheet1 工作表的 A1 到 C10 区域
-
-列号转换：
-    A=1, B=2, ..., Z=26, AA=27, AB=28, ...
-    提供 column_letter_to_number 和 column_number_to_letter 方法
-
-API 端点（基础路径：https://open.feishu.cn/open-apis/sheets）：
-    信息：
-        GET  /v3/spreadsheets/{token} - 获取电子表格信息
-    数据：
-        GET  /v2/spreadsheets/{token}/values/{range} - 读取数据
-        PUT  /v2/spreadsheets/{token}/values - 写入数据
-        POST /v2/spreadsheets/{token}/values_batch_update - 批量更新
-        POST /v2/spreadsheets/{token}/values_append - 追加数据
-    元数据与公式：
-        GET  /sheets/v3/spreadsheets/{token}/sheets/query - 查询工作表元数据
-        POST /sheet_ai/v2/spreadsheets/{token}/tools/invoke_read - 校验公式
-    行列：
-        POST /v2/spreadsheets/{token}/insert_dimension_range - 插入行/列
-        DELETE /v2/spreadsheets/{token}/dimension_range - 删除行/列
-
-错误码处理：
-    - 90227: 请求过大（自动触发二分重试）
-    - 其他错误码按标准流程处理
-
-使用示例：
-    >>> from api import FeishuAuth, SheetAPI
-    >>>
-    >>> auth = FeishuAuth(app_id, app_secret)
-    >>> api = SheetAPI(auth, start_row=1, start_column="A")
-    >>>
-    >>> # 获取表格信息
-    >>> info = api.get_sheet_info(spreadsheet_token)
-    >>>
-    >>> # 读取数据
-    >>> data = api.get_sheet_data(spreadsheet_token, "Sheet1!A1:C10")
-    >>>
-    >>> # 写入数据
-    >>> values = [["姓名", "年龄"], ["张三", 25], ["李四", 30]]
-    >>> api.write_sheet_data(spreadsheet_token, sheet_id, values)
-
-选择性列同步：
-    支持只同步指定的列，而非全部数据：
-    1. 配置 selective_sync.columns 指定要同步的列名
-    2. 系统自动计算列范围并优化（合并相邻列）
-    3. 仅更新指定列的数据，保留其他列不变
-
-性能特性：
-    - 自动分块：大数据按 row_batch_size 和 col_batch_size 分块
-    - 二分重试：请求过大时自动减半批次大小
-    - 范围优化：相邻列合并为连续范围减少 API 调用
-    - 串行写入：按成功前缀首错停止，保留范围与错误语义
-
-依赖关系：
-    内部模块：
-        - api.auth: 认证管理（FeishuAuth）
-        - api.base: 网络请求（RetryableAPIClient）
-    外部依赖：
-        - time: 延迟控制
-        - logging: 日志记录
-
-注意事项：
-    1. 行号从 1 开始（1-based）
-    2. 写入空值会清除单元格内容
-    3. 大数据量写入建议调整 batch_size
-    4. clone 模式会清空整个工作表
-
-作者: XTF Team
-版本: 1.7.3+
-更新日期: 2026-01-24
+``SheetAPI`` exposes the process-internal contracts consumed by ``SyncService``.
+Required data mutations use ``RangeChunker`` and typed ``MutationReceipt``;
+style and validation helpers remain best-effort enrichment operations.
 """
 
 import json
@@ -106,7 +12,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Dict, Any, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import Dict, Any, Iterator, List, Mapping, Optional, Sequence, Tuple, Union
 
 from .auth import FeishuAuth
 from .base import RetryableAPIClient
@@ -181,6 +87,119 @@ class A1Range:
         for char in value:
             result = result * 26 + ord(char) - ord("A") + 1
         return result
+
+
+@dataclass(frozen=True)
+class RangeChunk:
+    """One bounded A1 range and its matching rectangular matrix."""
+
+    a1_range: A1Range
+    values: Tuple[Tuple[Any, ...], ...]
+
+    def as_lists(self) -> List[List[Any]]:
+        return [list(row) for row in self.values]
+
+
+class RangeChunker:
+    """Single source of truth for bounded Sheet range and matrix slicing."""
+
+    def __init__(self, max_rows: int, max_cols: int):
+        for name, value in (("max_rows", max_rows), ("max_cols", max_cols)):
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
+        self.max_rows = max_rows
+        self.max_cols = max_cols
+
+    @staticmethod
+    def copy_matrix(values: Sequence[Sequence[Any]]) -> Tuple[Tuple[Any, ...], ...]:
+        if not isinstance(values, (list, tuple)) or not values:
+            raise ValueError("typed Sheet values must be a non-empty matrix")
+        if any(not isinstance(row, (list, tuple)) or not row for row in values):
+            raise ValueError("typed Sheet values must have non-empty rows")
+        width = len(values[0])
+        if any(len(row) != width for row in values):
+            raise ValueError("typed Sheet values must be rectangular")
+        return tuple(tuple(row) for row in values)
+
+    @staticmethod
+    def require_shape(a1_range: A1Range, values: Sequence[Sequence[Any]]) -> None:
+        if len(values) != a1_range.row_count or len(values[0]) != a1_range.col_count:
+            raise ValueError(
+                "typed Sheet matrix shape does not match A1 range "
+                f"{a1_range.text}: expected "
+                f"{a1_range.row_count}x{a1_range.col_count}"
+            )
+
+    def chunk_count(self, a1_range: A1Range) -> int:
+        row_chunks = (a1_range.row_count + self.max_rows - 1) // self.max_rows
+        col_chunks = (a1_range.col_count + self.max_cols - 1) // self.max_cols
+        return row_chunks * col_chunks
+
+    def split(
+        self, a1_range: A1Range, values: Sequence[Sequence[Any]]
+    ) -> Iterator[RangeChunk]:
+        self.require_shape(a1_range, values)
+        for col_start in range(a1_range.start_col, a1_range.end_col + 1, self.max_cols):
+            col_end = min(col_start + self.max_cols - 1, a1_range.end_col)
+            col_offset = col_start - a1_range.start_col
+            width = col_end - col_start + 1
+            for row_start in range(
+                a1_range.start_row, a1_range.end_row + 1, self.max_rows
+            ):
+                row_end = min(row_start + self.max_rows - 1, a1_range.end_row)
+                row_offset = row_start - a1_range.start_row
+                height = row_end - row_start + 1
+                chunk_values = tuple(
+                    tuple(row[col_offset : col_offset + width])
+                    for row in values[row_offset : row_offset + height]
+                )
+                yield RangeChunk(
+                    A1Range(
+                        a1_range.sheet_id,
+                        row_start,
+                        row_end,
+                        col_start,
+                        col_end,
+                    ),
+                    chunk_values,
+                )
+
+    def empty(self, a1_range: A1Range) -> Iterator[RangeChunk]:
+        """Yield bounded empty matrices lazily instead of allocating the full grid."""
+        for col_start in range(a1_range.start_col, a1_range.end_col + 1, self.max_cols):
+            col_end = min(col_start + self.max_cols - 1, a1_range.end_col)
+            width = col_end - col_start + 1
+            for row_start in range(
+                a1_range.start_row, a1_range.end_row + 1, self.max_rows
+            ):
+                row_end = min(row_start + self.max_rows - 1, a1_range.end_row)
+                height = row_end - row_start + 1
+                yield RangeChunk(
+                    A1Range(
+                        a1_range.sheet_id,
+                        row_start,
+                        row_end,
+                        col_start,
+                        col_end,
+                    ),
+                    tuple(tuple("" for _ in range(width)) for _ in range(height)),
+                )
+
+    @staticmethod
+    def fixed_band(
+        actual_anchor: A1Range, *, column_offset: int, width: int
+    ) -> A1Range:
+        """Map a source column band onto rows allocated by an append response."""
+        if column_offset < 0 or width <= 0:
+            raise ValueError("column_offset and width must describe a non-empty band")
+        start_col = actual_anchor.start_col + column_offset
+        return A1Range(
+            actual_anchor.sheet_id,
+            actual_anchor.start_row,
+            actual_anchor.end_row,
+            start_col,
+            start_col + width - 1,
+        )
 
 
 @dataclass(frozen=True)
@@ -277,32 +296,16 @@ class SheetAPI:
         return result or "A"
 
     @staticmethod
-    def _typed_matrix(values: Sequence[Sequence[Any]]) -> List[List[Any]]:
+    def _typed_matrix(values: Sequence[Sequence[Any]]) -> Tuple[Tuple[Any, ...], ...]:
         """Validate and copy a non-empty rectangular matrix before mutation."""
-        if not isinstance(values, (list, tuple)) or not values:
-            raise ValueError("typed Sheet values must be a non-empty matrix")
-        if any(not isinstance(row, (list, tuple)) or not row for row in values):
-            raise ValueError("typed Sheet values must have non-empty rows")
-        width = len(values[0])
-        if any(len(row) != width for row in values):
-            raise ValueError("typed Sheet values must be rectangular")
-        return [list(row) for row in values]
+        return RangeChunker.copy_matrix(values)
 
     @staticmethod
     def _typed_shape(a1: A1Range, values: Sequence[Sequence[Any]]) -> None:
-        if len(values) != a1.row_count or len(values[0]) != a1.col_count:
-            raise ValueError(
-                "typed Sheet matrix shape does not match A1 range "
-                f"{a1.text}: expected {a1.row_count}x{a1.col_count}"
-            )
+        RangeChunker.require_shape(a1, values)
 
-    def _typed_range_limits(self, a1: A1Range) -> None:
-        if a1.row_count > self.write_max_rows or a1.col_count > self.write_max_cols:
-            raise ValueError(
-                "typed Sheet range exceeds configured write limits: "
-                f"{a1.row_count}x{a1.col_count} > "
-                f"{self.write_max_rows}x{self.write_max_cols}"
-            )
+    def _range_chunker(self) -> RangeChunker:
+        return RangeChunker(self.write_max_rows, self.write_max_cols)
 
     @staticmethod
     def _typed_failure_receipt(
@@ -314,6 +317,8 @@ class SheetAPI:
         *,
         failed_batch_index: int,
         raw_responses: Sequence[Mapping[str, Any]],
+        unit: str = "range",
+        unknown_scope: bool = False,
     ) -> MutationReceipt:
         unknown = error.kind == "transport"
         return MutationReceipt(
@@ -321,6 +326,7 @@ class SheetAPI:
             backend=_SHEET_BACKEND,
             requested_count=requested,
             accepted_count=accepted,
+            unit=unit,
             actual_ranges=tuple(actual_ranges),
             failed_batch_index=failed_batch_index,
             outcome=(
@@ -331,7 +337,12 @@ class SheetAPI:
             readback=(
                 ReadbackStatus.UNKNOWN if unknown else ReadbackStatus.NOT_REQUESTED
             ),
-            raw_metadata={"error": str(error), "responses": tuple(raw_responses)},
+            unknown_scope=unknown or unknown_scope,
+            raw_metadata={
+                "error": str(error),
+                "responses": tuple(raw_responses),
+                "unknown_scope": unknown or unknown_scope,
+            },
         )
 
     @staticmethod
@@ -416,9 +427,12 @@ class SheetAPI:
         actual_ranges: Sequence[A1Range],
         result: Mapping[str, Any],
         *,
+        accepted: Optional[int] = None,
+        unit: str = "range",
         unknown_scope: bool = False,
         failed_batch_index: Optional[int] = None,
         outcome: MutationOutcome = MutationOutcome.ACCEPTED,
+        extra_metadata: Optional[Mapping[str, Any]] = None,
     ) -> MutationReceipt:
         data = result.get("data", {})
         responses = data.get("responses", []) if isinstance(data, Mapping) else []
@@ -445,11 +459,22 @@ class SheetAPI:
         updated_rows = collect_metric(responses, "updatedRows")
         updated_columns = collect_metric(responses, "updatedColumns")
         updated_cells = collect_metric(responses, "updatedCells")
+        metadata: Dict[str, Any] = {
+            "response": result,
+            "unknown_scope": unknown_scope,
+        }
+        if extra_metadata:
+            metadata.update(extra_metadata)
         return MutationReceipt(
             operation=operation,
             backend=_SHEET_BACKEND,
             requested_count=requested,
-            accepted_count=(requested if outcome is MutationOutcome.ACCEPTED else 0),
+            accepted_count=(
+                requested
+                if accepted is None and outcome is MutationOutcome.ACCEPTED
+                else accepted or 0
+            ),
+            unit=unit,
             actual_ranges=tuple(actual_ranges),
             updated_rows=updated_rows or None,
             updated_columns=updated_columns or None,
@@ -461,27 +486,9 @@ class SheetAPI:
                 if unknown_scope
                 else ReadbackStatus.NOT_REQUESTED
             ),
-            raw_metadata={"response": result, "unknown_scope": unknown_scope},
+            unknown_scope=unknown_scope,
+            raw_metadata=metadata,
         )
-
-    def _typed_chunks(
-        self, a1: A1Range, values: List[List[Any]]
-    ) -> List[Tuple[A1Range, List[List[Any]]]]:
-        chunks: List[Tuple[A1Range, List[List[Any]]]] = []
-        for col_start in range(a1.start_col, a1.end_col + 1, self.write_max_cols):
-            col_end = min(col_start + self.write_max_cols - 1, a1.end_col)
-            for row_start in range(a1.start_row, a1.end_row + 1, self.write_max_rows):
-                row_end = min(row_start + self.write_max_rows - 1, a1.end_row)
-                rows = [
-                    row[col_start - a1.start_col : col_end - a1.start_col + 1]
-                    for row in values[
-                        row_start - a1.start_row : row_end - a1.start_row + 1
-                    ]
-                ]
-                chunks.append(
-                    (A1Range(a1.sheet_id, row_start, row_end, col_start, col_end), rows)
-                )
-        return chunks
 
     def write_values(
         self, spreadsheet_token: str, a1_range: str, values: Sequence[Sequence[Any]]
@@ -489,15 +496,18 @@ class SheetAPI:
         matrix = self._typed_matrix(values)
         a1 = A1Range.parse(a1_range)
         self._typed_shape(a1, matrix)
+        chunker = self._range_chunker()
         applied: List[A1Range] = []
         responses: List[Mapping[str, Any]] = []
-        chunks = self._typed_chunks(a1, matrix)
+        requested_ranges = chunker.chunk_count(a1)
         successful_requests = 0
         failed_request_index = 0
-        for chunk_range, chunk_values in chunks:
-            pending = [(chunk_range, chunk_values)]
+        for chunk in chunker.split(a1, matrix):
+            pending = [chunk]
             while pending:
-                current_range, current_values = pending.pop(0)
+                current = pending.pop(0)
+                current_range = current.a1_range
+                current_values = current.as_lists()
                 failed_request_index += 1
                 try:
                     result = self._typed_values_call(
@@ -512,43 +522,69 @@ class SheetAPI:
                         },
                     )
                 except FeishuAPIError as error:
-                    if (
-                        error.code == self.ERROR_CODE_REQUEST_TOO_LARGE
-                        and current_range.row_count > 1
-                    ):
-                        midpoint = (
-                            current_range.start_row + current_range.row_count // 2 - 1
-                        )
-                        split = [
-                            A1Range(
-                                current_range.sheet_id,
-                                current_range.start_row,
-                                midpoint,
-                                current_range.start_col,
-                                current_range.end_col,
-                            ),
-                            A1Range(
-                                current_range.sheet_id,
-                                midpoint + 1,
-                                current_range.end_row,
-                                current_range.start_col,
-                                current_range.end_col,
-                            ),
-                        ]
-                        offset = midpoint - current_range.start_row + 1
-                        pending[0:0] = [
-                            (split[0], current_values[:offset]),
-                            (split[1], current_values[offset:]),
-                        ]
+                    split: List[RangeChunk] = []
+                    if error.code == self.ERROR_CODE_REQUEST_TOO_LARGE:
+                        if current_range.row_count > 1:
+                            first_height = current_range.row_count // 2
+                            split = [
+                                RangeChunk(
+                                    A1Range(
+                                        current_range.sheet_id,
+                                        current_range.start_row,
+                                        current_range.start_row + first_height - 1,
+                                        current_range.start_col,
+                                        current_range.end_col,
+                                    ),
+                                    current.values[:first_height],
+                                ),
+                                RangeChunk(
+                                    A1Range(
+                                        current_range.sheet_id,
+                                        current_range.start_row + first_height,
+                                        current_range.end_row,
+                                        current_range.start_col,
+                                        current_range.end_col,
+                                    ),
+                                    current.values[first_height:],
+                                ),
+                            ]
+                        elif current_range.col_count > 1:
+                            first_width = current_range.col_count // 2
+                            split = [
+                                RangeChunk(
+                                    A1Range(
+                                        current_range.sheet_id,
+                                        current_range.start_row,
+                                        current_range.end_row,
+                                        current_range.start_col,
+                                        current_range.start_col + first_width - 1,
+                                    ),
+                                    tuple(row[:first_width] for row in current.values),
+                                ),
+                                RangeChunk(
+                                    A1Range(
+                                        current_range.sheet_id,
+                                        current_range.start_row,
+                                        current_range.end_row,
+                                        current_range.start_col + first_width,
+                                        current_range.end_col,
+                                    ),
+                                    tuple(row[first_width:] for row in current.values),
+                                ),
+                            ]
+                    if split:
+                        requested_ranges += 1
+                        pending[0:0] = split
                         continue
                     return self._typed_failure_receipt(
                         "write",
-                        len(chunks),
+                        requested_ranges,
                         successful_requests,
                         applied,
                         error,
                         failed_batch_index=failed_request_index,
                         raw_responses=responses,
+                        unit="range",
                     )
                 ranges, _ = self._typed_actual_ranges(
                     result, [current_range.text], allow_fallback=True
@@ -557,7 +593,12 @@ class SheetAPI:
                 responses.append(result)
                 successful_requests += 1
         return self._typed_sheet_receipt(
-            "write", len(chunks), applied, {"data": {"responses": responses}}
+            "write",
+            requested_ranges,
+            applied,
+            {"data": {"responses": responses}},
+            accepted=successful_requests,
+            unit="range",
         )
 
     def append_values(
@@ -566,27 +607,24 @@ class SheetAPI:
         matrix = self._typed_matrix(values)
         a1 = A1Range.parse(a1_range)
         self._typed_shape(a1, matrix)
-        pending: List[Tuple[A1Range, List[List[Any]]]] = []
-        for row_offset in range(0, len(matrix), self.write_max_rows):
-            current_values = matrix[row_offset : row_offset + self.write_max_rows]
-            pending.append(
-                (
-                    A1Range(
-                        a1.sheet_id,
-                        a1.start_row + row_offset,
-                        a1.start_row + row_offset + len(current_values) - 1,
-                        a1.start_col,
-                        a1.end_col,
-                    ),
-                    current_values,
-                )
-            )
+        anchor_width = min(a1.col_count, self.write_max_cols)
+        anchor_range = A1Range(
+            a1.sheet_id,
+            a1.start_row,
+            a1.end_row,
+            a1.start_col,
+            a1.start_col + anchor_width - 1,
+        )
+        anchor_values = tuple(tuple(row[:anchor_width]) for row in matrix)
+        anchor_chunker = RangeChunker(self.write_max_rows, anchor_width)
         applied: List[A1Range] = []
         responses: List[Mapping[str, Any]] = []
+        source_slices: List[Mapping[str, int | str]] = []
         successful_rows = 0
         request_index = 0
+        pending = list(anchor_chunker.split(anchor_range, anchor_values))
         while pending:
-            current_range, current = pending.pop(0)
+            anchor_chunk = pending.pop(0)
             request_index += 1
             try:
                 result = self._typed_values_call(
@@ -595,37 +633,38 @@ class SheetAPI:
                     "values_append",
                     {
                         "valueRange": {
-                            "range": current_range.text,
-                            "values": current,
+                            "range": anchor_chunk.a1_range.text,
+                            "values": anchor_chunk.as_lists(),
                         }
                     },
                     retry_transport=False,
                 )
             except FeishuAPIError as error:
-                if error.code == self.ERROR_CODE_REQUEST_TOO_LARGE and len(current) > 1:
-                    midpoint = len(current) // 2
-                    first = current[:midpoint]
-                    second = current[midpoint:]
+                if (
+                    error.code == self.ERROR_CODE_REQUEST_TOO_LARGE
+                    and anchor_chunk.a1_range.row_count > 1
+                ):
+                    first_height = anchor_chunk.a1_range.row_count // 2
                     pending[0:0] = [
-                        (
+                        RangeChunk(
                             A1Range(
-                                current_range.sheet_id,
-                                current_range.start_row,
-                                current_range.start_row + len(first) - 1,
-                                current_range.start_col,
-                                current_range.end_col,
+                                anchor_chunk.a1_range.sheet_id,
+                                anchor_chunk.a1_range.start_row,
+                                anchor_chunk.a1_range.start_row + first_height - 1,
+                                anchor_chunk.a1_range.start_col,
+                                anchor_chunk.a1_range.end_col,
                             ),
-                            first,
+                            anchor_chunk.values[:first_height],
                         ),
-                        (
+                        RangeChunk(
                             A1Range(
-                                current_range.sheet_id,
-                                current_range.start_row + len(first),
-                                current_range.end_row,
-                                current_range.start_col,
-                                current_range.end_col,
+                                anchor_chunk.a1_range.sheet_id,
+                                anchor_chunk.a1_range.start_row + first_height,
+                                anchor_chunk.a1_range.end_row,
+                                anchor_chunk.a1_range.start_col,
+                                anchor_chunk.a1_range.end_col,
                             ),
-                            second,
+                            anchor_chunk.values[first_height:],
                         ),
                     ]
                     continue
@@ -637,19 +676,114 @@ class SheetAPI:
                     error,
                     failed_batch_index=request_index,
                     raw_responses=responses,
+                    unit="row",
                 )
-            ranges, unknown = self._typed_actual_ranges(
+            anchor_ranges, unknown = self._typed_actual_ranges(
                 result, (), allow_fallback=False
             )
-            applied.extend(ranges)
             responses.append(result)
-            successful_rows += len(current)
+            if (
+                unknown
+                or len(anchor_ranges) != 1
+                or anchor_ranges[0].row_count != anchor_chunk.a1_range.row_count
+                or anchor_ranges[0].col_count != anchor_width
+            ):
+                return self._typed_sheet_receipt(
+                    "append",
+                    len(matrix),
+                    applied,
+                    {"data": {"responses": responses}},
+                    accepted=successful_rows,
+                    unit="row",
+                    unknown_scope=True,
+                    failed_batch_index=request_index,
+                    outcome=MutationOutcome.UNKNOWN_OUTCOME,
+                    extra_metadata={"source_slices": tuple(source_slices)},
+                )
+
+            actual_anchor = anchor_ranges[0]
+            applied.append(actual_anchor)
+            source_slices.append(
+                {
+                    "range": actual_anchor.text,
+                    "row_offset": successful_rows,
+                    "col_offset": 0,
+                    "row_count": actual_anchor.row_count,
+                    "col_count": actual_anchor.col_count,
+                }
+            )
+            for column_offset in range(anchor_width, a1.col_count, self.write_max_cols):
+                width = min(self.write_max_cols, a1.col_count - column_offset)
+                fixed_range = RangeChunker.fixed_band(
+                    actual_anchor, column_offset=column_offset, width=width
+                )
+                band_values = tuple(
+                    tuple(row[column_offset : column_offset + width])
+                    for row in matrix[
+                        successful_rows : successful_rows
+                        + anchor_chunk.a1_range.row_count
+                    ]
+                )
+                request_index += 1
+                band_receipt = self.write_values(
+                    spreadsheet_token, fixed_range.text, band_values
+                )
+                for item in band_receipt.actual_ranges:
+                    if not isinstance(item, A1Range):
+                        continue
+                    applied.append(item)
+                    source_slices.append(
+                        {
+                            "range": item.text,
+                            "row_offset": successful_rows
+                            + item.start_row
+                            - fixed_range.start_row,
+                            "col_offset": column_offset
+                            + item.start_col
+                            - fixed_range.start_col,
+                            "row_count": item.row_count,
+                            "col_count": item.col_count,
+                        }
+                    )
+                if band_receipt.outcome is not MutationOutcome.ACCEPTED:
+                    unknown_band = (
+                        band_receipt.outcome is MutationOutcome.UNKNOWN_OUTCOME
+                    )
+                    return MutationReceipt(
+                        operation="append",
+                        backend=_SHEET_BACKEND,
+                        requested_count=len(matrix),
+                        accepted_count=successful_rows,
+                        unit="row",
+                        actual_ranges=tuple(applied),
+                        failed_batch_index=request_index,
+                        outcome=(
+                            MutationOutcome.UNKNOWN_OUTCOME
+                            if unknown_band
+                            else MutationOutcome.PARTIAL
+                        ),
+                        readback=(
+                            ReadbackStatus.UNKNOWN
+                            if unknown_band
+                            else ReadbackStatus.NOT_REQUESTED
+                        ),
+                        unknown_scope=unknown_band,
+                        raw_metadata={
+                            "responses": tuple(responses),
+                            "failed_band": band_receipt.raw_metadata,
+                            "unknown_scope": unknown_band,
+                            "source_slices": tuple(source_slices),
+                        },
+                    )
+            successful_rows += anchor_chunk.a1_range.row_count
         return self._typed_sheet_receipt(
             "append",
             len(matrix),
             applied,
             {"data": {"responses": responses}},
-            unknown_scope=not applied,
+            accepted=successful_rows,
+            unit="row",
+            extra_metadata={"source_slices": tuple(source_slices)},
         )
 
     def batch_update_values(
@@ -657,7 +791,7 @@ class SheetAPI:
     ) -> MutationReceipt:
         if not isinstance(value_ranges, (list, tuple)) or not value_ranges:
             raise ValueError("typed batch update requires non-empty value_ranges")
-        normalized: List[Dict[str, Any]] = []
+        normalized: List[Tuple[A1Range, Tuple[Tuple[Any, ...], ...]]] = []
         for item in value_ranges:
             if (
                 not isinstance(item, Mapping)
@@ -668,38 +802,96 @@ class SheetAPI:
             a1 = A1Range.parse(item["range"])
             matrix = self._typed_matrix(item["values"])
             self._typed_shape(a1, matrix)
-            self._typed_range_limits(a1)
-            normalized.append({"range": a1.text, "values": matrix})
-        try:
-            result = self._typed_values_call(
-                "POST",
-                spreadsheet_token,
-                "values_batch_update",
-                {"valueRanges": normalized},
-            )
-        except FeishuAPIError as error:
-            return self._typed_failure_receipt(
-                "batch_update",
-                len(normalized),
-                0,
-                (),
-                error,
-                failed_batch_index=1,
-                raw_responses=(),
-            )
-        ranges, unknown = self._typed_actual_ranges(
-            result, [item["range"] for item in normalized], allow_fallback=True
+            normalized.append((a1, matrix))
+
+        chunker = self._range_chunker()
+        requested_ranges = sum(chunker.chunk_count(a1) for a1, _ in normalized)
+
+        def chunks() -> Iterator[RangeChunk]:
+            for a1, matrix in normalized:
+                yield from chunker.split(a1, matrix)
+
+        return self._submit_batch_chunks(
+            spreadsheet_token,
+            chunks(),
+            requested_ranges=requested_ranges,
+            operation="batch_update",
         )
+
+    def _submit_batch_chunks(
+        self,
+        spreadsheet_token: str,
+        chunks: Iterator[RangeChunk],
+        *,
+        requested_ranges: int,
+        operation: str,
+    ) -> MutationReceipt:
+        applied: List[A1Range] = []
+        responses: List[Mapping[str, Any]] = []
+        accepted_ranges = 0
+        request_index = 0
+        for chunk in chunks:
+            request_index += 1
+            try:
+                result = self._typed_values_call(
+                    "POST",
+                    spreadsheet_token,
+                    "values_batch_update",
+                    {
+                        "valueRanges": [
+                            {
+                                "range": chunk.a1_range.text,
+                                "values": chunk.as_lists(),
+                            }
+                        ]
+                    },
+                )
+            except FeishuAPIError as error:
+                return self._typed_failure_receipt(
+                    operation,
+                    requested_ranges,
+                    accepted_ranges,
+                    applied,
+                    error,
+                    failed_batch_index=request_index,
+                    raw_responses=responses,
+                    unit="range",
+                )
+            ranges, unknown = self._typed_actual_ranges(
+                result, (chunk.a1_range.text,), allow_fallback=True
+            )
+            if unknown:
+                return self._typed_sheet_receipt(
+                    operation,
+                    requested_ranges,
+                    applied,
+                    {"data": {"responses": responses + [result]}},
+                    accepted=accepted_ranges,
+                    unit="range",
+                    unknown_scope=True,
+                    failed_batch_index=request_index,
+                    outcome=MutationOutcome.UNKNOWN_OUTCOME,
+                )
+            applied.extend(ranges or (chunk.a1_range,))
+            responses.append(result)
+            accepted_ranges += 1
         return self._typed_sheet_receipt(
-            "batch_update", len(normalized), ranges, result, unknown_scope=unknown
+            operation,
+            requested_ranges,
+            applied,
+            {"data": {"responses": responses}},
+            accepted=accepted_ranges,
+            unit="range",
         )
 
     def clear_values(self, spreadsheet_token: str, a1_range: str) -> MutationReceipt:
         a1 = A1Range.parse(a1_range)
-        empty_values = [[""] * a1.col_count for _ in range(a1.row_count)]
-        return self.batch_update_values(
+        chunker = self._range_chunker()
+        return self._submit_batch_chunks(
             spreadsheet_token,
-            [{"range": a1.text, "values": empty_values}],
+            chunker.empty(a1),
+            requested_ranges=chunker.chunk_count(a1),
+            operation="clear",
         )
 
     def query_sheets(self, spreadsheet_token: str) -> Tuple[SheetMetadata, ...]:
@@ -885,7 +1077,7 @@ class SheetAPI:
     def _parse_boolean_response(
         self, response, operation: str
     ) -> Tuple[Optional[Dict[str, Any]], Optional[int]]:
-        """统一解析 bool 写接口，同时保留原有 False/错误码契约。"""
+        """解析 best-effort enrichment 响应并保留业务错误码。"""
         try:
             return FeishuResponseParser.parse(response), 0
         except FeishuAPIError as error:
@@ -893,12 +1085,12 @@ class SheetAPI:
             if error.log_id:
                 details += f", log_id: {error.log_id}"
             self.logger.error(f"{operation}失败: {details}")
-            # 历史 tuple 契约以 None 表示响应无法解析；HTTP 状态不是飞书业务错误码。
+            # None 表示响应无法解析；HTTP 状态不是飞书业务错误码。
             error_code = None if error.kind == "invalid_response" else error.code
             return None, error_code
 
     def _call_boolean_api(self, method: str, url: str, operation: str, **kwargs):
-        """调用 bool 写接口，并把 transport failure 收敛到旧的失败 tuple。"""
+        """调用 best-effort enrichment，并把 transport failure 收敛为失败。"""
         try:
             response = self.api_client.call_api(method, url, **kwargs)
         except FeishuAPIError as error:
@@ -906,35 +1098,6 @@ class SheetAPI:
             self.logger.error(f"{operation}失败: {details}")
             return None, None
         return self._parse_boolean_response(response, operation)
-
-    def get_sheet_info(self, spreadsheet_token: str) -> Dict[str, Any]:
-        """
-        获取电子表格信息
-
-        Args:
-            spreadsheet_token: 电子表格Token
-
-        Returns:
-            电子表格信息字典
-
-        Raises:
-            Exception: 当API调用失败时
-        """
-        token = encode_path_segment(spreadsheet_token)
-        url = f"https://open.feishu.cn/open-apis/sheets/v3/spreadsheets/{token}"
-        headers = self.auth.get_auth_headers()
-
-        params = {}
-        if self.value_render_option:
-            params["valueRenderOption"] = self.value_render_option
-        if self.datetime_render_option:
-            params["dateTimeRenderOption"] = self.datetime_render_option
-
-        response = self.api_client.call_api("GET", url, headers=headers, params=params)
-
-        result = FeishuResponseParser.parse(response)
-
-        return result.get("data", {})
 
     def get_sheet_meta(self, spreadsheet_token: str, sheet_id: str) -> Dict[str, Any]:
         """
@@ -1231,78 +1394,6 @@ class SheetAPI:
 
         return values_all
 
-    def write_sheet_data(
-        self,
-        spreadsheet_token: str,
-        sheet_id: str,
-        values: List[List[Any]],
-        row_batch_size: int = 500,
-        col_batch_size: int = 80,
-        rate_limit_delay: float = 0.05,
-    ) -> bool:
-        """
-        写入电子表格数据，具备“自动二分重试”能力。
-
-        Args:
-            spreadsheet_token: 电子表格Token
-            sheet_id: 工作表ID
-            values: 要写入的数据（包含表头）
-            row_batch_size: 初始行批次大小
-            col_batch_size: 列批次大小
-            rate_limit_delay: 接口调用间隔
-
-        Returns:
-            是否写入成功
-        """
-        if not values:
-            self.logger.warning("写入数据为空")
-            return True
-
-        self.logger.info("🔄 执行写入操作 (具备自动二分重试能力)")
-
-        data_chunks = self._create_data_chunks(values, row_batch_size, col_batch_size)
-        total_chunks = len(data_chunks)
-
-        self.logger.info(f"📦 初始数据分块完成: 共 {total_chunks} 个数据块")
-
-        for i, chunk in enumerate(data_chunks, 1):
-            self.logger.info(f"--- 开始处理初始数据块 {i}/{total_chunks} ---")
-            if not self._upload_chunk_with_auto_split(
-                spreadsheet_token, sheet_id, chunk, rate_limit_delay
-            ):
-                self.logger.error(
-                    f"❌ 初始数据块 {i}/{total_chunks} (行 {chunk['start_row']}-{chunk['end_row']}) 最终上传失败"
-                )
-                return False
-            self.logger.info(f"--- ✅ 成功处理初始数据块 {i}/{total_chunks} ---")
-
-        self.logger.info(f"🎉 写入操作全部完成: 成功处理 {total_chunks} 个初始数据块")
-        return True
-
-    def _write_single_batch(
-        self, spreadsheet_token: str, range_str: str, values: List[List[Any]]
-    ) -> Tuple[bool, Optional[int]]:
-        """
-        写入单个批次数据。
-
-        Returns:
-            元组 (是否成功, 错误码)
-        """
-        token = encode_path_segment(spreadsheet_token)
-        url = f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{token}/values"
-        headers = self.auth.get_auth_headers()
-
-        data = {"valueRange": {"range": range_str, "values": values}}
-
-        result, error_code = self._call_boolean_api(
-            "PUT", url, "写入电子表格数据", headers=headers, json=data
-        )
-        if result is None:
-            return False, error_code
-
-        self.logger.debug(f"成功写入 {len(values)} 行数据")
-        return True, 0
-
     def column_number_to_letter(self, col_num: int) -> str:
         """将列号转换为字母（1->A, 2->B, ..., 26->Z, 27->AA）"""
         result = ""
@@ -1311,146 +1402,6 @@ class SheetAPI:
             result = chr(65 + col_num % 26) + result
             col_num //= 26
         return result or "A"
-
-    def _build_range_string(
-        self, sheet_id: str, start_row: int, start_col: int, end_row: int, end_col: int
-    ) -> str:
-        """构建范围字符串"""
-        start_col_letter = self.column_number_to_letter(start_col)
-        end_col_letter = self.column_number_to_letter(end_col)
-        return f"{sheet_id}!{start_col_letter}{start_row}:{end_col_letter}{end_row}"
-
-    def append_sheet_data(
-        self,
-        spreadsheet_token: str,
-        sheet_id: str,
-        values: List[List[Any]],
-        row_batch_size: int = 500,
-        rate_limit_delay: float = 0.05,
-    ) -> bool:
-        """
-        追加电子表格数据，同样具备“自动二分重试”能力。
-        注意：追加操作不支持按列分块，它总是追加到表格的末尾。
-
-        Args:
-            spreadsheet_token: 电子表格Token
-            sheet_id: 工作表ID
-            values: 要追加的数据
-            row_batch_size: 初始行批次大小
-            rate_limit_delay: 接口调用间隔
-
-        Returns:
-            是否追加成功
-        """
-        if not values:
-            self.logger.warning("追加数据为空")
-            return True
-
-        self.logger.info("➕ 执行追加操作 (具备自动二分重试能力)")
-
-        # 对于追加操作，我们只按行分块
-        data_chunks = self._create_data_chunks(
-            values, row_batch_size, len(values[0]) if values else 0
-        )
-        total_chunks = len(data_chunks)
-
-        self.logger.info(f"📦 初始数据分块完成: 共 {total_chunks} 个数据块")
-
-        for i, chunk in enumerate(data_chunks, 1):
-            self.logger.info(f"--- 开始处理初始追加块 {i}/{total_chunks} ---")
-            # 注意：追加操作的range只需要指定工作表ID
-            append_range = f"{sheet_id}"
-            if not self._append_chunk_with_auto_split(
-                spreadsheet_token, append_range, chunk["data"], rate_limit_delay
-            ):
-                self.logger.error(f"❌ 初始追加块 {i}/{total_chunks} 最终上传失败")
-                return False
-            self.logger.info(f"--- ✅ 成功处理初始追加块 {i}/{total_chunks} ---")
-
-        self.logger.info(f"🎉 追加操作全部完成: 成功处理 {total_chunks} 个初始数据块")
-        return True
-
-    def _append_single_batch(
-        self, spreadsheet_token: str, range_str: str, values: List[List[Any]]
-    ) -> Tuple[bool, Optional[int]]:
-        """
-        追加单个批次数据。
-
-        Returns:
-            元组 (是否成功, 错误码)
-        """
-        token = encode_path_segment(spreadsheet_token)
-        url = f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{token}/values_append"
-        headers = self.auth.get_auth_headers()
-
-        data = {"valueRange": {"range": range_str, "values": values}}
-
-        result, error_code = self._call_boolean_api(
-            "POST", url, "追加电子表格数据", headers=headers, json=data
-        )
-        if result is None:
-            return False, error_code
-
-        self.logger.debug(f"成功追加 {len(values)} 行数据")
-        return True, 0
-
-    def write_selective_columns(
-        self,
-        spreadsheet_token: str,
-        sheet_id: str,
-        column_data: Dict[str, List[Any]],
-        column_positions: Dict[str, int],
-        start_row: int = 1,
-        rate_limit_delay: float = 0.05,
-        max_gap: int = 2,
-    ) -> bool:
-        """
-        写入选择性列数据，支持不连续列的高效批量操作
-
-        Args:
-            spreadsheet_token: 电子表格Token
-            sheet_id: 工作表ID
-            column_data: 字典，键为列名，值为该列的数据列表
-            column_positions: 字典，键为列名，值为列位置（1-based）
-            start_row: 开始行号（1-based）
-            rate_limit_delay: 接口调用间隔
-            max_gap: 最大允许合并的间隔列数
-
-        Returns:
-            是否写入成功
-        """
-        if not column_data:
-            self.logger.warning("选择性写入数据为空")
-            return True
-
-        self.logger.info(f"🎯 执行选择性列写入: {list(column_data.keys())}")
-
-        # 优化相邻列为连续范围
-        ranges_data = self._optimize_column_ranges(
-            column_data, column_positions, start_row, max_gap
-        )
-
-        # 构建多范围数据
-        value_ranges = []
-        for range_info in ranges_data:
-            range_str = f"{sheet_id}!{range_info['range']}"
-            is_valid, error_msg = self._validate_range_format(range_str)
-            if not is_valid:
-                self.logger.error(f"选择性写入范围无效: {error_msg}")
-                return False
-            value_ranges.append({"range": range_str, "values": range_info["values"]})
-
-        # 使用批量更新API
-        if value_ranges:
-            time.sleep(rate_limit_delay)
-            success, _ = self._batch_update_ranges(spreadsheet_token, value_ranges)
-            if success:
-                self.logger.info(f"✅ 选择性列写入成功: {len(value_ranges)} 个范围")
-            else:
-                self.logger.error("❌ 选择性列写入失败")
-            return success
-
-        return True
 
     def _optimize_column_ranges(
         self,
@@ -1539,142 +1490,6 @@ class SheetAPI:
             i = range_end + 1
 
         return ranges_data
-
-    def clear_sheet_data(
-        self,
-        spreadsheet_token: str,
-        sheet_id: str,
-        range_str: str,
-        max_rows_per_batch: Optional[int] = None,
-        max_cols_per_batch: Optional[int] = None,
-    ) -> bool:
-        """
-        清空电子表格指定范围的数据
-
-        Args:
-            spreadsheet_token: 电子表格Token
-            sheet_id: 工作表ID
-            range_str: 范围字符串，如 "A1:Z1000"
-            max_rows_per_batch: 单次清空最大行数
-            max_cols_per_batch: 单次清空最大列数
-
-        Returns:
-            是否清空成功
-        """
-        # 构建完整范围字符串用于验证
-        full_range = f"{sheet_id}!{range_str}"
-
-        # 验证范围有效性
-        is_valid, error_msg = self._validate_range(spreadsheet_token, full_range)
-        if not is_valid:
-            self.logger.error(f"清空数据范围验证失败: {error_msg}")
-            return False
-
-        max_rows = max_rows_per_batch or self.write_max_rows
-        max_cols = max_cols_per_batch or self.write_max_cols
-
-        self.logger.info(
-            f"准备清空范围: {full_range} (单次上限 {max_rows} 行 × {max_cols} 列)"
-        )
-
-        def _build_empty_values_for_range(
-            range_to_clear: str,
-        ) -> Optional[List[List[str]]]:
-            import re
-
-            match = re.match(r"([^!]+)!([A-Z]+)(\d+):([A-Z]+)(\d+)", range_to_clear)
-            if not match:
-                return None
-            _, start_col, start_row, end_col, end_row = match.groups()
-            start_row_i, end_row_i = int(start_row), int(end_row)
-            start_col_num = self.column_letter_to_number(start_col)
-            end_col_num = self.column_letter_to_number(end_col)
-
-            rows = end_row_i - start_row_i + 1
-            cols = end_col_num - start_col_num + 1
-            if rows <= 0 or cols <= 0:
-                return None
-
-            # 清空通过写入空字符串实现，避免 values 为空导致的 90226 错误
-            empty_row = [""] * cols
-            return [empty_row] * rows
-
-        def _split_range_half(range_to_split: str) -> Optional[List[str]]:
-            import re
-
-            match = re.match(r"([^!]+)!([A-Z]+)(\d+):([A-Z]+)(\d+)", range_to_split)
-            if not match:
-                return None
-            sheet_id, start_col, start_row, end_col, end_row = match.groups()
-            start_row_i, end_row_i = int(start_row), int(end_row)
-            start_col_num = self.column_letter_to_number(start_col)
-            end_col_num = self.column_letter_to_number(end_col)
-
-            if start_row_i < end_row_i:
-                mid = (start_row_i + end_row_i) // 2
-                return [
-                    f"{sheet_id}!{start_col}{start_row_i}:{end_col}{mid}",
-                    f"{sheet_id}!{start_col}{mid + 1}:{end_col}{end_row_i}",
-                ]
-
-            if start_col_num < end_col_num:
-                mid_col = (start_col_num + end_col_num) // 2
-                left_col = self.column_number_to_letter(mid_col)
-                right_col = self.column_number_to_letter(mid_col + 1)
-                return [
-                    f"{sheet_id}!{start_col}{start_row_i}:{left_col}{end_row_i}",
-                    f"{sheet_id}!{right_col}{start_row_i}:{end_col}{end_row_i}",
-                ]
-
-            return None
-
-        # 先按行列上限分块，避免单次范围过大
-        chunks = self._split_range_into_chunks(full_range, max_rows, max_cols)
-        total_chunks = len(chunks)
-        self.logger.info(f"📋 清空范围分块: {total_chunks} 个块")
-
-        for i, chunk_ranges in enumerate(chunks, 1):
-            # 每个 chunk_ranges 里目前只有一个范围
-            for chunk_range in chunk_ranges:
-                stack = [chunk_range]
-                while stack:
-                    current_range = stack.pop()
-                    empty_values = _build_empty_values_for_range(current_range)
-                    if empty_values is None:
-                        self.logger.error(f"无法构建清空数据矩阵: {current_range}")
-                        return False
-                    value_ranges = [{"range": current_range, "values": empty_values}]
-                    success, error_code = self._batch_update_ranges(
-                        spreadsheet_token, value_ranges, is_clear=True
-                    )
-                    if success:
-                        self.logger.info(
-                            f"✅ 清空成功: {current_range} (块 {i}/{total_chunks})"
-                        )
-                        continue
-
-                    # 如果请求过大，按行优先二分拆分重试
-                    if error_code == self.ERROR_CODE_REQUEST_TOO_LARGE:
-                        self.logger.warning(
-                            f"清空范围过大(90227)，启用二分拆分: {current_range}"
-                        )
-                        sub_ranges = _split_range_half(current_range)
-                        if not sub_ranges:
-                            self.logger.error(
-                                f"无法拆分范围，清空失败: {current_range}"
-                            )
-                            return False
-                        # LIFO，先处理左半边
-                        stack.extend(reversed(sub_ranges))
-                        continue
-
-                    # 其他错误直接失败
-                    self.logger.error(
-                        f"❌ 范围 {current_range} 清空失败 (错误码 {error_code})"
-                    )
-                    return False
-
-        return True
 
     def set_dropdown_validation(
         self,
@@ -2044,28 +1859,6 @@ class SheetAPI:
             }
         return {"col_name": "未知", "start_row": "?", "end_row": "?"}
 
-    def _parse_range_for_detailed_log(self, range_str: str) -> Dict[str, Any]:
-        """解析范围字符串用于详细日志显示"""
-        import re
-
-        match = re.match(r"([^!]+)!([A-Z]+)(\d+):([A-Z]+)(\d+)", range_str)
-        if match:
-            sheet_id, start_col, start_row, end_col, end_row = match.groups()
-            return {
-                "sheet_id": sheet_id,
-                "start_col": start_col,
-                "end_col": end_col,
-                "start_row": int(start_row),
-                "end_row": int(end_row),
-            }
-        return {
-            "sheet_id": "未知",
-            "start_col": "?",
-            "end_col": "?",
-            "start_row": 0,
-            "end_row": 0,
-        }
-
     def _get_style_type_description(self, style: Dict[str, Any]) -> str:
         """获取样式类型的中文描述"""
         if "formatter" in style:
@@ -2180,284 +1973,6 @@ class SheetAPI:
         style = {"formatter": date_format}
 
         return self.set_cell_style(spreadsheet_token, ranges, style)
-
-    def _create_data_chunks(
-        self, values: List[List[Any]], row_batch_size: int, col_batch_size: int
-    ) -> List[Dict]:
-        """
-        创建数据分块
-
-        Returns:
-            包含分块信息的字典列表，每个字典包含：
-            - data: 数据块
-            - start_row, end_row: 行范围
-            - start_col, end_col: 列范围
-        """
-        chunks = []
-        total_rows = len(values)
-        total_cols = len(values[0]) if values else 0
-
-        # 按列分块（外层循环）
-        for col_start in range(0, total_cols, col_batch_size):
-            col_end = min(col_start + col_batch_size, total_cols)
-
-            # 按行分块（内层循环）
-            for row_start in range(0, total_rows, row_batch_size):
-                row_end = min(row_start + row_batch_size, total_rows)
-
-                # 提取数据块
-                chunk_data = []
-                for row_idx in range(row_start, row_end):
-                    if row_idx < len(values):
-                        chunk_row = values[row_idx][col_start:col_end]
-                        # 确保行长度与列块大小一致
-                        while len(chunk_row) < (col_end - col_start):
-                            chunk_row.append("")
-                        chunk_data.append(chunk_row)
-
-                if chunk_data:  # 只添加非空块
-                    # 应用配置的起始行和列偏移量
-                    actual_start_row = row_start + self.start_row
-                    actual_end_row = actual_start_row + len(chunk_data) - 1
-                    actual_start_col = col_start + self.start_col_num
-                    actual_end_col = actual_start_col + (col_end - col_start) - 1
-
-                    chunks.append(
-                        {
-                            "data": chunk_data,
-                            "start_row": actual_start_row,
-                            "end_row": actual_end_row,
-                            "start_col": actual_start_col,
-                            "end_col": actual_end_col,
-                        }
-                    )
-
-        return chunks
-
-    def _upload_chunk_with_auto_split(
-        self,
-        spreadsheet_token: str,
-        sheet_id: str,
-        chunk: Dict,
-        rate_limit_delay: float,
-    ) -> bool:
-        """
-        上传单个数据块，如果因请求过大失败，则自动二分重试。
-        使用迭代实现避免栈溢出风险。
-        """
-        # 使用栈来模拟递归，避免栈溢出
-        chunk_stack = [chunk]
-
-        while chunk_stack:
-            current_chunk = chunk_stack.pop()
-
-            # 准备请求数据
-            range_str = self._build_range_string(
-                sheet_id,
-                current_chunk["start_row"],
-                current_chunk["start_col"],
-                current_chunk["end_row"],
-                current_chunk["end_col"],
-            )
-            value_ranges = [{"range": range_str, "values": current_chunk["data"]}]
-
-            self.logger.info(
-                f"📤 尝试上传: {len(current_chunk['data'])} 行 (范围 {range_str})"
-            )
-
-            # 发起API调用
-            success, error_code = self._batch_update_ranges(
-                spreadsheet_token, value_ranges
-            )
-
-            if success:
-                # 解析范围信息用于日志显示
-                range_info = self._parse_range_for_detailed_log(range_str)
-                columns_info = (
-                    f"{range_info['start_col']}列至{range_info['end_col']}列"
-                    if range_info["start_col"] != range_info["end_col"]
-                    else f"{range_info['start_col']}列"
-                )
-                rows_info = (
-                    f"第{range_info['start_row']}-{range_info['end_row']}行"
-                    if range_info["start_row"] != range_info["end_row"]
-                    else f"第{range_info['start_row']}行"
-                )
-
-                self.logger.info(
-                    f"✅ 上传成功: {len(current_chunk['data'])} 行数据至 {columns_info} {rows_info} (范围: {range_str})"
-                )
-                # 成功上传后进行频率控制
-                if rate_limit_delay > 0:
-                    time.sleep(rate_limit_delay)
-                continue  # 继续处理栈中的下一个块
-
-            # 如果失败，检查是否是请求过大错误
-            if error_code == self.ERROR_CODE_REQUEST_TOO_LARGE:
-                num_rows = len(current_chunk["data"])
-                self.logger.warning(
-                    f"检测到请求过大错误 (错误码 {error_code})，当前块包含 {num_rows} 行，将进行二分。"
-                )
-
-                # 如果块已经小到无法再分，则视为最终失败
-                if num_rows <= 1:
-                    self.logger.error(
-                        f"❌ 块大小已为 {num_rows} 行，无法再分割，上传失败。"
-                    )
-                    return False
-
-                # 将当前块分割成两个子块并压入栈
-                mid_point = num_rows // 2
-
-                chunk1_data = current_chunk["data"][:mid_point]
-                chunk1 = {
-                    "data": chunk1_data,
-                    "start_row": current_chunk["start_row"],
-                    "end_row": current_chunk["start_row"] + len(chunk1_data) - 1,
-                    "start_col": current_chunk["start_col"],
-                    "end_col": current_chunk["end_col"],
-                }
-
-                chunk2_data = current_chunk["data"][mid_point:]
-                chunk2 = {
-                    "data": chunk2_data,
-                    "start_row": current_chunk["start_row"] + mid_point,
-                    "end_row": current_chunk["start_row"]
-                    + mid_point
-                    + len(chunk2_data)
-                    - 1,
-                    "start_col": current_chunk["start_col"],
-                    "end_col": current_chunk["end_col"],
-                }
-
-                # 注意：后进先出，所以先压入chunk2，后压入chunk1
-                chunk_stack.append(chunk2)
-                chunk_stack.append(chunk1)
-
-                self.logger.info(
-                    f" 分割为: 块1 ({len(chunk1_data)}行), 块2 ({len(chunk2_data)}行)"
-                )
-                continue  # 继续处理分割后的块
-
-            # 其他类型的API错误，直接判为失败
-            self.logger.error(f"❌ 上传发生不可恢复的错误 (错误码: {error_code})")
-            return False
-
-        return True  # 所有块都成功上传
-
-    def _append_chunk_with_auto_split(
-        self,
-        spreadsheet_token: str,
-        range_str: str,
-        values: List[List[Any]],
-        rate_limit_delay: float,
-    ) -> bool:
-        """
-        追加单个数据块，如果因请求过大失败，则自动二分重试。
-        使用迭代实现避免栈溢出风险。
-        """
-        # 使用栈来模拟递归，避免栈溢出
-        values_stack = [values]
-
-        while values_stack:
-            current_values = values_stack.pop()
-
-            self.logger.info(f"📤 尝试追加: {len(current_values)} 行")
-
-            success, error_code = self._append_single_batch(
-                spreadsheet_token, range_str, current_values
-            )
-
-            if success:
-                # 解析范围信息用于日志显示
-                range_info = self._parse_range_for_detailed_log(range_str)
-                columns_info = (
-                    f"{range_info['start_col']}列至{range_info['end_col']}列"
-                    if range_info["start_col"] != range_info["end_col"]
-                    else f"{range_info['start_col']}列"
-                )
-                start_row = range_info["start_row"]
-                end_row = start_row + len(current_values) - 1
-                rows_info = (
-                    f"第{start_row}-{end_row}行"
-                    if start_row != end_row
-                    else f"第{start_row}行"
-                )
-
-                self.logger.info(
-                    f"✅ 追加成功: {len(current_values)} 行数据至 {columns_info} {rows_info} (范围: {range_str})"
-                )
-                if rate_limit_delay > 0:
-                    time.sleep(rate_limit_delay)
-                continue  # 继续处理栈中的下一个块
-
-            if error_code == self.ERROR_CODE_REQUEST_TOO_LARGE:
-                num_rows = len(current_values)
-                self.logger.warning(
-                    f"检测到请求过大错误 (错误码 {error_code})，当前追加块包含 {num_rows} 行，将进行二分。"
-                )
-
-                if num_rows <= 1:
-                    self.logger.error(
-                        f"❌ 追加块大小已为 {num_rows} 行，无法再分割，上传失败。"
-                    )
-                    return False
-
-                # 将当前块分割成两个子块并压入栈
-                mid_point = num_rows // 2
-                chunk1 = current_values[:mid_point]
-                chunk2 = current_values[mid_point:]
-
-                # 注意：后进先出，所以先压入chunk2，后压入chunk1
-                values_stack.append(chunk2)
-                values_stack.append(chunk1)
-
-                self.logger.info(
-                    f" 分割为: 块1 ({len(chunk1)}行), 块2 ({len(chunk2)}行)"
-                )
-                continue  # 继续处理分割后的块
-
-            # 其他类型的API错误，直接判为失败
-            self.logger.error(f"❌ 追加发生不可恢复的错误 (错误码: {error_code})")
-            return False
-
-        return True  # 所有块都成功追加
-
-    def _batch_update_ranges(
-        self, spreadsheet_token: str, value_ranges: List[Dict], is_clear: bool = False
-    ) -> Tuple[bool, Optional[int]]:
-        """
-        批量更新多个范围。
-
-        Returns:
-            元组 (是否成功, 错误码)
-        """
-        token = encode_path_segment(spreadsheet_token)
-        url = f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{token}/values_batch_update"
-        headers = self.auth.get_auth_headers()
-
-        data = {"valueRanges": value_ranges}
-
-        result, error_code = self._call_boolean_api(
-            "POST", url, "批量写入", headers=headers, json=data
-        )
-        if result is None:
-            # 清空操作时，允许某些“错误”，比如清空一个已经为空的区域
-            if is_clear and error_code == 90202:  # The range is invalid
-                self.logger.warning(
-                    f"清空操作时遇到可忽略的错误 (错误码 {error_code}), 视为成功。"
-                )
-                return True, 0
-            return False, error_code
-
-        # 记录详细的写入结果
-        responses = result.get("data", {}).get("responses", [])
-        total_cells = sum(resp.get("updatedCells", 0) for resp in responses)
-        self.logger.debug(
-            f"批量写入成功: {len(responses)} 个范围, 共 {total_cells} 个单元格"
-        )
-
-        return True, 0
 
     def set_number_format(
         self, spreadsheet_token: str, ranges: List[str], number_format: str = "#,##0.00"

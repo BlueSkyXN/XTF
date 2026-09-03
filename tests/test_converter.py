@@ -225,8 +225,61 @@ class TestIndexValueHash:
                 pd.Series({"Date": written_timestamp}), "Date", {"Date": 5}
             )
 
-            assert written_timestamp == 1772467200000
+            assert written_timestamp == 1772496000000
             assert date_hash == timestamp_hash
+        finally:
+            if old_tz is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = old_tz
+            time.tzset()
+
+    def test_exact_datetime_write_and_index_share_utc_for_naive_values(self):
+        if not hasattr(time, "tzset"):
+            pytest.skip("当前平台不支持 time.tzset")
+
+        old_tz = os.environ.get("TZ")
+        try:
+            os.environ["TZ"] = "Asia/Shanghai"
+            time.tzset()
+
+            converter = DataConverter(TargetType.BITABLE)
+            converter.datetime_index_granularity = "exact"
+            value = "2026-08-30 09:00:00"
+            written_timestamp = converter._force_to_timestamp(value, "When")
+
+            assert written_timestamp == 1788080400000
+            assert converter._normalize_index_value(value, 5) == str(written_timestamp)
+            assert converter._normalize_index_value(written_timestamp, 5) == str(
+                written_timestamp
+            )
+        finally:
+            if old_tz is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = old_tz
+            time.tzset()
+
+    def test_day_datetime_uses_local_day_for_aware_and_epoch_values(self):
+        if not hasattr(time, "tzset"):
+            pytest.skip("当前平台不支持 time.tzset")
+
+        old_tz = os.environ.get("TZ")
+        try:
+            os.environ["TZ"] = "Asia/Shanghai"
+            time.tzset()
+
+            converter = DataConverter(
+                TargetType.BITABLE,
+                datetime_index_granularity="day",
+                datetime_index_timezone="Asia/Shanghai",
+            )
+            instant = pd.Timestamp("2026-08-30 23:30:00+00:00")
+            seconds = int(instant.timestamp())
+
+            assert converter._normalize_index_value(instant, 5) == "2026-08-31"
+            assert converter._normalize_index_value(seconds, 5) == "2026-08-31"
+            assert converter._normalize_index_value(seconds * 1000, 5) == "2026-08-31"
         finally:
             if old_tz is None:
                 os.environ.pop("TZ", None)

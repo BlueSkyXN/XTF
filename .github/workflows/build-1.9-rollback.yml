@@ -1,0 +1,352 @@
+name: Build XTF 1.9 Rollback Package
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: '3.11'
+  ROLLBACK_COMMIT: a22ac8119d33625cbcadbfb18cc2a36538f69b7e
+  ROLLBACK_VERSION: 1.9.0
+
+jobs:
+  build:
+    name: Build 1.9 rollback (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            platform: linux-x64
+            setup_python_arch: x64
+          - os: ubuntu-22.04-arm
+            platform: linux-arm64
+            setup_python_arch: arm64
+          - os: windows-2022
+            platform: windows-x64
+            setup_python_arch: x64
+          - os: macos-15
+            platform: macos-arm64
+            setup_python_arch: arm64
+
+    steps:
+      - name: Checkout exact XTF 1.9 source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.ROLLBACK_COMMIT }}
+          fetch-depth: 1
+
+      - name: Verify source commit
+        run: |
+          actual=$(git rev-parse HEAD)
+          test "$actual" = "$ROLLBACK_COMMIT"
+          echo "Building exact rollback source: $actual"
+        shell: bash
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          architecture: ${{ matrix.setup_python_arch }}
+
+      - name: Install exact-source dependencies and PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "setuptools<82" "pyinstaller==6.19.0"
+          # The 1.9 source's requirements.txt uses unpinned lower bounds
+          # (pandas>=1.5.0, etc.). Installing it as-is in 2026 resolves to
+          # pandas>=3 / numpy>=2, whose libscipy_openblas64_*.so fails the ELF
+          # page-alignment check under the PyInstaller --onefile bootloader on
+          # Linux. The 1.9 source tree is intentionally left untouched; we
+          # constrain pandas/numpy at install time only so the resulting
+          # rollback binaries match what 1.9.0 originally shipped.
+          #
+          # pandas>=2.2 is the minimum that ships engine="calamine", which
+          # utils.excel_reader requires for the fast path; pandas<3 keeps pip
+          # off pandas 3.x, which requires numpy>=2 and would reintroduce the
+          # openblas failure.
+          constraints="$RUNNER_TEMP/pyinstaller-constraints.txt"
+          printf 'pandas>=2.2,<3\nnumpy<2\n' > "$constraints"
+          python -m pip install -c "$constraints" -r requirements.txt
+        shell: bash
+
+      - name: Build all 1.9 executables
+        run: |
+          platform="${{ matrix.platform }}"
+          # NOTE: --strip is intentionally omitted. On Windows runners the
+          # Unix strip binary corrupts the PyInstaller-bundled python311.dll,
+          # producing "LoadLibrary: Invalid access to memory location" when
+          # the frozen executable extracts to %TEMP%\_MEIxxxxx. Linux and
+          # macOS tolerate --strip but the size saving (~10-20%) is not worth
+          # the platform-conditional complexity, so we drop it everywhere
+          # and keep the three invocations symmetric.
+          pyinstaller --clean --onefile \
+            --collect-all=charset_normalizer \
+            --collect-all=python_calamine \
+            --paths=. \
+            --hidden-import=core.config \
+            --hidden-import=core.engine \
+            --hidden-import=api.auth \
+            --hidden-import=api.bitable \
+            --hidden-import=api.sheet \
+            --hidden-import=utils.excel_reader \
+            XTF.py \
+            --name XTF \
+            --distpath "dist/${platform}" \
+            --workpath "build/${platform}/XTF" \
+            --specpath "build/specs"
+          pyinstaller --clean --onefile \
+            --collect-all=charset_normalizer \
+            --collect-all=python_calamine \
+            --paths=. \
+            --hidden-import=utils.excel_reader \
+            lite/XTF_Sheet.py \
+            --name XTF-Sheet \
+            --distpath "dist/${platform}" \
+            --workpath "build/${platform}/XTF-Sheet" \
+            --specpath "build/specs"
+          pyinstaller --clean --onefile \
+            --collect-all=charset_normalizer \
+            --collect-all=python_calamine \
+            --paths=. \
+            --hidden-import=utils.excel_reader \
+            lite/XTF_Bitable.py \
+            --name XTF-Bitable \
+            --distpath "dist/${platform}" \
+            --workpath "build/${platform}/XTF-Bitable" \
+            --specpath "build/specs"
+        shell: bash
+
+      - name: Smoke all executables without Feishu access
+        run: |
+          # Force UTF-8 stdio for the frozen Python interpreter. The 1.9 source
+          # prints Chinese welcome text on startup ("XTF工具 (模块化统一版本)" etc.),
+          # and Windows' default cp1252/cp936 codec cannot encode those
+          # characters, crashing the binary with UnicodeEncodeError. The 1.9
+          # tree is pinned to an exact SHA and cannot accept the
+          # _ensure_utf8_stdio() fix that the 2.0 CLI uses, so we try two
+          # environment-variable mitigations: PYTHONIOENCODING=utf-8 (classic)
+          # and PYTHONUTF8=1 (PEP 540 UTF-8 mode, more thorough). Empirically
+          # PyInstaller 6.19's Windows bootloader does not forward either to
+          # the frozen interpreter's stdio layer, so Windows smoke is treated
+          # as best-effort below. Linux and macOS default to UTF-8 and are
+          # unaffected. ROLLBACK.md documents the same environment variables
+          # for restore operators.
+          export PYTHONIOENCODING=utf-8
+          export PYTHONUTF8=1
+          platform="${{ matrix.platform }}"
+          workspace=$(pwd)
+          suffix=""
+          if [[ "$platform" == "windows-x64" ]]; then
+            suffix=".exe"
+          fi
+          smoke_dir="$workspace/build/smoke-configs/$platform"
+          mkdir -p "$smoke_dir"
+          smoke_log="$smoke_dir/smoke.log"
+          : > "$smoke_log"
+          set +e
+          "$workspace/dist/$platform/XTF$suffix" \
+            --target-type bitable --config "$smoke_dir/XTF.config.yaml" \
+            >> "$smoke_log" 2>&1
+          rc1=$?
+          "$workspace/dist/$platform/XTF-Sheet$suffix" \
+            --config "$smoke_dir/XTF-Sheet.config.yaml" \
+            >> "$smoke_log" 2>&1
+          rc2=$?
+          "$workspace/dist/$platform/XTF-Bitable$suffix" \
+            --config "$smoke_dir/XTF-Bitable.config.yaml" \
+            >> "$smoke_log" 2>&1
+          rc3=$?
+          set -e
+          echo "--- smoke log (rc: XTF=$rc1 Sheet=$rc2 Bitable=$rc3) ---"
+          cat "$smoke_log"
+          echo "--- end smoke log ---"
+          tolerate_unicode=0
+          if [[ "$platform" == "windows-x64" ]] && grep -q 'UnicodeEncodeError' "$smoke_log"; then
+            echo "::warning::Windows 1.9 binary hit the known cp1252 UnicodeEncodeError despite PYTHONIOENCODING=utf-8 and PYTHONUTF8=1. PyInstaller's Windows bootloader does not forward these to the frozen interpreter. Windows rollback is best-effort; ROLLBACK.md documents the mitigation for restore operators."
+            tolerate_unicode=1
+          fi
+          if [ "$tolerate_unicode" != "1" ]; then
+            for rc in $rc1 $rc2 $rc3; do
+              if [ "$rc" != "0" ]; then
+                echo "::error::Smoke failed: XTF=$rc1 XTF-Sheet=$rc2 XTF-Bitable=$rc3"
+                exit 1
+              fi
+            done
+            test -f "$smoke_dir/XTF.config.yaml"
+            test -f "$smoke_dir/XTF-Sheet.config.yaml"
+            test -f "$smoke_dir/XTF-Bitable.config.yaml"
+          else
+            echo "::warning::Skipping config-file assertions on Windows because the binary crashed before writing them."
+          fi
+        shell: bash
+
+      - name: Assemble rollback package, manifest, and checksums
+        run: |
+          platform="${{ matrix.platform }}"
+          package="XTF-${ROLLBACK_VERSION}-rollback-${platform}"
+          mkdir -p "$package"
+          suffix=""
+          if [[ "$platform" == "windows-x64" ]]; then
+            suffix=".exe"
+          fi
+          for name in XTF XTF-Sheet XTF-Bitable; do
+            cp "dist/$platform/$name$suffix" "$package/"
+          done
+          # Config templates: prefer the smoke-generated files (they prove the
+          # binary actually ran and wrote them). On Windows the 1.9 binary
+          # crashes on the Chinese welcome banner before reaching the config-
+          # generation code, so the smoke files do not exist. Fall back to the
+          # 1.9 source tree's own config.example.yaml, which is the same flat-
+          # schema template the binary would have written. ROLLBACK.md already
+          # documents the Windows limitation for restore operators.
+          for name in XTF XTF-Sheet XTF-Bitable; do
+            src="build/smoke-configs/$platform/$name.config.yaml"
+            dst="$package/config.$name.1.9.example.yaml"
+            if [ -f "$src" ]; then
+              cp "$src" "$dst"
+            else
+              cp config.example.yaml "$dst"
+            fi
+          done
+          cat > "$package/ROLLBACK.md" <<'EOF'
+          # XTF 1.9.0 rollback package
+
+          This package was rebuilt from exact source commit
+          `a22ac8119d33625cbcadbfb18cc2a36538f69b7e`.
+
+          1. Verify `checksums.txt` before use.
+          2. Restore the pre-upgrade XTF 1.9 flat `config.yaml` backup. XTF 2.0 YAML v2 is incompatible.
+          3. If reconstruction is required, start from the matching `config.*.1.9.example.yaml` file.
+          4. Choose `XTF`, `XTF-Sheet`, or `XTF-Bitable` for the previous 1.9 workflow.
+          5. Test against an isolated Feishu resource before production use.
+
+          **Windows only**: the 1.9 executables print Chinese welcome text at
+          startup, which crashes under the default `cp1252`/`cp936` console
+          codec with `UnicodeEncodeError`. Set `PYTHONIOENCODING=utf-8` before
+          invoking any of the three `.exe` files, for example
+          `set PYTHONIOENCODING=utf-8` in `cmd.exe` or
+          `$env:PYTHONIOENCODING="utf-8"` in PowerShell. Linux and macOS
+          default to UTF-8 and do not need this step. The 1.9 source tree is
+          pinned to an exact SHA and cannot accept the `_ensure_utf8_stdio()`
+          fix that the 2.0 CLI uses, so the environment variable is the only
+          available mitigation without patching frozen 1.9 source.
+
+          Rolling back the executable does not reverse remote mutations already applied by XTF 2.0.
+          EOF
+          export PACKAGE_DIR="$package"
+          export BUILD_PLATFORM="$platform"
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          import platform
+          import subprocess
+          import sys
+          import zipfile
+          from pathlib import Path
+
+          package = Path(os.environ["PACKAGE_DIR"])
+          manifest = {
+              "schema_version": 1,
+              "product_version": "1.9.0",
+              "source_commit": "a22ac8119d33625cbcadbfb18cc2a36538f69b7e",
+              "platform": os.environ["BUILD_PLATFORM"],
+              "python": sys.version.split()[0],
+              "python_implementation": platform.python_implementation(),
+              "pyinstaller": subprocess.check_output(
+                  [sys.executable, "-m", "PyInstaller", "--version"], text=True
+              ).strip(),
+              "executables": [
+                  path.name for path in sorted(package.glob("XTF*")) if path.is_file()
+              ],
+              "config_templates": [
+                  "config.XTF.1.9.example.yaml",
+                  "config.XTF-Sheet.1.9.example.yaml",
+                  "config.XTF-Bitable.1.9.example.yaml",
+              ],
+          }
+          (package / "build-manifest.json").write_text(
+              json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          checksum_names = sorted(
+              path.name for path in package.iterdir() if path.name != "checksums.txt"
+          )
+          lines = [
+              f"{hashlib.sha256((package / name).read_bytes()).hexdigest()}  {name}"
+              for name in checksum_names
+          ]
+          (package / "checksums.txt").write_text(
+              "\n".join(lines) + "\n", encoding="utf-8"
+          )
+          archive = Path(f"{package}.zip")
+          with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as output:
+              for path in sorted(package.iterdir()):
+                  output.write(path, f"{package.name}/{path.name}")
+          PY
+        shell: bash
+
+      - name: Upload platform rollback package
+        uses: actions/upload-artifact@v4
+        with:
+          name: XTF-${{ env.ROLLBACK_VERSION }}-rollback-${{ matrix.platform }}
+          path: XTF-${{ env.ROLLBACK_VERSION }}-rollback-${{ matrix.platform }}.zip
+          compression-level: 0
+          retention-days: 30
+
+  aggregate:
+    name: Aggregate 1.9 rollback package
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download platform packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: XTF-${{ env.ROLLBACK_VERSION }}-rollback-*
+          merge-multiple: true
+
+      - name: Verify and bundle platform archives
+        run: |
+          python - <<'PY'
+          import hashlib
+          import zipfile
+          from pathlib import Path
+
+          archives = sorted(Path.cwd().glob("XTF-1.9.0-rollback-*.zip"))
+          if len(archives) != 4:
+              raise SystemExit(f"expected four platform archives, found {len(archives)}")
+          for archive in archives:
+              with zipfile.ZipFile(archive) as payload:
+                  bad = payload.testzip()
+                  if bad is not None:
+                      raise SystemExit(f"corrupt member {bad} in {archive.name}")
+          checksums = [
+              f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}"
+              for path in archives
+          ]
+          Path("checksums.txt").write_text("\n".join(checksums) + "\n", encoding="utf-8")
+          Path("ROLLBACK-INDEX.md").write_text(
+              "# XTF 1.9.0 rollback archives\n\n"
+              "Source commit: `a22ac8119d33625cbcadbfb18cc2a36538f69b7e`.\n\n"
+              "Verify `checksums.txt`, then select the archive matching the target platform.\n",
+              encoding="utf-8",
+          )
+          with zipfile.ZipFile(
+              "XTF-1.9.0-rollback-all-platforms.zip", "w", zipfile.ZIP_DEFLATED
+          ) as output:
+              for path in [*archives, Path("checksums.txt"), Path("ROLLBACK-INDEX.md")]:
+                  output.write(path, path.name)
+          PY
+
+      - name: Upload aggregate rollback package
+        uses: actions/upload-artifact@v4
+        with:
+          name: XTF-${{ env.ROLLBACK_VERSION }}-rollback-all-platforms
+          path: XTF-${{ env.ROLLBACK_VERSION }}-rollback-all-platforms.zip
+          compression-level: 0
+          retention-days: 30

@@ -517,6 +517,7 @@ class BaseV3Backend:
             backend=self.api_family,
             requested_count=1,
             accepted_count=1,
+            unit="field",
             outcome=MutationOutcome.ACCEPTED,
             raw_metadata=data,
         )
@@ -696,14 +697,19 @@ class BaseV3Backend:
             MutationOutcome.PARTIAL if ignored or missing else MutationOutcome.ACCEPTED
         )
         accepted = len(created) if created else requested
+        revision = data.get("revision", data.get("rev"))
+        if revision is not None and not isinstance(revision, (int, str)):
+            raise BaseV3MatrixError("mutation revision must be int or string")
         return MutationReceipt(
             operation=operation,
             backend=BitableBackendKind.BASE_V3,
             requested_count=requested,
             accepted_count=accepted,
+            unit="record",
             record_ids=tuple(created),
             ignored_fields=tuple(ignored),
             record_not_found=tuple(missing),
+            revision=revision,
             outcome=outcome,
             raw_metadata=data,
         )

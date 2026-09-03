@@ -5,7 +5,7 @@ from unittest.mock import Mock
 import pytest
 
 from api.bitable_backend import MutationOutcome
-from api.sheet import A1Range, FormulaVerificationResult, SheetAPI
+from api.sheet import A1Range, FormulaVerificationResult, RangeChunker, SheetAPI
 from api.sdk import FeishuAPIError
 
 
@@ -59,6 +59,7 @@ def test_write_values_returns_fixed_actual_range_and_payload():
     assert receipt.operation == "write"
     assert receipt.actual_ranges == (A1Range.parse("sh1!B2:C3"),)
     assert receipt.outcome is MutationOutcome.ACCEPTED
+    assert receipt.unit == "range"
     call = client.call_api.call_args
     assert "/spreadsheets/token%2Fone/values" in call.args[1]
     assert call.kwargs["json"] == {
@@ -99,12 +100,47 @@ def test_write_values_splits_oversized_single_row_by_configured_columns():
     assert client.call_api.call_count == 2
 
 
+@pytest.mark.parametrize(
+    ("rows", "cols", "expected_ranges"),
+    [
+        (5001, 1, ["sh1!A1:A5000", "sh1!A5001:A5001"]),
+        (1, 101, ["sh1!A1:CV1", "sh1!CW1:CW1"]),
+        (
+            5001,
+            101,
+            [
+                "sh1!A1:CV5000",
+                "sh1!A5001:CV5001",
+                "sh1!CW1:CW5000",
+                "sh1!CW5001:CW5001",
+            ],
+        ),
+    ],
+)
+def test_write_values_uses_two_dimensional_range_chunks(rows, cols, expected_ranges):
+    api, client = make_api(
+        *(response({"code": 0, "data": {}}) for _ in expected_ranges)
+    )
+    values = [list(range(cols)) for _ in range(rows)]
+
+    receipt = api.write_values(
+        "token", f"sh1!A1:{SheetAPI.column_number_to_letter_static(cols)}{rows}", values
+    )
+
+    assert receipt.requested_count == receipt.accepted_count == len(expected_ranges)
+    assert [item.text for item in receipt.actual_ranges] == expected_ranges
+    assert client.call_api.call_count == len(expected_ranges)
+
+
 def test_append_without_server_range_keeps_scope_unknown():
     api, _ = make_api(response({"code": 0, "data": {}}))
 
     receipt = api.append_values("token", "sh1!A1:B2", [[1, 2], [3, 4]])
 
     assert receipt.actual_ranges == ()
+    assert receipt.outcome is MutationOutcome.UNKNOWN_OUTCOME
+    assert receipt.unit == "row"
+    assert receipt.unknown_scope is True
     assert receipt.raw_metadata["unknown_scope"] is True
     assert receipt.readback.value == "unknown"
 
@@ -135,6 +171,34 @@ def test_append_respects_configured_row_chunks_and_server_actual_ranges():
     assert client.call_api.call_count == 2
 
 
+def test_append_request_too_large_splits_anchor_rows_without_replaying_success():
+    api, client = make_api(
+        FeishuAPIError(90227, "too large"),
+        response(
+            {
+                "code": 0,
+                "data": {"updates": {"updatedRange": "sh1!A10:B11"}},
+            }
+        ),
+        response(
+            {
+                "code": 0,
+                "data": {"updates": {"updatedRange": "sh1!A12:B13"}},
+            }
+        ),
+    )
+
+    receipt = api.append_values("token", "sh1!A1:B4", [[1, 2], [3, 4], [5, 6], [7, 8]])
+
+    assert receipt.outcome is MutationOutcome.ACCEPTED
+    assert receipt.accepted_count == 4
+    assert [item.text for item in receipt.actual_ranges] == [
+        "sh1!A10:B11",
+        "sh1!A12:B13",
+    ]
+    assert client.call_api.call_count == 3
+
+
 def test_append_accepts_snake_case_actual_range_metadata():
     api, _ = make_api(
         response(
@@ -148,6 +212,89 @@ def test_append_accepts_snake_case_actual_range_metadata():
     receipt = api.append_values("token", "sh1!C1:D1", [[1, 2]])
 
     assert receipt.actual_ranges == (A1Range.parse("sh1!C8:D8"),)
+
+
+def test_wide_append_anchors_first_band_then_writes_remaining_columns():
+    api, client = make_api(
+        response(
+            {
+                "code": 0,
+                "data": {"updates": {"updatedRange": "sh1!A10:CV10"}},
+            }
+        ),
+        response({"code": 0, "data": {}}),
+    )
+    values = [list(range(101))]
+
+    receipt = api.append_values("token", "sh1!A1:CW1", values)
+
+    assert receipt.outcome is MutationOutcome.ACCEPTED
+    assert receipt.requested_count == receipt.accepted_count == 1
+    assert receipt.unit == "row"
+    assert [item.text for item in receipt.actual_ranges] == [
+        "sh1!A10:CV10",
+        "sh1!CW10:CW10",
+    ]
+    assert client.call_api.call_count == 2
+    anchor_call, fixed_call = client.call_api.call_args_list
+    assert anchor_call.args[0] == "POST"
+    assert anchor_call.kwargs["json"]["valueRange"]["range"] == "sh1!A1:CV1"
+    assert fixed_call.args[0] == "PUT"
+    assert fixed_call.kwargs["json"]["valueRange"]["range"] == "sh1!CW10:CW10"
+
+
+def test_wide_append_fixed_band_unknown_keeps_anchor_prefix_and_stops():
+    api, client = make_api(
+        response(
+            {
+                "code": 0,
+                "data": {"updates": {"updatedRange": "sh1!A10:CV10"}},
+            }
+        ),
+        FeishuAPIError.from_transport("response lost"),
+        response({"code": 0, "data": {}}),
+    )
+
+    receipt = api.append_values("token", "sh1!A1:CW1", [list(range(101))])
+
+    assert receipt.outcome is MutationOutcome.UNKNOWN_OUTCOME
+    assert receipt.accepted_count == 0
+    assert receipt.unknown_scope is True
+    assert receipt.failed_batch_index == 2
+    assert [item.text for item in receipt.actual_ranges] == ["sh1!A10:CV10"]
+    assert client.call_api.call_count == 2
+
+
+def test_wide_append_5001_by_101_uses_actual_rows_for_each_remaining_band():
+    api, client = make_api(
+        response(
+            {
+                "code": 0,
+                "data": {"updates": {"updatedRange": "sh1!A10:CV5009"}},
+            }
+        ),
+        response({"code": 0, "data": {}}),
+        response(
+            {
+                "code": 0,
+                "data": {"updates": {"updatedRange": "sh1!A5010:CV5010"}},
+            }
+        ),
+        response({"code": 0, "data": {}}),
+    )
+    values = [list(range(101)) for _ in range(5001)]
+
+    receipt = api.append_values("token", "sh1!A1:CW5001", values)
+
+    assert receipt.outcome is MutationOutcome.ACCEPTED
+    assert receipt.accepted_count == 5001
+    assert [item.text for item in receipt.actual_ranges] == [
+        "sh1!A10:CV5009",
+        "sh1!CW10:CW5009",
+        "sh1!A5010:CV5010",
+        "sh1!CW5010:CW5010",
+    ]
+    assert client.call_api.call_count == 4
 
 
 def test_typed_receipt_collects_server_update_metrics():
@@ -211,14 +358,47 @@ def test_batch_update_requires_each_range_to_match_matrix():
     client.call_api.assert_not_called()
 
 
-def test_batch_update_rejects_configured_range_limit_before_network():
-    api, client = make_api()
+def test_batch_update_splits_configured_range_limit_sequentially():
+    api, client = make_api(
+        response({"code": 0, "data": {}}),
+        response({"code": 0, "data": {}}),
+    )
     api.write_max_rows = 1
 
-    with pytest.raises(ValueError, match="exceeds configured write limits"):
-        api.batch_update_values("token", [{"range": "sh1!A1:A2", "values": [[1], [2]]}])
+    receipt = api.batch_update_values(
+        "token", [{"range": "sh1!A1:A2", "values": [[1], [2]]}]
+    )
 
-    client.call_api.assert_not_called()
+    assert receipt.requested_count == receipt.accepted_count == 2
+    assert receipt.unit == "range"
+    assert [item.text for item in receipt.actual_ranges] == [
+        "sh1!A1:A1",
+        "sh1!A2:A2",
+    ]
+    assert client.call_api.call_count == 2
+
+
+def test_batch_update_stops_after_failed_chunk_and_keeps_applied_range_prefix():
+    api, client = make_api(
+        response({"code": 0, "data": {}}),
+        response({"code": 90202, "msg": "invalid range"}),
+        response({"code": 0, "data": {}}),
+    )
+
+    receipt = api.batch_update_values(
+        "token",
+        [
+            {"range": "sh1!A1:A1", "values": [["first"]]},
+            {"range": "sh1!B1:B1", "values": [["second"]]},
+            {"range": "sh1!C1:C1", "values": [["third"]]},
+        ],
+    )
+
+    assert receipt.outcome is MutationOutcome.PARTIAL
+    assert receipt.accepted_count == 1
+    assert receipt.failed_batch_index == 2
+    assert [item.text for item in receipt.actual_ranges] == ["sh1!A1:A1"]
+    assert client.call_api.call_count == 2
 
 
 def test_clear_values_is_explicit_and_writes_empty_strings():
@@ -226,11 +406,41 @@ def test_clear_values_is_explicit_and_writes_empty_strings():
 
     receipt = api.clear_values("token", "sh1!A1:B2")
 
-    assert receipt.operation == "batch_update"
+    assert receipt.operation == "clear"
+    assert receipt.unit == "range"
     assert receipt.actual_ranges == (A1Range.parse("sh1!A1:B2"),)
     assert client.call_api.call_args.kwargs["json"] == {
         "valueRanges": [{"range": "sh1!A1:B2", "values": [["", ""], ["", ""]]}]
     }
+
+
+def test_large_clear_generates_bounded_empty_chunks_lazily():
+    api, client = make_api(*(response({"code": 0, "data": {}}) for _ in range(4)))
+
+    receipt = api.clear_values("token", "sh1!A1:CW5001")
+
+    assert receipt.requested_count == receipt.accepted_count == 4
+    assert [item.text for item in receipt.actual_ranges] == [
+        "sh1!A1:CV5000",
+        "sh1!A5001:CV5001",
+        "sh1!CW1:CW5000",
+        "sh1!CW5001:CW5001",
+    ]
+    payloads = [call.kwargs["json"]["valueRanges"][0] for call in client.call_args_list]
+    assert all(len(item["values"]) <= 5000 for item in payloads)
+    assert all(len(item["values"][0]) <= 100 for item in payloads)
+
+
+def test_range_chunker_empty_does_not_materialize_the_full_range():
+    chunker = RangeChunker(5000, 100)
+    chunks = chunker.empty(A1Range.parse("sh1!A1:CW5001"))
+
+    assert iter(chunks) is chunks
+    first = next(chunks)
+    assert first.a1_range.text == "sh1!A1:CV5000"
+    assert len(first.values) == 5000
+    assert len(first.values[0]) == 100
+    assert next(chunks).a1_range.text == "sh1!A5001:CV5001"
 
 
 def test_query_sheets_returns_typed_metadata():

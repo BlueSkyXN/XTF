@@ -7,7 +7,6 @@ from unittest.mock import Mock
 import pytest
 
 from api.sheet import SheetAPI
-from api.sdk import FeishuAPIError
 
 
 def test_get_sheet_data_uses_single_network_read():
@@ -82,23 +81,6 @@ def test_get_sheet_data_rejects_invalid_range_before_network():
     client.call_api.assert_not_called()
 
 
-def test_write_selective_columns_rejects_invalid_local_range_before_network():
-    auth = Mock()
-    client = Mock()
-    api = SheetAPI(auth, client)
-
-    result = api.write_selective_columns(
-        "sheet-token",
-        "bad!sheet",
-        {"ID": [1]},
-        {"ID": 1},
-        rate_limit_delay=0,
-    )
-
-    assert result is False
-    client.call_api.assert_not_called()
-
-
 @pytest.mark.parametrize(
     ("status", "body"),
     [
@@ -161,27 +143,6 @@ def test_optimize_column_ranges_never_crosses_unselected_columns():
     assert [item["values"] for item in ranges] == [[[1]], [[2, 3]]]
 
 
-@pytest.mark.parametrize(
-    ("method_name", "args"),
-    [
-        ("_write_single_batch", ("sheet-token", "sh1!A1:A1", [[1]])),
-        ("_append_single_batch", ("sheet-token", "sh1", [[1]])),
-    ],
-)
-def test_sheet_boolean_tuple_writes_keep_false_and_error_code(method_name, args):
-    auth = Mock()
-    auth.get_auth_headers.return_value = {"Authorization": "Bearer fake"}
-    client = Mock()
-    response = Mock()
-    response.status_code = 200
-    response.headers = {"X-Tt-Logid": "log-write"}
-    response.json.return_value = {"code": 90202, "msg": "invalid range"}
-    client.call_api.return_value = response
-    api = SheetAPI(auth, client)
-
-    assert getattr(api, method_name)(*args) == (False, 90202)
-
-
 def test_sheet_style_write_keeps_false_contract_for_typed_error():
     auth = Mock()
     auth.get_auth_headers.return_value = {"Authorization": "Bearer fake"}
@@ -194,50 +155,3 @@ def test_sheet_style_write_keeps_false_contract_for_typed_error():
     api = SheetAPI(auth, client)
 
     assert api._set_style_single_batch("sheet-token", ["sh1!A1:A1"], {}) is False
-
-
-def test_batch_update_clear_preserves_legacy_ignored_error():
-    auth = Mock()
-    auth.get_auth_headers.return_value = {"Authorization": "Bearer fake"}
-    client = Mock()
-    response = Mock()
-    response.status_code = 200
-    response.headers = {}
-    response.json.return_value = {"code": 90202, "msg": "invalid range"}
-    client.call_api.return_value = response
-    api = SheetAPI(auth, client)
-
-    assert api._batch_update_ranges("sheet-token", [], is_clear=True) == (True, 0)
-
-
-@pytest.mark.parametrize("method_name", ["_write_single_batch", "_append_single_batch"])
-def test_sheet_malformed_json_preserves_none_error_code(method_name):
-    auth = Mock()
-    auth.get_auth_headers.return_value = {"Authorization": "Bearer fake"}
-    client = Mock()
-    response = Mock()
-    response.status_code = 200
-    response.headers = {}
-    response.json.side_effect = ValueError("bad json")
-    client.call_api.return_value = response
-    api = SheetAPI(auth, client)
-    args = (
-        ("sheet-token", "sh1!A1:A1", [[1]])
-        if method_name == "_write_single_batch"
-        else ("sheet-token", "sh1", [[1]])
-    )
-
-    assert getattr(api, method_name)(*args) == (False, None)
-
-
-def test_sheet_boolean_write_keeps_false_contract_for_transport_error():
-    auth = Mock()
-    auth.get_auth_headers.return_value = {"Authorization": "Bearer fake"}
-    client = Mock()
-    client.call_api.side_effect = FeishuAPIError.from_transport("offline")
-    api = SheetAPI(auth, client)
-
-    assert api._write_single_batch("sheet-token", "sh1!A1:A1", [[1]]) == (
-        False,
-        None,
-    )

@@ -18,7 +18,6 @@ Fixtures 分类：
     配置 Fixtures：
         - sample_bitable_config: 多维表格测试配置
         - sample_sheet_config: 电子表格测试配置
-        - sample_selective_sync_config: 选择性同步配置
         - sample_config_dict: 配置字典
 
     数据 Fixtures：
@@ -35,7 +34,7 @@ Fixtures 分类：
     # 在测试中使用 fixture
     def test_something(sample_bitable_config):
         config = sample_bitable_config
-        assert config.target_type == TargetType.BITABLE
+        assert config.target.type == TargetType.BITABLE
 
     # 使用多个 fixtures
     def test_sync(sample_sheet_config, sample_dataframe):
@@ -55,7 +54,7 @@ Fixture 作用域：
 
 依赖关系：
     内部模块：
-        - core.config: 配置类
+        - core.runtime_config: 不可变配置图
     外部依赖：
         - pytest: 测试框架
         - pandas: 数据处理
@@ -71,68 +70,80 @@ from typing import Any, Dict
 import pandas as pd
 import pytest
 
-from core.config import (
-    SyncConfig,
-    SelectiveSyncConfig,
-    TargetType,
-    SyncMode,
-    FieldTypeStrategy,
-)
+from core.config import FieldTypeStrategy, SyncMode, TargetType
+from core.runtime_config import RuntimeConfig
+
+
+def make_runtime_config(
+    target_type: TargetType | str = TargetType.BITABLE, **overrides: Any
+) -> RuntimeConfig:
+    """Build a strict immutable runtime config from flat test overrides."""
+    match_strategy_overridden = "match_strategy" in overrides
+    target = target_type.value if isinstance(target_type, TargetType) else target_type
+    values = RuntimeConfig.flat_defaults(target)
+    values.update(
+        {
+            "file_path": "test_data.xlsx",
+            "app_id": "cli_test_app_id",
+            "app_secret": "test_app_secret",
+            "target_type": target,
+            "sync_mode": SyncMode.FULL.value,
+            "match_strategy": "by_key",
+            "index_column": "ID",
+            "field_type_strategy": FieldTypeStrategy.BASE.value,
+            "log_level": "INFO",
+        }
+    )
+    if target == TargetType.BITABLE.value:
+        values.update({"app_token": "test_app_token", "table_id": "test_table_id"})
+    else:
+        values.update(
+            {
+                "spreadsheet_token": "test_spreadsheet_token",
+                "sheet_id": "test_sheet_id",
+            }
+        )
+    selective = overrides.pop("selective_sync", None)
+    values.update(overrides)
+    if values["sync_mode"] == SyncMode.CLONE.value and not match_strategy_overridden:
+        values.pop("match_strategy", None)
+    if selective is None:
+        selective = {
+            name: values.pop(f"selective_sync.{name}")
+            for name in (
+                "enabled",
+                "columns",
+                "auto_include_index",
+                "optimize_ranges",
+                "max_gap_for_merge",
+                "preserve_column_order",
+            )
+        }
+    values["selective_sync"] = selective
+    return RuntimeConfig.from_flat(values)
+
+
+def attach_runtime(service: Any, runtime: RuntimeConfig) -> None:
+    """Attach immutable config nodes to a service created through __new__."""
+    service.runtime = runtime
+    service.source = runtime.source
+    service.target = runtime.target
+    service.sync_config = runtime.sync
+    service.control = runtime.control
+    service.conversion = runtime.conversion
+    service.output = runtime.output
 
 
 @pytest.fixture
-def sample_bitable_config() -> SyncConfig:
+def sample_bitable_config() -> RuntimeConfig:
     """返回用于多维表格测试的配置对象"""
-    return SyncConfig(
-        file_path="test_data.xlsx",
-        app_id="cli_test_app_id",
-        app_secret="test_app_secret",
-        target_type=TargetType.BITABLE,
-        app_token="test_app_token",
-        table_id="test_table_id",
-        sync_mode=SyncMode.FULL,
-        index_column="ID",
-        batch_size=500,
-        rate_limit_delay=0.01,
-        max_retries=3,
-        create_missing_fields=True,
-        field_type_strategy=FieldTypeStrategy.BASE,
-        log_level="INFO",
-    )
+    return make_runtime_config(TargetType.BITABLE)
 
 
 @pytest.fixture
-def sample_sheet_config() -> SyncConfig:
+def sample_sheet_config() -> RuntimeConfig:
     """返回用于电子表格测试的配置对象"""
-    return SyncConfig(
-        file_path="test_data.xlsx",
-        app_id="cli_test_app_id",
-        app_secret="test_app_secret",
-        target_type=TargetType.SHEET,
-        spreadsheet_token="test_spreadsheet_token",
-        sheet_id="test_sheet_id",
-        sync_mode=SyncMode.FULL,
-        index_column="ID",
-        start_row=1,
-        start_column="A",
-        batch_size=1000,
-        rate_limit_delay=0.1,
-        max_retries=3,
-        log_level="INFO",
-    )
-
-
-@pytest.fixture
-def sample_selective_sync_config() -> SelectiveSyncConfig:
-    """返回选择性同步配置"""
-    return SelectiveSyncConfig(
-        enabled=True,
-        columns=["Name", "Age", "City"],
-        auto_include_index=True,
-        optimize_ranges=True,
-        max_gap_for_merge=2,
-        preserve_column_order=True,
-    )
+    return make_runtime_config(TargetType.SHEET)
 
 
 @pytest.fixture

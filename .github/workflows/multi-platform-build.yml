@@ -2,10 +2,18 @@ name: Multi-Platform Build
 
 on:
   push:
-    branches: [ main, dev ]
+    branches: [ main, dev, codex/xtf-cli-v2 ]
+  pull_request:
+    branches: [ main, dev, codex/xtf-cli-v2 ]
   release:
     types: [ published ]
   workflow_dispatch:
+    inputs:
+      build_1_9_rollback:
+        description: Build the exact XTF 1.9 rollback package instead of XTF 2.0 artifacts
+        required: false
+        default: false
+        type: boolean
 
 env:
   PYTHON_VERSION: '3.11'
@@ -13,6 +21,7 @@ env:
 jobs:
   build-xtf:
     name: Build XTF
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.build_1_9_rollback }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -39,32 +48,21 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
     
-    - name: Set commit version
+    - name: Set XTF version
       id: version
       run: |
-        # Get commit message and sanitize it for filename usage
-        # 1. Get first line of commit message
-        # 2. Replace invalid chars (/:<>|?*" ) with underscore
-        # 3. Truncate to 50 chars to avoid too long filenames
-        RAW_VERSION=$(git log --format=%B -1 | head -1)
-        VERSION=$(echo "$RAW_VERSION" | tr -c '[:alnum:]._-' '_' | sed 's/__*/_/g' | cut -c 1-50)
-
-        # Remove trailing underscores
-        VERSION=${VERSION%_}
-
-        # Fallback if empty
+        VERSION=$(sed -n 's/^VERSION = "\([^"]*\)"/\1/p' xtf_cli/version.py)
         if [ -z "$VERSION" ]; then
-          VERSION="unknown-$(git rev-parse --short HEAD)"
+          echo "Unable to read VERSION from xtf_cli/version.py"
+          exit 1
         fi
-
-        echo "Original version: $RAW_VERSION"
-        echo "Sanitized version: $VERSION"
-        echo "VERSION=$VERSION" >> $GITHUB_ENV
-        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "XTF version: $VERSION"
+        echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
       shell: bash
     
     - name: Set up Python ${{ env.PYTHON_VERSION }}
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
         python-version: ${{ env.PYTHON_VERSION }}
         architecture: ${{ matrix.setup_python_arch }}
@@ -72,26 +70,127 @@ jobs:
     - name: Install dependencies for XTF
       run: |
         python -m pip install --upgrade pip
-        pip install pyinstaller
-        pip install -r requirements.txt
+        python -m pip install "setuptools<82" "pyinstaller==6.19.0"
+        # Pin pandas/numpy for PyInstaller --onefile compatibility on Linux.
+        # numpy>=2.0 wheels ship libscipy_openblas64_*.so, which fails the ELF
+        # page-alignment check under the PyInstaller onefile bootloader on
+        # linux-x64 (reproduced) and is expected to fail on linux-arm64. The
+        # packaging interpreter is fixed to Python 3.11 here, so numpy<2 stays
+        # installable. Unit tests in test.yml keep the unpinned requirements.txt
+        # so the Python 3.13 matrix leg can resolve numpy>=2.1.
+        #
+        # pandas>=2.2 is the minimum that ships engine="calamine"; earlier 2.x
+        # releases raise "Unknown engine: calamine" and utils.excel_reader falls
+        # back to OpenPyXL, losing the 4-20x read speedup. pandas<3 keeps pip
+        # off pandas 3.x, which requires numpy>=2 and would reintroduce the
+        # openblas failure above.
+        constraints="$RUNNER_TEMP/pyinstaller-constraints.txt"
+        printf 'pandas>=2.2,<3\nnumpy<2\n' > "$constraints"
+        python -m pip install -c "$constraints" -r requirements.txt
       shell: bash
     
     - name: Build XTF
       run: |
         pyinstaller --onefile \
-          --strip \
+          --collect-all=charset_normalizer \
+          --collect-all=python_calamine \
           --hidden-import=core.config \
-          --hidden-import=core.engine \
+          --hidden-import=core.bootstrap \
+          --hidden-import=core.compiler \
+          --hidden-import=core.key_policy \
+          --hidden-import=core.mode_policy \
+          --hidden-import=core.plan \
+          --hidden-import=core.reconcile \
+          --hidden-import=core.runtime_config \
+          --hidden-import=core.service \
+          --hidden-import=core.snapshot \
           --hidden-import=core.converter \
           --hidden-import=core.control \
           --hidden-import=core.reader \
           --hidden-import=api.auth \
           --hidden-import=api.base \
-          --hidden-import=api.bitable \
+          --hidden-import=api.bitable_backend \
+          --hidden-import=api.bitable_v1 \
+          --hidden-import=api.bitable_v3 \
           --hidden-import=api.sheet \
           --hidden-import=utils.excel_reader \
+          --hidden-import=xtf_cli.runtime \
+          --hidden-import=xtf_cli.parser \
+          --hidden-import=xtf_cli.config \
+          --hidden-import=xtf_cli.errors \
           XTF.py \
           --distpath dist/${{ matrix.platform }}
+      shell: bash
+
+    - name: Smoke XTF CLI
+      run: |
+        platform="${{ matrix.platform }}"
+        if [[ "${{ matrix.platform }}" == "windows-x64" ]]; then
+          executable="dist/${platform}/XTF.exe"
+        else
+          executable="dist/${platform}/XTF"
+        fi
+        "$executable" --version
+        "$executable" sync --help
+        smoke_dir=$(mktemp -d)
+        "$executable" config init --target-type bitable --output "$smoke_dir/config.yaml"
+        test -f "$smoke_dir/config.yaml"
+        # Runtime smoke: force the packaged binary through the pandas-import path.
+        # --version / sync --help / config init never import pandas, so a broken
+        # numpy/openblas bundle would otherwise pass CI silently and only crash
+        # on real user sync. We generate a minimal xlsx with the runner Python
+        # (whose pandas is installed above), point the freshly-initialised v2
+        # config at it, then invoke `sync --dry-run --json`. Fake credentials
+        # guarantee a controlled auth failure downstream, which still proves the
+        # binary loaded pandas/numpy and reached the structured-output layer.
+        SMOKE_DIR="$smoke_dir" python - <<'PY'
+        import os
+        import pathlib
+
+        import pandas as pd
+        import yaml
+
+        smoke = pathlib.Path(os.environ["SMOKE_DIR"])
+        pd.DataFrame({"ID": ["1"], "Name": ["a"]}).to_excel(
+            smoke / "data.xlsx", index=False
+        )
+        cfg_path = smoke / "config.yaml"
+        cfg = yaml.safe_load(cfg_path.read_text())
+        cfg["source"]["file"]["path"] = str(smoke / "data.xlsx")
+        cfg_path.write_text(yaml.safe_dump(cfg))
+        PY
+        set +e
+        "$executable" sync --config "$smoke_dir/config.yaml" --dry-run --json \
+          > "$smoke_dir/out.json" 2>&1
+        rc=$?
+        set -e
+        echo "--- runtime smoke output (rc=$rc) ---"
+        cat "$smoke_dir/out.json"
+        echo
+        echo "--- end runtime smoke output ---"
+        # Classify failures so a red smoke names the exact regression instead of
+        # a generic "PyInstaller crashed" message. Each branch corresponds to a
+        # distinct historical failure mode we have already hit or defended against.
+        if grep -Eiq 'libscipy_openblas|ELF load command' "$smoke_dir/out.json"; then
+          echo "::error::numpy/openblas PyInstaller regression (Linux page-alignment). Check pandas>=2.2,<3 / numpy<2 constraints in the install step."
+          exit 1
+        fi
+        if grep -Eiq 'UnicodeEncodeError|charmap.*codec' "$smoke_dir/out.json"; then
+          echo "::error::Windows stdio encoding regression. Check _ensure_utf8_stdio() is called at the top of xtf_cli.runtime.main()."
+          exit 1
+        fi
+        if grep -Eiq 'Unknown engine: calamine' "$smoke_dir/out.json"; then
+          echo "::error::python_calamine missing from the frozen bundle. Check --collect-all=python_calamine in the Build XTF step."
+          exit 1
+        fi
+        if grep -Eiq 'Failed to execute script' "$smoke_dir/out.json"; then
+          echo "::error::PyInstaller bootloader crash (unclassified). Inspect the runtime smoke output above."
+          exit 1
+        fi
+        grep -q '"command"' "$smoke_dir/out.json" || {
+          echo "::error::Runtime smoke did not produce structured JSON output"
+          exit 1
+        }
       shell: bash
     
     - name: Prepare XTF artifacts
@@ -99,16 +198,40 @@ jobs:
         platform="${{ matrix.platform }}"
         version="${{ env.VERSION }}"
         
-        mkdir -p "artifacts/XTF_py-${platform}-${version}"
+        package_dir="artifacts/XTF_py-${platform}-${version}"
+        mkdir -p "$package_dir"
         
         if [[ "${{ matrix.platform }}" == "windows-x64" ]]; then
-          cp "dist/${platform}/XTF.exe" "artifacts/XTF_py-${platform}-${version}/"
+          binary_name="XTF.exe"
         else
-          cp "dist/${platform}/XTF" "artifacts/XTF_py-${platform}-${version}/"
-          chmod +x "artifacts/XTF_py-${platform}-${version}/XTF"
+          binary_name="XTF"
         fi
-        
-        cp config.example.yaml "artifacts/XTF_py-${platform}-${version}/config.yaml"
+        cp "dist/${platform}/${binary_name}" "$package_dir/"
+        if [[ "$binary_name" == "XTF" ]]; then
+          chmod +x "$package_dir/XTF"
+        fi
+
+        cp config.example.yaml README.md QUICKSTART.md "$package_dir/"
+        export PACKAGE_DIR="$package_dir"
+        export BINARY_NAME="$binary_name"
+        python - <<'PY'
+        import hashlib
+        import os
+        from pathlib import Path
+
+        package = Path(os.environ["PACKAGE_DIR"])
+        names = [
+            os.environ["BINARY_NAME"],
+            "config.example.yaml",
+            "README.md",
+            "QUICKSTART.md",
+        ]
+        lines = []
+        for name in names:
+            digest = hashlib.sha256((package / name).read_bytes()).hexdigest()
+            lines.append(f"{digest}  {name}")
+        (package / "checksums.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        PY
         
         # Install zip on Windows if needed
         if [[ "${{ matrix.platform }}" == "windows-x64" ]]; then
@@ -128,225 +251,9 @@ jobs:
         compression-level: 0
         retention-days: 30
 
-  build-xtf-sheet:
-    name: Build XTF-Sheet (Legacy)
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-22.04
-            arch: x64
-            platform: linux-x64
-            setup_python_arch: x64
-          - os: ubuntu-22.04-arm
-            arch: arm64
-            platform: linux-arm64
-            setup_python_arch: arm64
-          - os: windows-2022
-            arch: x64
-            platform: windows-x64
-            setup_python_arch: x64
-          - os: macos-15
-            arch: arm64
-            platform: macos-arm64
-            setup_python_arch: arm64
-    
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-    
-    - name: Set commit version
-      id: version
-      run: |
-        # Get commit message and sanitize it for filename usage
-        # 1. Get first line of commit message
-        # 2. Replace invalid chars (/:<>|?*" ) with underscore
-        # 3. Truncate to 50 chars to avoid too long filenames
-        RAW_VERSION=$(git log --format=%B -1 | head -1)
-        VERSION=$(echo "$RAW_VERSION" | tr -c '[:alnum:]._-' '_' | sed 's/__*/_/g' | cut -c 1-50)
-
-        # Remove trailing underscores
-        VERSION=${VERSION%_}
-
-        # Fallback if empty
-        if [ -z "$VERSION" ]; then
-          VERSION="unknown-$(git rev-parse --short HEAD)"
-        fi
-
-        echo "Original version: $RAW_VERSION"
-        echo "Sanitized version: $VERSION"
-        echo "VERSION=$VERSION" >> $GITHUB_ENV
-        echo "version=$VERSION" >> $GITHUB_OUTPUT
-      shell: bash
-    
-    - name: Set up Python ${{ env.PYTHON_VERSION }}
-      uses: actions/setup-python@v4
-      with:
-        python-version: ${{ env.PYTHON_VERSION }}
-        architecture: ${{ matrix.setup_python_arch }}
-    
-    - name: Install dependencies for XTF-Sheet (minimal)
-      run: |
-        python -m pip install --upgrade pip
-        pip install pyinstaller
-        pip install pandas requests pyyaml
-      shell: bash
-    
-    - name: Build XTF-Sheet
-      run: |
-        pyinstaller --onefile \
-          --strip \
-          lite/XTF_Sheet.py \
-          --name XTF-Sheet \
-          --distpath dist/${{ matrix.platform }}
-      shell: bash
-    
-    - name: Prepare XTF-Sheet artifacts
-      run: |
-        platform="${{ matrix.platform }}"
-        version="${{ env.VERSION }}"
-        
-        mkdir -p "artifacts/XTF-Sheet_py-${platform}-${version}"
-        
-        if [[ "${{ matrix.platform }}" == "windows-x64" ]]; then
-          cp "dist/${platform}/XTF-Sheet.exe" "artifacts/XTF-Sheet_py-${platform}-${version}/"
-        else
-          cp "dist/${platform}/XTF-Sheet" "artifacts/XTF-Sheet_py-${platform}-${version}/"
-          chmod +x "artifacts/XTF-Sheet_py-${platform}-${version}/XTF-Sheet"
-        fi
-        
-        cp config.example.yaml "artifacts/XTF-Sheet_py-${platform}-${version}/config.yaml"
-        
-        # Install zip on Windows if needed
-        if [[ "${{ matrix.platform }}" == "windows-x64" ]]; then
-          choco install zip -y
-        fi
-        
-        cd artifacts
-        zip -r "../XTF-Sheet_py-${platform}-${version}.zip" "XTF-Sheet_py-${platform}-${version}"/
-        cd ..
-      shell: bash
-    
-    - name: Upload XTF-Sheet artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: XTF-Sheet_py-${{ matrix.platform }}-${{ env.VERSION }}
-        path: XTF-Sheet_py-${{ matrix.platform }}-${{ env.VERSION }}.zip
-        compression-level: 0
-        retention-days: 30
-
-  build-xtf-bitable:
-    name: Build XTF-Bitable (Legacy)
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-22.04
-            arch: x64
-            platform: linux-x64
-            setup_python_arch: x64
-          - os: ubuntu-22.04-arm
-            arch: arm64
-            platform: linux-arm64
-            setup_python_arch: arm64
-          - os: windows-2022
-            arch: x64
-            platform: windows-x64
-            setup_python_arch: x64
-          - os: macos-15
-            arch: arm64
-            platform: macos-arm64
-            setup_python_arch: arm64
-    
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-    
-    - name: Set commit version
-      id: version
-      run: |
-        # Get commit message and sanitize it for filename usage
-        # 1. Get first line of commit message
-        # 2. Replace invalid chars (/:<>|?*" ) with underscore
-        # 3. Truncate to 50 chars to avoid too long filenames
-        RAW_VERSION=$(git log --format=%B -1 | head -1)
-        VERSION=$(echo "$RAW_VERSION" | tr -c '[:alnum:]._-' '_' | sed 's/__*/_/g' | cut -c 1-50)
-
-        # Remove trailing underscores
-        VERSION=${VERSION%_}
-
-        # Fallback if empty
-        if [ -z "$VERSION" ]; then
-          VERSION="unknown-$(git rev-parse --short HEAD)"
-        fi
-
-        echo "Original version: $RAW_VERSION"
-        echo "Sanitized version: $VERSION"
-        echo "VERSION=$VERSION" >> $GITHUB_ENV
-        echo "version=$VERSION" >> $GITHUB_OUTPUT
-      shell: bash
-    
-    - name: Set up Python ${{ env.PYTHON_VERSION }}
-      uses: actions/setup-python@v4
-      with:
-        python-version: ${{ env.PYTHON_VERSION }}
-        architecture: ${{ matrix.setup_python_arch }}
-    
-    - name: Install dependencies for XTF-Bitable (minimal)
-      run: |
-        python -m pip install --upgrade pip
-        pip install pyinstaller
-        pip install pandas requests pyyaml
-      shell: bash
-    
-    - name: Build XTF-Bitable
-      run: |
-        pyinstaller --onefile \
-          --strip \
-          lite/XTF_Bitable.py \
-          --name XTF-Bitable \
-          --distpath dist/${{ matrix.platform }}
-      shell: bash
-    
-    - name: Prepare XTF-Bitable artifacts
-      run: |
-        platform="${{ matrix.platform }}"
-        version="${{ env.VERSION }}"
-        
-        mkdir -p "artifacts/XTF-Bitable_py-${platform}-${version}"
-        
-        if [[ "${{ matrix.platform }}" == "windows-x64" ]]; then
-          cp "dist/${platform}/XTF-Bitable.exe" "artifacts/XTF-Bitable_py-${platform}-${version}/"
-        else
-          cp "dist/${platform}/XTF-Bitable" "artifacts/XTF-Bitable_py-${platform}-${version}/"
-          chmod +x "artifacts/XTF-Bitable_py-${platform}-${version}/XTF-Bitable"
-        fi
-        
-        cp config.example.yaml "artifacts/XTF-Bitable_py-${platform}-${version}/config.yaml"
-        
-        # Install zip on Windows if needed
-        if [[ "${{ matrix.platform }}" == "windows-x64" ]]; then
-          choco install zip -y
-        fi
-        
-        cd artifacts
-        zip -r "../XTF-Bitable_py-${platform}-${version}.zip" "XTF-Bitable_py-${platform}-${version}"/
-        cd ..
-      shell: bash
-    
-    - name: Upload XTF-Bitable artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: XTF-Bitable_py-${{ matrix.platform }}-${{ env.VERSION }}
-        path: XTF-Bitable_py-${{ matrix.platform }}-${{ env.VERSION }}.zip
-        compression-level: 0
-        retention-days: 30
-    
   create-platform-bundles:
     runs-on: ubuntu-latest
-    needs: [build-xtf, build-xtf-sheet, build-xtf-bitable]
+    needs: [build-xtf]
     strategy:
       matrix:
         platform: [linux-x64, linux-arm64, windows-x64, macos-arm64]
@@ -355,28 +262,17 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
     
-    - name: Set commit version
+    - name: Set XTF version
       id: version
       run: |
-        # Get commit message and sanitize it for filename usage
-        # 1. Get first line of commit message
-        # 2. Replace invalid chars (/:<>|?*" ) with underscore
-        # 3. Truncate to 50 chars to avoid too long filenames
-        RAW_VERSION=$(git log --format=%B -1 | head -1)
-        VERSION=$(echo "$RAW_VERSION" | tr -c '[:alnum:]._-' '_' | sed 's/__*/_/g' | cut -c 1-50)
-
-        # Remove trailing underscores
-        VERSION=${VERSION%_}
-
-        # Fallback if empty
+        VERSION=$(sed -n 's/^VERSION = "\([^"]*\)"/\1/p' xtf_cli/version.py)
         if [ -z "$VERSION" ]; then
-          VERSION="unknown-$(git rev-parse --short HEAD)"
+          echo "Unable to read VERSION from xtf_cli/version.py"
+          exit 1
         fi
-
-        echo "Original version: $RAW_VERSION"
-        echo "Sanitized version: $VERSION"
-        echo "VERSION=$VERSION" >> $GITHUB_ENV
-        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "XTF version: $VERSION"
+        echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
       shell: bash
     
     - name: Download all artifacts for platform
@@ -393,32 +289,20 @@ jobs:
         # Install 7z for better cross-platform compatibility
         sudo apt-get update && sudo apt-get install -y p7zip-full
         
-        # Extract individual program ZIPs with error handling
+        # Extract the single XTF program ZIP with error handling. XTF-Sheet and
+        # XTF-Bitable legacy artifacts are no longer produced; the 1.9 rollback
+        # workflow remains the only source of those binaries.
         echo "Extracting XTF_py-${platform}-${version}.zip..."
         if ! 7z x "XTF_py-${platform}-${version}.zip" -y; then
           echo "7z failed, trying unzip with compatibility mode..."
           unzip -DD "XTF_py-${platform}-${version}.zip" || (echo "Failed to extract XTF zip" && exit 1)
         fi
         
-        echo "Extracting XTF-Sheet_py-${platform}-${version}.zip..."
-        if ! 7z x "XTF-Sheet_py-${platform}-${version}.zip" -y; then
-          echo "7z failed, trying unzip with compatibility mode..."
-          unzip -DD "XTF-Sheet_py-${platform}-${version}.zip" || (echo "Failed to extract XTF-Sheet zip" && exit 1)
-        fi
-        
-        echo "Extracting XTF-Bitable_py-${platform}-${version}.zip..."
-        if ! 7z x "XTF-Bitable_py-${platform}-${version}.zip" -y; then
-          echo "7z failed, trying unzip with compatibility mode..."
-          unzip -DD "XTF-Bitable_py-${platform}-${version}.zip" || (echo "Failed to extract XTF-Bitable zip" && exit 1)
-        fi
-        
         # Create platform bundle directory
         mkdir -p "ALL-XTF-${platform}-${version}"
         
-        # Copy all programs to bundle
+        # Copy the XTF program into the bundle
         cp -r "XTF_py-${platform}-${version}"/* "ALL-XTF-${platform}-${version}/"
-        cp -r "XTF-Sheet_py-${platform}-${version}"/* "ALL-XTF-${platform}-${version}/"
-        cp -r "XTF-Bitable_py-${platform}-${version}"/* "ALL-XTF-${platform}-${version}/"
         
         # Create platform bundle ZIP
         zip -r "ALL-XTF-${platform}-${version}.zip" "ALL-XTF-${platform}-${version}"/
@@ -440,28 +324,17 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
     
-    - name: Set commit version
+    - name: Set XTF version
       id: version
       run: |
-        # Get commit message and sanitize it for filename usage
-        # 1. Get first line of commit message
-        # 2. Replace invalid chars (/:<>|?*" ) with underscore
-        # 3. Truncate to 50 chars to avoid too long filenames
-        RAW_VERSION=$(git log --format=%B -1 | head -1)
-        VERSION=$(echo "$RAW_VERSION" | tr -c '[:alnum:]._-' '_' | sed 's/__*/_/g' | cut -c 1-50)
-
-        # Remove trailing underscores
-        VERSION=${VERSION%_}
-
-        # Fallback if empty
+        VERSION=$(sed -n 's/^VERSION = "\([^"]*\)"/\1/p' xtf_cli/version.py)
         if [ -z "$VERSION" ]; then
-          VERSION="unknown-$(git rev-parse --short HEAD)"
+          echo "Unable to read VERSION from xtf_cli/version.py"
+          exit 1
         fi
-
-        echo "Original version: $RAW_VERSION"
-        echo "Sanitized version: $VERSION"
-        echo "VERSION=$VERSION" >> $GITHUB_ENV
-        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "XTF version: $VERSION"
+        echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
       shell: bash
     
     - name: Download all platform bundles
@@ -481,7 +354,7 @@ jobs:
         mkdir -p "FULL-XTF-${version}"
         
         # Extract and organize all platform bundles with error handling
-        for zip_file in ALL-XTF-*-${version}.zip; do
+        for zip_file in ALL-XTF-*-"${version}".zip; do
           if [[ -f "$zip_file" ]]; then
             echo "Extracting $zip_file..."
             if ! 7z x "$zip_file" -y; then
@@ -509,33 +382,24 @@ jobs:
     runs-on: ubuntu-latest
     needs: [create-platform-bundles, create-release-bundle]
     if: github.event_name == 'release'
+    permissions:
+      contents: write
     
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
     
-    - name: Set commit version
+    - name: Set XTF version
       id: version
       run: |
-        # Get commit message and sanitize it for filename usage
-        # 1. Get first line of commit message
-        # 2. Replace invalid chars (/:<>|?*" ) with underscore
-        # 3. Truncate to 50 chars to avoid too long filenames
-        RAW_VERSION=$(git log --format=%B -1 | head -1)
-        VERSION=$(echo "$RAW_VERSION" | tr -c '[:alnum:]._-' '_' | sed 's/__*/_/g' | cut -c 1-50)
-
-        # Remove trailing underscores
-        VERSION=${VERSION%_}
-
-        # Fallback if empty
+        VERSION=$(sed -n 's/^VERSION = "\([^"]*\)"/\1/p' xtf_cli/version.py)
         if [ -z "$VERSION" ]; then
-          VERSION="unknown-$(git rev-parse --short HEAD)"
+          echo "Unable to read VERSION from xtf_cli/version.py"
+          exit 1
         fi
-
-        echo "Original version: $RAW_VERSION"
-        echo "Sanitized version: $VERSION"
-        echo "VERSION=$VERSION" >> $GITHUB_ENV
-        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "XTF version: $VERSION"
+        echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
       shell: bash
     
     - name: Download all artifacts
@@ -559,7 +423,7 @@ jobs:
       shell: bash
     
     - name: Upload release assets
-      uses: softprops/action-gh-release@v1
+      uses: softprops/action-gh-release@v2
       with:
         files: |
           ALL-XTF-linux-x64-${{ env.VERSION }}.zip
@@ -569,3 +433,10 @@ jobs:
           FULL-XTF-${{ env.VERSION }}.zip
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-1-9-rollback:
+    name: Build XTF 1.9 Rollback Package
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_1_9_rollback }}
+    uses: ./.github/workflows/build-1.9-rollback.yml
+    permissions:
+      contents: read
