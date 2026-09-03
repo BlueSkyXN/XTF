@@ -313,6 +313,9 @@ jobs:
       run: |
         pyinstaller --onefile \
           --collect-all=charset_normalizer \
+          --collect-all=python_calamine \
+          --paths=. \
+          --hidden-import=utils.excel_reader \
           lite/XTF_Sheet.py \
           --name XTF-Sheet \
           --distpath dist/${{ matrix.platform }}
@@ -414,6 +417,9 @@ jobs:
       run: |
         pyinstaller --onefile \
           --collect-all=charset_normalizer \
+          --collect-all=python_calamine \
+          --paths=. \
+          --hidden-import=utils.excel_reader \
           lite/XTF_Bitable.py \
           --name XTF-Bitable \
           --distpath dist/${{ matrix.platform }}
