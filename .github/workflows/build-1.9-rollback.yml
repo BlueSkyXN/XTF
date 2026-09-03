@@ -77,7 +77,14 @@ jobs:
       - name: Build all 1.9 executables
         run: |
           platform="${{ matrix.platform }}"
-          pyinstaller --clean --onefile --strip \
+          # NOTE: --strip is intentionally omitted. On Windows runners the
+          # Unix strip binary corrupts the PyInstaller-bundled python311.dll,
+          # producing "LoadLibrary: Invalid access to memory location" when
+          # the frozen executable extracts to %TEMP%\_MEIxxxxx. Linux and
+          # macOS tolerate --strip but the size saving (~10-20%) is not worth
+          # the platform-conditional complexity, so we drop it everywhere
+          # and keep the three invocations symmetric.
+          pyinstaller --clean --onefile \
             --collect-all=charset_normalizer \
             --collect-all=python_calamine \
             --paths=. \
@@ -92,7 +99,7 @@ jobs:
             --distpath "dist/${platform}" \
             --workpath "build/${platform}/XTF" \
             --specpath "build/specs"
-          pyinstaller --clean --onefile --strip \
+          pyinstaller --clean --onefile \
             --collect-all=charset_normalizer \
             --collect-all=python_calamine \
             --paths=. \
@@ -102,7 +109,7 @@ jobs:
             --distpath "dist/${platform}" \
             --workpath "build/${platform}/XTF-Sheet" \
             --specpath "build/specs"
-          pyinstaller --clean --onefile --strip \
+          pyinstaller --clean --onefile \
             --collect-all=charset_normalizer \
             --collect-all=python_calamine \
             --paths=. \
