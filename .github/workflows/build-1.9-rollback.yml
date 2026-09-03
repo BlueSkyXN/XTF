@@ -123,6 +123,18 @@ jobs:
 
       - name: Smoke all executables without Feishu access
         run: |
+          # Force UTF-8 stdio for the frozen Python interpreter. The 1.9 source
+          # prints Chinese welcome text on startup ("XTF工具 (模块化统一版本)" etc.),
+          # and Windows' default cp1252/cp936 codec cannot encode those
+          # characters, crashing the binary with UnicodeEncodeError. The 1.9
+          # tree is pinned to an exact SHA and cannot accept the
+          # _ensure_utf8_stdio() fix that the 2.0 CLI uses, so we set
+          # PYTHONIOENCODING at the smoke layer instead. PyInstaller's
+          # bootloader forwards this environment variable to the embedded
+          # interpreter, which then uses UTF-8 for stdout/stderr. Users
+          # restoring from the rollback package on Windows need the same
+          # environment variable; the aggregate README calls this out.
+          export PYTHONIOENCODING=utf-8
           platform="${{ matrix.platform }}"
           workspace=$(pwd)
           suffix=""
@@ -171,6 +183,17 @@ jobs:
           3. If reconstruction is required, start from the matching `config.*.1.9.example.yaml` file.
           4. Choose `XTF`, `XTF-Sheet`, or `XTF-Bitable` for the previous 1.9 workflow.
           5. Test against an isolated Feishu resource before production use.
+
+          **Windows only**: the 1.9 executables print Chinese welcome text at
+          startup, which crashes under the default `cp1252`/`cp936` console
+          codec with `UnicodeEncodeError`. Set `PYTHONIOENCODING=utf-8` before
+          invoking any of the three `.exe` files, for example
+          `set PYTHONIOENCODING=utf-8` in `cmd.exe` or
+          `$env:PYTHONIOENCODING="utf-8"` in PowerShell. Linux and macOS
+          default to UTF-8 and do not need this step. The 1.9 source tree is
+          pinned to an exact SHA and cannot accept the `_ensure_utf8_stdio()`
+          fix that the 2.0 CLI uses, so the environment variable is the only
+          available mitigation without patching frozen 1.9 source.
 
           Rolling back the executable does not reverse remote mutations already applied by XTF 2.0.
           EOF
