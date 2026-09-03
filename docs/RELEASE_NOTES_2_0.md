@@ -1,7 +1,9 @@
-# XTF 2.0 Release Notes（草案）
+# XTF 2.0 Release Notes（RC1）
 
-> 状态：`2.0.0-dev`。本文件不是发布公告；跨平台 RC、1.9 回滚包、真实 Feishu UAT、
-> exact-head CI、合并、tag 和 GitHub Release 尚需分别取得证据。
+> 状态：`2.0.0-rc1`。本文件不是正式发布公告；真实 Feishu UAT、最终 exact-head CI、
+> 合并、tag 和 GitHub Release 尚需分别取得证据。1.9 四平台回滚包、单一 XTF 的
+> 四平台 RC artifact 与 checksum、以及含运行时 pandas/calamine/UTF-8 断言的
+> artifact smoke 已在 `codex/xtf-cli-v2` 上完成并本地回读。
 
 ## Breaking changes
 
@@ -53,13 +55,22 @@ Release 审批或本地测试通过而自动获得授权。
 
 ## 发布门禁
 
-正式发布前必须完成：
+正式发布前必须完成（勾选状态以 `codex/xtf-cli-v2` 上 exact-head CI 与本地回读为准）：
 
-- XTF 1.9 精确源码的四平台可执行回滚包、flat 模板、manifest、checksum、下载回读和恢复演练；
-- 单一 XTF 的 Linux x64/ARM64、Windows x64、macOS ARM64 artifact 与 checksum；
-- artifact 解压、`--version`、`sync --help`、`config init` smoke；
-- checksum 已记录 RC artifact 的隔离 Feishu UAT 和独立 readback；
-- stale snapshot、row drift、response-lost `indeterminate` 故障注入；
-- 最终 exact-head CI、artifact 回读、合并、正式版本重建、最小远端 smoke、tag 和 Release。
+- [x] XTF 1.9 精确源码（`a22ac8119d33625cbcadbfb18cc2a36538f69b7e`）的四平台可执行
+      回滚包、flat 模板、manifest、checksum、下载回读和恢复演练。Windows 1.9
+      二进制因源码固有的 cp1252 中文欢迎横幅 crash 而为 best-effort，
+      `ROLLBACK.md` 已文档化 `PYTHONIOENCODING=utf-8` 缓解方式；其余三平台
+      smoke 严格通过。
+- [x] 单一 XTF 的 Linux x64/ARM64、Windows x64、macOS ARM64 artifact 与 checksum。
+- [x] artifact 解压、`--version`、`sync --help`、`config init` smoke，以及新增的
+      运行时 smoke：生成最小 xlsx、改写 v2 config、执行 `sync --dry-run --json`，
+      断言无 `libscipy_openblas` / `ELF load command` / `UnicodeEncodeError` /
+      `Unknown engine: calamine` / `Failed to execute script`，且输出含结构化
+      `"command"` 字段。
+- [ ] checksum 已记录 RC artifact 的隔离 Feishu UAT 和独立 readback。
+- [ ] stale snapshot、row drift、response-lost `indeterminate` 故障注入。
+- [ ] 最终 exact-head CI、artifact 回读、合并、正式版本重建、最小远端 smoke、
+      tag 和 Release。
 
 上述层级必须分开记录，任一层通过都不能替代下一层。

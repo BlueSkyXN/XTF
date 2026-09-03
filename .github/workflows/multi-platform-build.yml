@@ -251,217 +251,9 @@ jobs:
         compression-level: 0
         retention-days: 30
 
-  build-xtf-sheet:
-    name: Build XTF-Sheet (Legacy)
-    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.build_1_9_rollback }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-22.04
-            arch: x64
-            platform: linux-x64
-            setup_python_arch: x64
-          - os: ubuntu-22.04-arm
-            arch: arm64
-            platform: linux-arm64
-            setup_python_arch: arm64
-          - os: windows-2022
-            arch: x64
-            platform: windows-x64
-            setup_python_arch: x64
-          - os: macos-15
-            arch: arm64
-            platform: macos-arm64
-            setup_python_arch: arm64
-    
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-    
-    - name: Set XTF version
-      id: version
-      run: |
-        VERSION=$(sed -n 's/^VERSION = "\([^"]*\)"/\1/p' xtf_cli/version.py)
-        if [ -z "$VERSION" ]; then
-          echo "Unable to read VERSION from xtf_cli/version.py"
-          exit 1
-        fi
-        echo "XTF version: $VERSION"
-        echo "VERSION=$VERSION" >> "$GITHUB_ENV"
-        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-      shell: bash
-    
-    - name: Set up Python ${{ env.PYTHON_VERSION }}
-      uses: actions/setup-python@v5
-      with:
-        python-version: ${{ env.PYTHON_VERSION }}
-        architecture: ${{ matrix.setup_python_arch }}
-    
-    - name: Install dependencies for XTF-Sheet (minimal)
-      run: |
-        python -m pip install --upgrade pip
-        python -m pip install "setuptools<82" "pyinstaller==6.19.0"
-        # See the build-xtf install step for the pandas/numpy pin rationale.
-        constraints="$RUNNER_TEMP/pyinstaller-constraints.txt"
-        printf 'pandas>=2.2,<3\nnumpy<2\n' > "$constraints"
-        python -m pip install -c "$constraints" pandas requests pyyaml
-      shell: bash
-    
-    - name: Build XTF-Sheet
-      run: |
-        pyinstaller --onefile \
-          --collect-all=charset_normalizer \
-          --collect-all=python_calamine \
-          --paths=. \
-          --hidden-import=utils.excel_reader \
-          lite/XTF_Sheet.py \
-          --name XTF-Sheet \
-          --distpath dist/${{ matrix.platform }}
-      shell: bash
-
-    - name: Prepare XTF-Sheet artifacts
-      run: |
-        platform="${{ matrix.platform }}"
-        version="${{ env.VERSION }}"
-        
-        mkdir -p "artifacts/XTF-Sheet_py-${platform}-${version}"
-        
-        if [[ "${{ matrix.platform }}" == "windows-x64" ]]; then
-          cp "dist/${platform}/XTF-Sheet.exe" "artifacts/XTF-Sheet_py-${platform}-${version}/"
-        else
-          cp "dist/${platform}/XTF-Sheet" "artifacts/XTF-Sheet_py-${platform}-${version}/"
-          chmod +x "artifacts/XTF-Sheet_py-${platform}-${version}/XTF-Sheet"
-        fi
-        
-        cp lite/config.sheet.example.yaml "artifacts/XTF-Sheet_py-${platform}-${version}/config.yaml"
-        
-        # Install zip on Windows if needed
-        if [[ "${{ matrix.platform }}" == "windows-x64" ]]; then
-          choco install zip -y
-        fi
-        
-        cd artifacts
-        zip -r "../XTF-Sheet_py-${platform}-${version}.zip" "XTF-Sheet_py-${platform}-${version}"/
-        cd ..
-      shell: bash
-    
-    - name: Upload XTF-Sheet artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: XTF-Sheet_py-${{ matrix.platform }}-${{ env.VERSION }}
-        path: XTF-Sheet_py-${{ matrix.platform }}-${{ env.VERSION }}.zip
-        compression-level: 0
-        retention-days: 30
-
-  build-xtf-bitable:
-    name: Build XTF-Bitable (Legacy)
-    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.build_1_9_rollback }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-22.04
-            arch: x64
-            platform: linux-x64
-            setup_python_arch: x64
-          - os: ubuntu-22.04-arm
-            arch: arm64
-            platform: linux-arm64
-            setup_python_arch: arm64
-          - os: windows-2022
-            arch: x64
-            platform: windows-x64
-            setup_python_arch: x64
-          - os: macos-15
-            arch: arm64
-            platform: macos-arm64
-            setup_python_arch: arm64
-    
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-    
-    - name: Set XTF version
-      id: version
-      run: |
-        VERSION=$(sed -n 's/^VERSION = "\([^"]*\)"/\1/p' xtf_cli/version.py)
-        if [ -z "$VERSION" ]; then
-          echo "Unable to read VERSION from xtf_cli/version.py"
-          exit 1
-        fi
-        echo "XTF version: $VERSION"
-        echo "VERSION=$VERSION" >> "$GITHUB_ENV"
-        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-      shell: bash
-    
-    - name: Set up Python ${{ env.PYTHON_VERSION }}
-      uses: actions/setup-python@v5
-      with:
-        python-version: ${{ env.PYTHON_VERSION }}
-        architecture: ${{ matrix.setup_python_arch }}
-    
-    - name: Install dependencies for XTF-Bitable (minimal)
-      run: |
-        python -m pip install --upgrade pip
-        python -m pip install "setuptools<82" "pyinstaller==6.19.0"
-        # See the build-xtf install step for the pandas/numpy pin rationale.
-        constraints="$RUNNER_TEMP/pyinstaller-constraints.txt"
-        printf 'pandas>=2.2,<3\nnumpy<2\n' > "$constraints"
-        python -m pip install -c "$constraints" pandas requests pyyaml
-      shell: bash
-    
-    - name: Build XTF-Bitable
-      run: |
-        pyinstaller --onefile \
-          --collect-all=charset_normalizer \
-          --collect-all=python_calamine \
-          --paths=. \
-          --hidden-import=utils.excel_reader \
-          lite/XTF_Bitable.py \
-          --name XTF-Bitable \
-          --distpath dist/${{ matrix.platform }}
-      shell: bash
-
-    - name: Prepare XTF-Bitable artifacts
-      run: |
-        platform="${{ matrix.platform }}"
-        version="${{ env.VERSION }}"
-        
-        mkdir -p "artifacts/XTF-Bitable_py-${platform}-${version}"
-        
-        if [[ "${{ matrix.platform }}" == "windows-x64" ]]; then
-          cp "dist/${platform}/XTF-Bitable.exe" "artifacts/XTF-Bitable_py-${platform}-${version}/"
-        else
-          cp "dist/${platform}/XTF-Bitable" "artifacts/XTF-Bitable_py-${platform}-${version}/"
-          chmod +x "artifacts/XTF-Bitable_py-${platform}-${version}/XTF-Bitable"
-        fi
-        
-        cp lite/config.bitable.example.yaml "artifacts/XTF-Bitable_py-${platform}-${version}/config.yaml"
-        
-        # Install zip on Windows if needed
-        if [[ "${{ matrix.platform }}" == "windows-x64" ]]; then
-          choco install zip -y
-        fi
-        
-        cd artifacts
-        zip -r "../XTF-Bitable_py-${platform}-${version}.zip" "XTF-Bitable_py-${platform}-${version}"/
-        cd ..
-      shell: bash
-    
-    - name: Upload XTF-Bitable artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: XTF-Bitable_py-${{ matrix.platform }}-${{ env.VERSION }}
-        path: XTF-Bitable_py-${{ matrix.platform }}-${{ env.VERSION }}.zip
-        compression-level: 0
-        retention-days: 30
-    
   create-platform-bundles:
     runs-on: ubuntu-latest
-    needs: [build-xtf, build-xtf-sheet, build-xtf-bitable]
+    needs: [build-xtf]
     strategy:
       matrix:
         platform: [linux-x64, linux-arm64, windows-x64, macos-arm64]
@@ -497,32 +289,20 @@ jobs:
         # Install 7z for better cross-platform compatibility
         sudo apt-get update && sudo apt-get install -y p7zip-full
         
-        # Extract individual program ZIPs with error handling
+        # Extract the single XTF program ZIP with error handling. XTF-Sheet and
+        # XTF-Bitable legacy artifacts are no longer produced; the 1.9 rollback
+        # workflow remains the only source of those binaries.
         echo "Extracting XTF_py-${platform}-${version}.zip..."
         if ! 7z x "XTF_py-${platform}-${version}.zip" -y; then
           echo "7z failed, trying unzip with compatibility mode..."
           unzip -DD "XTF_py-${platform}-${version}.zip" || (echo "Failed to extract XTF zip" && exit 1)
         fi
         
-        echo "Extracting XTF-Sheet_py-${platform}-${version}.zip..."
-        if ! 7z x "XTF-Sheet_py-${platform}-${version}.zip" -y; then
-          echo "7z failed, trying unzip with compatibility mode..."
-          unzip -DD "XTF-Sheet_py-${platform}-${version}.zip" || (echo "Failed to extract XTF-Sheet zip" && exit 1)
-        fi
-        
-        echo "Extracting XTF-Bitable_py-${platform}-${version}.zip..."
-        if ! 7z x "XTF-Bitable_py-${platform}-${version}.zip" -y; then
-          echo "7z failed, trying unzip with compatibility mode..."
-          unzip -DD "XTF-Bitable_py-${platform}-${version}.zip" || (echo "Failed to extract XTF-Bitable zip" && exit 1)
-        fi
-        
         # Create platform bundle directory
         mkdir -p "ALL-XTF-${platform}-${version}"
         
-        # Copy all programs to bundle
+        # Copy the XTF program into the bundle
         cp -r "XTF_py-${platform}-${version}"/* "ALL-XTF-${platform}-${version}/"
-        cp -r "XTF-Sheet_py-${platform}-${version}"/* "ALL-XTF-${platform}-${version}/"
-        cp -r "XTF-Bitable_py-${platform}-${version}"/* "ALL-XTF-${platform}-${version}/"
         
         # Create platform bundle ZIP
         zip -r "ALL-XTF-${platform}-${version}.zip" "ALL-XTF-${platform}-${version}"/
