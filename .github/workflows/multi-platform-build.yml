@@ -71,7 +71,16 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         python -m pip install "setuptools<82" "pyinstaller==6.19.0"
-        python -m pip install -r requirements.txt
+        # Pin pandas/numpy for PyInstaller --onefile compatibility on Linux.
+        # numpy>=2.0 wheels ship libscipy_openblas64_*.so, which fails the ELF
+        # page-alignment check under the PyInstaller onefile bootloader on
+        # linux-x64 (reproduced) and is expected to fail on linux-arm64. The
+        # packaging interpreter is fixed to Python 3.11 here, so numpy<2 stays
+        # installable. Unit tests in test.yml keep the unpinned requirements.txt
+        # so the Python 3.13 matrix leg can resolve numpy>=2.1.
+        constraints="$RUNNER_TEMP/pyinstaller-constraints.txt"
+        printf 'pandas<2.2\nnumpy<2\n' > "$constraints"
+        python -m pip install -c "$constraints" -r requirements.txt
       shell: bash
     
     - name: Build XTF
@@ -119,6 +128,47 @@ jobs:
         smoke_dir=$(mktemp -d)
         "$executable" config init --target-type bitable --output "$smoke_dir/config.yaml"
         test -f "$smoke_dir/config.yaml"
+        # Runtime smoke: force the packaged binary through the pandas-import path.
+        # --version / sync --help / config init never import pandas, so a broken
+        # numpy/openblas bundle would otherwise pass CI silently and only crash
+        # on real user sync. We generate a minimal xlsx with the runner Python
+        # (whose pandas is installed above), point the freshly-initialised v2
+        # config at it, then invoke `sync --dry-run --json`. Fake credentials
+        # guarantee a controlled auth failure downstream, which still proves the
+        # binary loaded pandas/numpy and reached the structured-output layer.
+        SMOKE_DIR="$smoke_dir" python - <<'PY'
+        import os
+        import pathlib
+
+        import pandas as pd
+        import yaml
+
+        smoke = pathlib.Path(os.environ["SMOKE_DIR"])
+        pd.DataFrame({"ID": ["1"], "Name": ["a"]}).to_excel(
+            smoke / "data.xlsx", index=False
+        )
+        cfg_path = smoke / "config.yaml"
+        cfg = yaml.safe_load(cfg_path.read_text())
+        cfg["source"]["file"]["path"] = str(smoke / "data.xlsx")
+        cfg_path.write_text(yaml.safe_dump(cfg))
+        PY
+        set +e
+        "$executable" sync --config "$smoke_dir/config.yaml" --dry-run --json \
+          > "$smoke_dir/out.json" 2>&1
+        rc=$?
+        set -e
+        echo "--- runtime smoke output (rc=$rc) ---"
+        cat "$smoke_dir/out.json"
+        echo
+        echo "--- end runtime smoke output ---"
+        if grep -Eiq 'ImportError|libscipy_openblas|ELF load command|Failed to execute script' "$smoke_dir/out.json"; then
+          echo "::error::Runtime pandas/numpy import regression detected in packaged binary"
+          exit 1
+        fi
+        grep -q '"command"' "$smoke_dir/out.json" || {
+          echo "::error::Runtime smoke did not produce structured JSON output"
+          exit 1
+        }
       shell: bash
     
     - name: Prepare XTF artifacts
@@ -231,7 +281,10 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         python -m pip install "setuptools<82" "pyinstaller==6.19.0"
-        python -m pip install pandas requests pyyaml
+        # See the build-xtf install step for the pandas/numpy pin rationale.
+        constraints="$RUNNER_TEMP/pyinstaller-constraints.txt"
+        printf 'pandas<2.2\nnumpy<2\n' > "$constraints"
+        python -m pip install -c "$constraints" pandas requests pyyaml
       shell: bash
     
     - name: Build XTF-Sheet
@@ -329,7 +382,10 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         python -m pip install "setuptools<82" "pyinstaller==6.19.0"
-        python -m pip install pandas requests pyyaml
+        # See the build-xtf install step for the pandas/numpy pin rationale.
+        constraints="$RUNNER_TEMP/pyinstaller-constraints.txt"
+        printf 'pandas<2.2\nnumpy<2\n' > "$constraints"
+        python -m pip install -c "$constraints" pandas requests pyyaml
       shell: bash
     
     - name: Build XTF-Bitable

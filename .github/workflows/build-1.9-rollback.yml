@@ -57,7 +57,16 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install "setuptools<82" "pyinstaller==6.19.0"
-          python -m pip install -r requirements.txt
+          # The 1.9 source's requirements.txt uses unpinned lower bounds
+          # (pandas>=1.5.0, etc.). Installing it as-is in 2026 resolves to
+          # pandas>=3 / numpy>=2, whose libscipy_openblas64_*.so fails the ELF
+          # page-alignment check under the PyInstaller --onefile bootloader on
+          # Linux. The 1.9 source tree is intentionally left untouched; we
+          # constrain pandas/numpy at install time only so the resulting
+          # rollback binaries match what 1.9.0 originally shipped.
+          constraints="$RUNNER_TEMP/pyinstaller-constraints.txt"
+          printf 'pandas<2.2\nnumpy<2\n' > "$constraints"
+          python -m pip install -c "$constraints" -r requirements.txt
         shell: bash
 
       - name: Build all 1.9 executables
