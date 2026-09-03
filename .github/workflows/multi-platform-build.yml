@@ -78,8 +78,14 @@ jobs:
         # packaging interpreter is fixed to Python 3.11 here, so numpy<2 stays
         # installable. Unit tests in test.yml keep the unpinned requirements.txt
         # so the Python 3.13 matrix leg can resolve numpy>=2.1.
+        #
+        # pandas>=2.2 is the minimum that ships engine="calamine"; earlier 2.x
+        # releases raise "Unknown engine: calamine" and utils.excel_reader falls
+        # back to OpenPyXL, losing the 4-20x read speedup. pandas<3 keeps pip
+        # off pandas 3.x, which requires numpy>=2 and would reintroduce the
+        # openblas failure above.
         constraints="$RUNNER_TEMP/pyinstaller-constraints.txt"
-        printf 'pandas<2.2\nnumpy<2\n' > "$constraints"
+        printf 'pandas>=2.2,<3\nnumpy<2\n' > "$constraints"
         python -m pip install -c "$constraints" -r requirements.txt
       shell: bash
     
@@ -166,7 +172,7 @@ jobs:
         # a generic "PyInstaller crashed" message. Each branch corresponds to a
         # distinct historical failure mode we have already hit or defended against.
         if grep -Eiq 'libscipy_openblas|ELF load command' "$smoke_dir/out.json"; then
-          echo "::error::numpy/openblas PyInstaller regression (Linux page-alignment). Check pandas<2.2 / numpy<2 constraints in the install step."
+          echo "::error::numpy/openblas PyInstaller regression (Linux page-alignment). Check pandas>=2.2,<3 / numpy<2 constraints in the install step."
           exit 1
         fi
         if grep -Eiq 'UnicodeEncodeError|charmap.*codec' "$smoke_dir/out.json"; then
@@ -299,7 +305,7 @@ jobs:
         python -m pip install "setuptools<82" "pyinstaller==6.19.0"
         # See the build-xtf install step for the pandas/numpy pin rationale.
         constraints="$RUNNER_TEMP/pyinstaller-constraints.txt"
-        printf 'pandas<2.2\nnumpy<2\n' > "$constraints"
+        printf 'pandas>=2.2,<3\nnumpy<2\n' > "$constraints"
         python -m pip install -c "$constraints" pandas requests pyyaml
       shell: bash
     
@@ -400,7 +406,7 @@ jobs:
         python -m pip install "setuptools<82" "pyinstaller==6.19.0"
         # See the build-xtf install step for the pandas/numpy pin rationale.
         constraints="$RUNNER_TEMP/pyinstaller-constraints.txt"
-        printf 'pandas<2.2\nnumpy<2\n' > "$constraints"
+        printf 'pandas>=2.2,<3\nnumpy<2\n' > "$constraints"
         python -m pip install -c "$constraints" pandas requests pyyaml
       shell: bash
     

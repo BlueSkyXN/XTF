@@ -64,8 +64,13 @@ jobs:
           # Linux. The 1.9 source tree is intentionally left untouched; we
           # constrain pandas/numpy at install time only so the resulting
           # rollback binaries match what 1.9.0 originally shipped.
+          #
+          # pandas>=2.2 is the minimum that ships engine="calamine", which
+          # utils.excel_reader requires for the fast path; pandas<3 keeps pip
+          # off pandas 3.x, which requires numpy>=2 and would reintroduce the
+          # openblas failure.
           constraints="$RUNNER_TEMP/pyinstaller-constraints.txt"
-          printf 'pandas<2.2\nnumpy<2\n' > "$constraints"
+          printf 'pandas>=2.2,<3\nnumpy<2\n' > "$constraints"
           python -m pip install -c "$constraints" -r requirements.txt
         shell: bash
 
