@@ -699,7 +699,36 @@ def _normalize_exception(exc: Exception, *, phase: str = "general") -> CLIError:
     return CLIError("XTF_E_RUNTIME", str(exc), EXIT_RUNTIME)
 
 
+def _ensure_utf8_stdio() -> None:
+    """Force UTF-8 on stdout/stderr for Windows consoles.
+
+    Feishu routinely returns Chinese error text (for example
+    ``\u83b7\u53d6\u8bbf\u95ee\u4ee4\u724c\u5931\u8d25``), and the CLI reports it verbatim through both
+    the JSON envelope (``ensure_ascii=False``) and stderr diagnostics. On
+    Windows the default ``cp1252``/``cp936`` codecs cannot encode those
+    characters, which crashes the packaged binary with ``UnicodeEncodeError``
+    on any real sync failure. Linux and macOS runners already default to
+    UTF-8, so the reconfigure is scoped to ``win32`` only.
+
+    ``sys.stdout.reconfigure`` is available on Python 3.7+ and works inside
+    PyInstaller-frozen executables. When stdout/stderr is redirected to a
+    pipe that rejects reconfiguration, we swallow the error and let the
+    default codec win rather than aborting startup.
+    """
+    if sys.platform != "win32":
+        return
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8")
+        except (OSError, ValueError):
+            pass
+
+
 def main(argv: Sequence[str] | None = None) -> int:
+    _ensure_utf8_stdio()
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     started = perf_counter()
     command_hint = next(

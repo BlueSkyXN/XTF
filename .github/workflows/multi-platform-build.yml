@@ -87,6 +87,7 @@ jobs:
       run: |
         pyinstaller --onefile \
           --collect-all=charset_normalizer \
+          --collect-all=python_calamine \
           --hidden-import=core.config \
           --hidden-import=core.bootstrap \
           --hidden-import=core.compiler \
@@ -161,8 +162,23 @@ jobs:
         cat "$smoke_dir/out.json"
         echo
         echo "--- end runtime smoke output ---"
-        if grep -Eiq 'ImportError|libscipy_openblas|ELF load command|Failed to execute script' "$smoke_dir/out.json"; then
-          echo "::error::Runtime pandas/numpy import regression detected in packaged binary"
+        # Classify failures so a red smoke names the exact regression instead of
+        # a generic "PyInstaller crashed" message. Each branch corresponds to a
+        # distinct historical failure mode we have already hit or defended against.
+        if grep -Eiq 'libscipy_openblas|ELF load command' "$smoke_dir/out.json"; then
+          echo "::error::numpy/openblas PyInstaller regression (Linux page-alignment). Check pandas<2.2 / numpy<2 constraints in the install step."
+          exit 1
+        fi
+        if grep -Eiq 'UnicodeEncodeError|charmap.*codec' "$smoke_dir/out.json"; then
+          echo "::error::Windows stdio encoding regression. Check _ensure_utf8_stdio() is called at the top of xtf_cli.runtime.main()."
+          exit 1
+        fi
+        if grep -Eiq 'Unknown engine: calamine' "$smoke_dir/out.json"; then
+          echo "::error::python_calamine missing from the frozen bundle. Check --collect-all=python_calamine in the Build XTF step."
+          exit 1
+        fi
+        if grep -Eiq 'Failed to execute script' "$smoke_dir/out.json"; then
+          echo "::error::PyInstaller bootloader crash (unclassified). Inspect the runtime smoke output above."
           exit 1
         fi
         grep -q '"command"' "$smoke_dir/out.json" || {

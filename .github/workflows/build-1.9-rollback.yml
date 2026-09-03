@@ -74,6 +74,7 @@ jobs:
           platform="${{ matrix.platform }}"
           pyinstaller --clean --onefile --strip \
             --collect-all=charset_normalizer \
+            --collect-all=python_calamine \
             --hidden-import=core.config \
             --hidden-import=core.engine \
             --hidden-import=api.auth \
@@ -86,6 +87,7 @@ jobs:
             --specpath "build/specs"
           pyinstaller --clean --onefile --strip \
             --collect-all=charset_normalizer \
+            --collect-all=python_calamine \
             lite/XTF_Sheet.py \
             --name XTF-Sheet \
             --distpath "dist/${platform}" \
@@ -93,6 +95,7 @@ jobs:
             --specpath "build/specs"
           pyinstaller --clean --onefile --strip \
             --collect-all=charset_normalizer \
+            --collect-all=python_calamine \
             lite/XTF_Bitable.py \
             --name XTF-Bitable \
             --distpath "dist/${platform}" \
