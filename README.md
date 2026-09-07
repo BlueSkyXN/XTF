@@ -2,9 +2,9 @@
 
 XTF 是一个 flags-first 的数据同步 CLI，将本地 Excel/CSV 或另一张多维表格的数据同步到飞书 Bitable 或 Sheet。它提供只读计划、结构化执行结果、稳定退出码和 YAML v2 配置。
 
-> 2026-09-05 本地 AI 接手版，版本仍为 `2.0.0-rc1`。本次以 cleaned 候选版为基线，独立比较 original / completed / cleaned / execution 四份文件树，修正两处局部问题；本地非集成测试 **766 passed**。真实飞书、远端 CI 和四平台构建未运行，Ruff/Black/MyPy/PyInstaller 缺失。先读 [本地 AI 应用说明](local/HANDOFF.md)，再看 [新老对照](local/COMPARISON.md) 和 [实际运行结果](local/VALIDATION.txt)。原 `.local/` 为历史材料，其中的旧状态与旧补丁不应自动重新应用。
+> 当前版本为 `2.0.0-rc1` 候选版。源码与构建检查不代表真实飞书 UAT 或正式发布已完成；发布条件见 [2.0 发布说明](docs/RELEASE_NOTES_2_0.md)，可下载版本以 [GitHub Releases](https://github.com/BlueSkyXN/XTF/releases) 为准。
 >
-> Excel 为主要输入格式，CSV 仍为实验性支持。本次实际文件测试覆盖 OpenPyXL 读取 `.xlsx` 和 CSV；Calamine / `.xls` 尚未在本次环境实测。
+> Excel 为主要输入格式，CSV 仍为实验性支持。Excel 引擎及格式限制见下方“文件格式支持”。
 
 ## 核心特性
 
@@ -19,7 +19,7 @@ XTF 是一个 flags-first 的数据同步 CLI，将本地 Excel/CSV 或另一张
 - **公式保护** — `full` 模式双读检测云端公式，无法确认公式状态时停止写入
 - **分块与执行结果** — 全计划先做本地编码检查；可选有界读回等待，区分服务端接受、读回确认、部分完成和结果未知
 - **公式范围续扫** — 扫描截断后按范围二分继续，单格仍截断或达到有限次数上限则明确停止
-- **产物测试** — 提供临时资源真实读写套件和测试后原样发布工作流；本次仅完成离线运行，未连接真实飞书
+- **产物测试** — 提供临时资源真实读写套件和测试后原样发布工作流；真实读写须单独授权，离线测试不能替代 UAT
 - **高级频控** — 3 种重试策略 × 3 种频控策略，9 种组合灵活配置
 - **Excel 引擎回退** — 优先使用可用的 Calamine 引擎，必要时回退 OpenPyXL
 
@@ -171,8 +171,8 @@ python3 XTF.py sync --field-type-strategy intelligence  # 全面智能
 
 | 格式 | 扩展名 | 状态 | 读取引擎 |
 |------|--------|------|----------|
-| Excel 2007+ | `.xlsx` | 本次实测 OpenPyXL 路径 | Calamine（可用时）→ 回退 OpenPyXL |
-| Excel 97-2003 | `.xls` | 支持 Calamine 路径，本次未实测 | Calamine；OpenPyXL 不读取旧 `.xls` |
+| Excel 2007+ | `.xlsx` | 主要支持格式 | Calamine（可用时）→ 回退 OpenPyXL |
+| Excel 97-2003 | `.xls` | 需要支持该格式的引擎 | Calamine；OpenPyXL 不读取旧 `.xls` |
 | CSV | `.csv` | 🧪 实验性 | pandas（UTF-8/GBK 自动检测） |
 
 ## 项目结构
