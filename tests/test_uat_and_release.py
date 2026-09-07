@@ -253,7 +253,11 @@ def test_other_build_not_publishable(tmp_path, metadata):
 def test_package_rejects_ambiguous_paths_before_extraction(tmp_path, name):
     path = tmp_path / "bad.zip"
     with zipfile.ZipFile(path, "w") as archive:
-        archive.writestr(name, b"bad")
+        # Store the raw name verbatim: ZipInfo normalizes os.sep to "/" on
+        # Windows, which would turn "a\\b" into a legal entry before the check.
+        info = zipfile.ZipInfo("placeholder", date_time=(1980, 1, 1, 0, 0, 0))
+        info.filename = name
+        archive.writestr(info, b"bad")
     with pytest.raises(ValueError):
         release.package_files(path)
 
