@@ -4,6 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 from unittest.mock import Mock
+import sys
 import zipfile
 
 import pytest
@@ -248,13 +249,29 @@ def test_other_build_not_publishable(tmp_path, metadata):
 
 
 @pytest.mark.parametrize(
-    "name", ["../escape", "/root", "a/../escape", "a\\b", "a//b", "C:/file"]
+    "name",
+    [
+        "../escape",
+        "/root",
+        "a/../escape",
+        "a//b",
+        "C:/file",
+        pytest.param(
+            "a\\b",
+            marks=pytest.mark.skipif(
+                sys.platform == "win32",
+                reason="Windows zipfile normalizes os.sep in entry names "
+                "while reading, so a backslash entry cannot be observed",
+            ),
+        ),
+    ],
 )
 def test_package_rejects_ambiguous_paths_before_extraction(tmp_path, name):
     path = tmp_path / "bad.zip"
     with zipfile.ZipFile(path, "w") as archive:
         # Store the raw name verbatim: ZipInfo normalizes os.sep to "/" on
-        # Windows, which would turn "a\\b" into a legal entry before the check.
+        # Windows at construction time, which would turn "a\\b" into a
+        # legal entry before the check ever sees it.
         info = zipfile.ZipInfo("placeholder", date_time=(1980, 1, 1, 0, 0, 0))
         info.filename = name
         archive.writestr(info, b"bad")
