@@ -104,6 +104,10 @@ RuntimeConfig
 
 `api/` 不反向导入 `core.control`，也不读取进程全局 controller。
 
+动态 OpenAPI 路径段统一经过 `api.url.encode_path_segment()` 编码；独立的 `.` / `..`
+会在该路径请求发出前拒绝，避免 HTTP 客户端规范化后改变端点。该 helper 不承诺校验
+飞书 token 的完整格式，也不负责本地文件路径限制；CLI 仍允许显式指定父目录中的输入文件。
+
 ## 4. 单一 typed 数据流
 
 ```text
