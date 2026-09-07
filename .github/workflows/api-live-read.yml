@@ -1,0 +1,41 @@
+name: Feishu API Read Probes
+on:
+  workflow_dispatch:
+    inputs:
+      suite:
+        type: choice
+        options: [base_v3, bitable_v1, sheet_ai]
+        required: true
+        default: base_v3
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-22.04
+    environment: feishu-api-ci
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install -r requirements.txt
+      - name: Read known fixture through the XTF adapter
+        env:
+          PROBE_SUITE: ${{ inputs.suite }}
+          XTF_PROBE_APP_ID: ${{ secrets.XTF_PROBE_APP_ID }}
+          XTF_PROBE_APP_SECRET: ${{ secrets.XTF_PROBE_APP_SECRET }}
+          XTF_PROBE_BASE: ${{ vars.XTF_PROBE_BASE }}
+          XTF_PROBE_TABLE: ${{ vars.XTF_PROBE_TABLE }}
+          XTF_PROBE_RECORD: ${{ vars.XTF_PROBE_RECORD }}
+          XTF_PROBE_SPREADSHEET: ${{ vars.XTF_PROBE_SPREADSHEET }}
+          XTF_PROBE_SHEET_ID: ${{ vars.XTF_PROBE_SHEET_ID }}
+          XTF_PROBE_FORMULA_RANGE: ${{ vars.XTF_PROBE_FORMULA_RANGE }}
+          XTF_PROBE_MIN_FORMULAS: ${{ vars.XTF_PROBE_MIN_FORMULAS }}
+        run: python -m tools.probe_feishu_api --suite "$PROBE_SUITE"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: api-read-${{ inputs.suite }}-${{ github.sha }}
+          path: api-probe.json
+          if-no-files-found: error

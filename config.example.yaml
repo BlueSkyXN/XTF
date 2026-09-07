@@ -28,6 +28,8 @@ sync:
     datetime_granularity: exact
     timezone: null
   verify_remote_writes: false
+  verify_timeout_seconds: 10.0    # 只重试读取；0 表示只读一次
+  verify_interval_seconds: 0.5
   selective:
     enabled: false
     columns: []

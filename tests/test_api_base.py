@@ -481,3 +481,38 @@ class TestRetryableAPIClientExponentialBackoff:
 
         # 验证 sleep 被调用（包含频率限制和退避）
         assert mock_sleep.call_count > 0
+
+
+@pytest.mark.parametrize("started", [False, True])
+@pytest.mark.parametrize(
+    "error_type", [requests.exceptions.ConnectionError, RuntimeError]
+)
+def test_single_send_keeps_error_cause_and_send_state(monkeypatch, started, error_type):
+    failure = error_type("failure")
+    limiter = Mock()
+    request = Mock()
+    if started:
+        request.side_effect = failure
+    else:
+        limiter.wait.side_effect = failure
+    monkeypatch.setattr(requests, "request", request)
+    client = RetryableAPIClient(max_retries=3, rate_limiter=limiter)
+
+    with pytest.raises(FeishuAPIError) as caught:
+        client.call_api("POST", "https://example.test/records", retry_transport=False)
+
+    assert caught.value.kind == "transport"
+    assert caught.value.__cause__ is failure
+    assert caught.value.response_data == {"request_started": started}
+    assert request.call_count == int(started)
+    limiter.wait.assert_called_once()
+
+
+@pytest.mark.parametrize("interrupt", [KeyboardInterrupt, SystemExit])
+def test_single_send_does_not_swallow_process_interrupt(monkeypatch, interrupt):
+    failure = interrupt()
+    monkeypatch.setattr(requests, "request", Mock(side_effect=failure))
+    client = RetryableAPIClient(rate_limiter=Mock())
+    with pytest.raises(interrupt) as caught:
+        client.call_api("POST", "https://example.test/records", retry_transport=False)
+    assert caught.value is failure

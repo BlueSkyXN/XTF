@@ -1,0 +1,23 @@
+name: Upstream API Source Changes
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '15 3 * * 1'
+permissions:
+  contents: read
+jobs:
+  compare:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m tools.check_upstream_api
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: upstream-api-drift-${{ github.run_id }}
+          path: upstream-api-drift/
+          if-no-files-found: error

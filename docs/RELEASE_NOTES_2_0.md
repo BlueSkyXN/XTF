@@ -1,9 +1,15 @@
-# XTF 2.0 Release Notes（RC1）
+# XTF 2.0 Release Notes（RC1 源码修订）
 
-> 状态：`2.0.0-rc1`。本文件不是正式发布公告；真实 Feishu UAT、最终 exact-head CI、
-> 合并、tag 和 GitHub Release 尚需分别取得证据。1.9 四平台回滚包、单一 XTF 的
-> 四平台 RC artifact 与 checksum、以及含运行时 pandas/calamine/UTF-8 断言的
-> artifact smoke 已在 `codex/xtf-cli-v2` 上完成并本地回读。
+> 本次状态：2026-09-05，版本 `2.0.0-rc1`。本地完整非集成测试 552 passed；真实飞书联调、当前代码的四平台构建和远端 CI 未执行。Ruff、Black、MyPy 未安装，未执行。历史分支或旧源码生成的 artifact 不代表本修订包已验证。详见 [本次报告](../.local/review-20260905/REVIEW.md)。
+
+## 本次源码修订
+
+- Sheet 按物理行列写入；空列、跨空行、表头乱序、起始偏移、普通新增和覆盖重建得到统一处理。
+- 追加范围从已占用尾行之后开始，使用 INSERT_ROWS，后续分块跟随服务端实际范围。
+- 统一严格索引的匹配值与写入类型；真实文件保留文本索引、拒绝含糊表头。
+- v1/v3 解析实际响应与部分结果；发送后结果未知不伪报零写入，HTTP/业务重试共用总预算。
+- 补齐双读、并发变化、认证响应和 YAML 输入的失败路径。
+- 明确 pandas/Calamine 版本关系，添加 tzdata 依赖及打包收集声明；构建实际效果尚未验证。
 
 ## Breaking changes
 
@@ -53,24 +59,19 @@ python3 XTF.py sync --config config.yaml
 `overwrite` / `clone` 和任何 delete/clear plan 仍需 `--allow-delete`。真实生产 mutation 不因
 Release 审批或本地测试通过而自动获得授权。
 
-## 发布门禁
+## 本修订的完成状态
 
-正式发布前必须完成（勾选状态以 `codex/xtf-cli-v2` 上 exact-head CI 与本地回读为准）：
+| 项目 | 本次状态 |
+|---|---|
+| 源码修改、原测试与新增回归 | 完成，552 passed |
+| Python 语法/编译、CLI 本地演练 | 完成 |
+| Ruff、Black、MyPy | 未执行，环境中未安装 |
+| 当前代码的 CI 与四平台 artifact | 未执行 |
+| 隔离飞书实测与 artifact 实际运行 | 未执行 |
+| 正式版本、合并、tag、Release | 未执行 |
 
-- [x] XTF 1.9 精确源码（`a22ac8119d33625cbcadbfb18cc2a36538f69b7e`）的四平台可执行
-      回滚包、flat 模板、manifest、checksum、下载回读和恢复演练。Windows 1.9
-      二进制因源码固有的 cp1252 中文欢迎横幅 crash 而为 best-effort，
-      `ROLLBACK.md` 已文档化 `PYTHONIOENCODING=utf-8` 缓解方式；其余三平台
-      smoke 严格通过。
-- [x] 单一 XTF 的 Linux x64/ARM64、Windows x64、macOS ARM64 artifact 与 checksum。
-- [x] artifact 解压、`--version`、`sync --help`、`config init` smoke，以及新增的
-      运行时 smoke：生成最小 xlsx、改写 v2 config、执行 `sync --dry-run --json`，
-      断言无 `libscipy_openblas` / `ELF load command` / `UnicodeEncodeError` /
-      `Unknown engine: calamine` / `Failed to execute script`，且输出含结构化
-      `"command"` 字段。
-- [ ] checksum 已记录 RC artifact 的隔离 Feishu UAT 和独立 readback。
-- [ ] stale snapshot、row drift、response-lost `indeterminate` 故障注入。
-- [ ] 最终 exact-head CI、artifact 回读、合并、正式版本重建、最小远端 smoke、
-      tag 和 Release。
+## Windows 1.9 回滚说明
 
-上述层级必须分开记录，任一层通过都不能替代下一层。
+沿用已确定的 best-effort 定位，不承诺旧 Windows 1.9 二进制可成功启动。不要将设置
+`PYTHONIOENCODING` 写成已证实有效的恢复步骤。本次没有重新运行旧二进制；上传材料中对
+历史构建或恢复实验的描述，只能按其对应的旧源码和环境理解，不能证明本次修订可发布。

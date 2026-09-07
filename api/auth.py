@@ -132,24 +132,40 @@ class FeishuAuth:
 
         response = self.api_client.call_api("POST", url, headers=headers, json=data)
 
-        try:
-            result = response.json()
-        except ValueError as e:
-            raise Exception(
-                f"获取访问令牌响应解析失败: {e}, HTTP状态码: {response.status_code}"
-            )
+        from .sdk import FeishuAPIError, FeishuResponseParser
+        import math
 
-        if result.get("code") != 0:
-            error_msg = result.get("msg", "未知错误")
-            raise Exception(
-                f"获取访问令牌失败: 错误码 {result.get('code')}, 错误信息: {error_msg}"
-            )
-
-        token = result["tenant_access_token"]
-        self.tenant_access_token = token
-        # 设置过期时间（提前5分钟刷新）
+        result = FeishuResponseParser.parse(response)
+        token = result.get("tenant_access_token")
         expires_in = result.get("expire", 7200)
-        self.token_expires_at = datetime.now() + timedelta(seconds=expires_in)
+        if not isinstance(token, str) or not token.strip():
+            raise FeishuAPIError(
+                -1,
+                "获取访问令牌响应缺少有效 tenant_access_token",
+                http_status=response.status_code,
+                kind="invalid_response",
+            )
+        if (
+            isinstance(expires_in, bool)
+            or not isinstance(expires_in, (int, float))
+            or not math.isfinite(expires_in)
+            or expires_in <= 0
+        ):
+            raise FeishuAPIError(
+                -1,
+                "获取访问令牌响应 expire 必须为有限正数",
+                http_status=response.status_code,
+                kind="invalid_response",
+            )
+        try:
+            expires_at = datetime.now() + timedelta(seconds=expires_in)
+        except (OverflowError, ValueError) as exc:
+            raise FeishuAPIError(
+                -1, "访问令牌过期时间超出支持范围", kind="invalid_response"
+            ) from exc
+        token = token.strip()
+        self.tenant_access_token = token
+        self.token_expires_at = expires_at
 
         self.logger.info("成功获取租户访问令牌")
         return token

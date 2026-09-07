@@ -85,6 +85,22 @@ import requests  # type: ignore[import-untyped]
 from .sdk import FeishuResponseParser
 
 
+class RequestAttemptBudget:
+    """One logical OpenAPI call, one total budget (including business retries)."""
+
+    def __init__(self, attempts: int):
+        self.remaining = max(1, attempts)
+
+    def consume(self) -> None:
+        if self.remaining <= 0:
+            from .sdk import FeishuAPIError
+
+            raise FeishuAPIError(
+                -1, "request attempt budget exhausted", kind="transport"
+            )
+        self.remaining -= 1
+
+
 class RateLimiter:
     """接口频率限制器"""
 
@@ -134,7 +150,13 @@ class RetryableAPIClient:
         self._controller = controller
 
     def call_api(
-        self, method: str, url: str, *, retry_transport: bool = True, **kwargs
+        self,
+        method: str,
+        url: str,
+        *,
+        retry_transport: bool = True,
+        attempt_budget: Optional[RequestAttemptBudget] = None,
+        **kwargs,
     ) -> requests.Response:
         """
         调用 API，并在 transport 层处理网络异常与 HTTP 429/5xx 重试。
@@ -156,8 +178,9 @@ class RetryableAPIClient:
         Raises:
             FeishuAPIError: 所有网络尝试均未取得 HTTP response 时
         """
+        budget = attempt_budget or RequestAttemptBudget(self.max_retries + 1)
         if not retry_transport:
-            return self._call_api_once(method, url, **kwargs)
+            return self._call_api_once(method, url, attempt_budget=budget, **kwargs)
 
         if self._controller is not None:
             last_response = None
@@ -166,6 +189,7 @@ class RetryableAPIClient:
             def _make_request():
                 nonlocal last_failure_had_response, last_response
                 last_failure_had_response = False
+                budget.consume()
                 try:
                     response = requests.request(method, url, timeout=60, **kwargs)
                 except requests.exceptions.RequestException:
@@ -175,13 +199,13 @@ class RetryableAPIClient:
                 last_response = response
 
                 # 检查是否需要重试的响应状态
-                if response.status_code == 429:  # 频率限制
+                if response.status_code == 429 and budget.remaining:  # 频率限制
                     last_failure_had_response = True
                     raise requests.exceptions.RequestException(
                         f"Rate limit exceeded: {response.status_code}"
                     )
 
-                if response.status_code >= 500:  # 服务器错误
+                if response.status_code >= 500 and budget.remaining:  # 服务器错误
                     last_failure_had_response = True
                     raise requests.exceptions.RequestException(
                         f"Server error: {response.status_code}"
@@ -206,9 +230,11 @@ class RetryableAPIClient:
                 raise FeishuAPIError.from_transport(str(exc), cause=exc) from exc
 
         # 未注入 controller 时使用 transport 自身的重试和频控机制。
-        return self._call_api_legacy(method, url, **kwargs)
+        return self._call_api_legacy(method, url, attempt_budget=budget, **kwargs)
 
-    def _call_api_once(self, method: str, url: str, **kwargs) -> requests.Response:
+    def _call_api_once(
+        self, method: str, url: str, *, attempt_budget: RequestAttemptBudget, **kwargs
+    ) -> requests.Response:
         """Send once for mutations whose outcome cannot be replayed safely."""
         request_started = False
         try:
@@ -220,14 +246,9 @@ class RetryableAPIClient:
                     raise RuntimeError("频控限制：本次 mutation 未发送")
             else:
                 self.rate_limiter.wait()
+            attempt_budget.consume()
             request_started = True
             return requests.request(method, url, timeout=60, **kwargs)
-        except requests.exceptions.RequestException as exc:
-            from .sdk import FeishuAPIError
-
-            error = FeishuAPIError.from_transport(str(exc), cause=exc)
-            error.response_data = {"request_started": request_started}
-            raise error from exc
         except Exception as exc:
             from .sdk import FeishuAPIError
 
@@ -235,26 +256,28 @@ class RetryableAPIClient:
             error.response_data = {"request_started": request_started}
             raise error from exc
 
-    def _call_api_legacy(self, method: str, url: str, **kwargs) -> requests.Response:
+    def _call_api_legacy(
+        self, method: str, url: str, *, attempt_budget: RequestAttemptBudget, **kwargs
+    ) -> requests.Response:
         """
         传统的API调用方法（向后兼容）
         """
         for attempt in range(self.max_retries + 1):
             try:
                 self.rate_limiter.wait()
-
+                attempt_budget.consume()
                 response = requests.request(method, url, timeout=60, **kwargs)
 
                 # 检查是否需要重试
                 if response.status_code == 429:  # 频率限制
-                    if attempt < self.max_retries:
+                    if attempt < self.max_retries and attempt_budget.remaining:
                         wait_time = self._retry_delay(response, attempt)
                         self.logger.warning(f"频率限制，等待 {wait_time} 秒后重试...")
                         time.sleep(wait_time)
                         continue
 
                 if response.status_code >= 500:  # 服务器错误
-                    if attempt < self.max_retries:
+                    if attempt < self.max_retries and attempt_budget.remaining:
                         wait_time = self._retry_delay(response, attempt)
                         self.logger.warning(
                             f"服务器错误 {response.status_code}，等待 {wait_time} 秒后重试..."
@@ -265,7 +288,7 @@ class RetryableAPIClient:
                 return response
 
             except requests.exceptions.RequestException as e:
-                if attempt < self.max_retries:
+                if attempt < self.max_retries and attempt_budget.remaining:
                     wait_time = 2**attempt
                     self.logger.warning(f"请求异常 {e}，等待 {wait_time} 秒后重试...")
                     time.sleep(wait_time)

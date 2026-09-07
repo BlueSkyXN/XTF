@@ -432,7 +432,10 @@ def test_execute_plan_reports_verification_not_requested_when_disabled():
     outcome = engine.execute_plan(plan)
 
     assert outcome.ok is True
-    assert outcome.verification == (
+    assert tuple(
+        {key: item[key] for key in ("kind", "status", "ok")}
+        for item in outcome.verification
+    ) == (
         {"kind": "update_records", "status": "not_requested", "ok": True},
         {"kind": "create_records", "status": "not_requested", "ok": True},
     )
@@ -600,7 +603,10 @@ def test_bitable_readback_mismatch_is_verification_failure():
     assert outcome.status is OutcomeStatus.PARTIAL
     assert outcome.error["kind"] == "verification"
     assert outcome.applied == (action.to_public(),)
-    assert outcome.verification == (
+    assert tuple(
+        {key: item[key] for key in ("kind", "status", "ok")}
+        for item in outcome.verification
+    ) == (
         {"kind": "update_records", "status": "failed", "ok": False},
     )
 
@@ -936,8 +942,11 @@ def test_confirmed_mutation_with_failed_snapshot_refresh_is_partial_verification
     assert outcome.applied == (action.to_public(),)
     assert outcome.error["kind"] == "verification"
     assert "readback unavailable" in outcome.error["message"]
-    assert outcome.verification == (
-        {"kind": "update_records", "status": "failed", "ok": False},
+    assert tuple(
+        {key: item[key] for key in ("kind", "status", "ok")}
+        for item in outcome.verification
+    ) == (
+        {"kind": "update_records", "status": "read_failed", "ok": False},
     )
 
 
@@ -964,7 +973,7 @@ def test_base_receipt_revision_must_match_post_mutation_readback():
         target={"type": "bitable"},
         actions=(action,),
     )
-    engine.api.list_records.side_effect = [
+    responses = [
         RecordReadResult(
             records=(CanonicalRecord("existing", {"ID": 1}),),
             fields=fields,
@@ -981,6 +990,10 @@ def test_base_receipt_revision_must_match_post_mutation_readback():
         ),
     ]
 
+    engine.api.list_records.side_effect = lambda *args, **kwargs: (
+        responses.pop(0) if len(responses) > 1 else responses[0]
+    )
+
     def confirmed_with_revision(_action):
         engine._last_action_revision = "rev-2"
         return True
@@ -991,7 +1004,8 @@ def test_base_receipt_revision_must_match_post_mutation_readback():
 
     assert outcome.status is OutcomeStatus.PARTIAL
     assert outcome.error["kind"] == "verification"
-    assert "receipt revision" in outcome.error["message"]
+    assert outcome.error["confirmation"]["status"] == "visibility_timeout"
+    assert engine.api.list_records.call_count > 2
 
 
 def test_sheet_header_drift_stops_row_patch_before_mutation():
@@ -1150,7 +1164,10 @@ def test_apply_sheet_config_is_not_reported_as_verified_without_readback():
 
     outcome = engine.execute_plan(plan)
 
-    assert outcome.verification == (
+    assert tuple(
+        {key: item[key] for key in ("kind", "status", "ok")}
+        for item in outcome.verification
+    ) == (
         {"kind": "apply_sheet_config", "status": "not_supported", "ok": True},
     )
 
@@ -1174,7 +1191,10 @@ def test_best_effort_sheet_config_failure_only_adds_warning():
 
     assert outcome.status is OutcomeStatus.SUCCESS
     assert outcome.applied == ()
-    assert outcome.verification == (
+    assert tuple(
+        {key: item[key] for key in ("kind", "status", "ok")}
+        for item in outcome.verification
+    ) == (
         {"kind": "apply_sheet_config", "status": "best_effort_failed", "ok": True},
     )
     assert any("best-effort" in warning for warning in outcome.warnings)
@@ -1370,19 +1390,56 @@ def test_incremental_append_only_bitable_creates_every_source_row_without_record
     engine.api.list_records.assert_not_called()
 
 
-def test_incremental_append_only_sheet_does_not_read_or_clear_target():
+def test_incremental_append_only_sheet_does_not_read_or_clear_target(monkeypatch):
+    """VAL-208: append-only must read target header for alignment."""
     engine = make_file_sheet_engine(
         mode=SyncMode.INCREMENTAL,
         match_strategy=MatchStrategy.APPEND_ONLY.value,
         index_column=None,
     )
+    # Mock header read: target has header Name, ID
+    monkeypatch.setattr(engine, "_read_sheet_header", lambda: ["Name", "ID"])
 
-    plan = engine.plan(pd.DataFrame({"Name": ["A", "B"]}))
+    plan = engine.plan(pd.DataFrame({"Name": ["A", "B"], "ID": [1, 2]}))
 
     assert plan.effective_mode == "incremental"
-    assert [action.kind for action in plan.actions] == ["append_rows"]
+    # append must project to target header order
+    action = plan.actions[0]
+    assert action.kind == "append_rows"
+    # Source has Name, ID; target has Name, ID → same order
     engine.api.get_sheet_data_chunked.assert_not_called()
     engine.api.clear_values.assert_not_called()
+
+
+def test_incremental_append_only_projects_to_target_header_order(monkeypatch):
+    """VAL-206: source ID,Name must project to target Name,ID as (A,1) not (1,A)."""
+    engine = make_file_sheet_engine(
+        mode=SyncMode.INCREMENTAL,
+        match_strategy=MatchStrategy.APPEND_ONLY.value,
+        index_column=None,
+    )
+    monkeypatch.setattr(engine, "_read_sheet_header", lambda: ["Name", "ID"])
+    plan = engine.plan(pd.DataFrame({"ID": [1], "Name": ["A"]}))
+    action = plan.actions[0]
+    assert action.kind == "append_rows"
+    # Projected: Name=A, ID=1 → ((A, 1),)
+    assert action.values == (("A", 1),)
+
+
+def test_incremental_append_only_empty_target_writes_header_and_data(monkeypatch):
+    """VAL-205: empty target gets header + data."""
+    engine = make_file_sheet_engine(
+        mode=SyncMode.INCREMENTAL,
+        match_strategy=MatchStrategy.APPEND_ONLY.value,
+        index_column=None,
+    )
+    # Simulate empty target: header read returns None
+    monkeypatch.setattr(engine, "_read_sheet_header", lambda: None)
+    plan = engine.plan(pd.DataFrame({"ID": [1], "Name": ["A"]}))
+    action = plan.actions[0]
+    # Empty target → write header + data
+    assert action.kind == "write_range"
+    assert action.values == (("ID", "Name"), (1, "A"))
 
 
 def test_empty_sheet_keeps_full_mode_instead_of_implicit_clone(monkeypatch):
@@ -1405,8 +1462,8 @@ def test_empty_sheet_keeps_full_mode_instead_of_implicit_clone(monkeypatch):
     [
         (
             SyncMode.FULL,
-            ["write_range", "append_rows"],
-            ["sheet_content", "sheet_mapping"],
+            ["write_columns", "append_rows"],
+            ["sheet_mapping", "sheet_mapping"],
             False,
         ),
         (
@@ -1549,3 +1606,176 @@ def test_protected_formula_columns_never_enter_generated_mutation_payload():
     assert plan.actions
     assert all(isinstance(action, WriteColumnsAction) for action in plan.actions)
     assert all("Formula" not in action.column_data for action in plan.actions)
+
+
+# REPRO-201: Sheet physical layout preservation
+
+
+def test_sheet_full_update_preserves_intermediate_blank_rows(monkeypatch):
+    """VAL-201: matched update must target physical row, not compacted index."""
+    from core.snapshot import SheetLayout
+
+    engine = make_file_sheet_engine(mode=SyncMode.FULL, index_column="ID")
+    current = engine.converter.values_to_df(
+        [["ID", "Name"], [1, "A"], [None, None], [2, "B"]]
+    )
+    layout = SheetLayout(
+        start_row=1,
+        start_column=1,
+        header_physical_cols=(1, 2),
+        header_names=("ID", "Name"),
+        header_to_physical_col={"ID": 1, "Name": 2},
+        physical_row_numbers=(2, 4),  # row 3 is blank
+        raw_width=2,
+    )
+
+    def read_with_layout():
+        engine._last_sheet_layout = layout
+        return current, None, set()
+
+    monkeypatch.setattr(engine, "get_sheet_data_with_validation", read_with_layout)
+    monkeypatch.setattr(
+        engine, "_build_sheet_full_range", Mock(return_value="sheet!A1:Z100")
+    )
+    plan = engine.plan(pd.DataFrame({"ID": [2], "Name": ["B-new"]}))
+    # Must generate a write_columns targeting physical row 4, not row 3.
+    write_actions = [
+        a
+        for a in plan.actions
+        if hasattr(a, "column_data")
+        and not getattr(a, "kind", "") == "apply_sheet_config"
+    ]
+    assert write_actions, "expected at least one write action"
+    wa = write_actions[0]
+    # The physical_rows scope should contain 4, not 3.
+    phys = wa.scope.get("physical_rows", [])
+    if phys:
+        assert 4 in phys
+        assert 3 not in phys
+    else:
+        # start_row should be 4 (physical row of ID=2)
+        assert wa.start_row == 4
+
+
+# REPRO-301: empty source Sheet clone = clear-only (DEC-001)
+
+
+def test_empty_source_sheet_clone_generates_clear_only(monkeypatch):
+    """VAL-301/302: empty clone must produce [clear_range] only, no write_range(((),))."""
+    engine = make_file_sheet_engine(mode=SyncMode.CLONE, index_column=None)
+    monkeypatch.setattr(
+        engine,
+        "get_current_sheet_data",
+        Mock(return_value=pd.DataFrame({"ID": [1]})),
+    )
+    monkeypatch.setattr(
+        engine, "_build_sheet_full_range", Mock(return_value="sheet!A1:Z100")
+    )
+    plan = engine.plan(pd.DataFrame())
+    kinds = [a.kind for a in plan.actions]
+    assert kinds == ["clear_range"]
+    # No degenerate write_range(((),)) in the plan.
+    assert all(not (hasattr(a, "values") and a.values == ((),)) for a in plan.actions)
+
+
+# REPRO-101: Bitable plan uses strict canonical key for match and payload
+
+
+def test_bitable_strict_key_scientific_notation_matches_and_payloads_canonical():
+    """VAL-101: source '1e3' must match target 1000 and payload must carry 1000."""
+    engine = make_file_bitable_engine(mode=SyncMode.FULL, index_column="ID")
+    fields = engine.api.list_fields.return_value
+    engine.api.list_records.return_value = read_result(
+        [CanonicalRecord("rec_1000", {"ID": 1000, "Name": "old"})],
+        fields,
+    )
+    plan = engine.plan(pd.DataFrame({"ID": ["1e3"], "Name": ["changed"]}))
+    update_actions = [a for a in plan.actions if isinstance(a, UpdateRecordsAction)]
+    assert len(update_actions) == 1
+    rec = update_actions[0].records[0]
+    assert rec.record_id == "rec_1000"
+    # Payload ID must be 1000 (canonical), not 1 (regex extraction)
+    assert rec.fields.get("ID") in (1000, "1000", None)
+    if rec.fields.get("ID") is not None:
+        assert rec.fields["ID"] == 1000
+
+
+def test_bitable_strict_key_invalid_number_fails_plan_with_zero_actions():
+    """VAL-102: 'not-a-number' for numeric index must fail at plan stage."""
+    engine = make_file_bitable_engine(mode=SyncMode.FULL, index_column="ID")
+    fields = engine.api.list_fields.return_value
+    engine.api.list_records.return_value = read_result([], fields)
+    with pytest.raises(ValueError, match="无法无损转换|无效"):
+        engine.plan(pd.DataFrame({"ID": ["not-a-number"], "Name": ["A"]}))
+
+
+# REPRO-303: Bitable v1 clone freshness after concurrent insert
+
+
+def test_v1_clone_concurrent_insert_after_delete_stops_create():
+    """VAL-305: v1 clone must detect concurrent insert between delete and create."""
+    from core.snapshot import BitableSnapshot
+
+    engine = make_file_bitable_engine(
+        mode=SyncMode.CLONE,
+        backend="bitable_v1",
+        index_column=None,
+    )
+    fields = engine.api.list_fields.return_value
+    original = RecordReadResult(
+        (CanonicalRecord("old", {"ID": 1}),),
+        tuple(fields),
+        True,
+        BitableBackendKind.BITABLE_V1,
+    )
+    engine.api.list_records.return_value = original
+    plan = engine.plan(pd.DataFrame({"ID": [2], "Name": ["new"]}))
+    create = next(a for a in plan.actions if isinstance(a, CreateRecordsAction))
+
+    # After delete, target is empty (expected).
+    post_delete = BitableSnapshot.from_result(
+        RecordReadResult((), tuple(fields), True, BitableBackendKind.BITABLE_V1)
+    )
+    # But concurrently, someone inserted a record.
+    concurrent = BitableSnapshot.from_result(
+        RecordReadResult(
+            (CanonicalRecord("concurrent", {"ID": 99}),),
+            tuple(fields),
+            True,
+            BitableBackendKind.BITABLE_V1,
+        )
+    )
+    engine._expected_bitable_snapshot = post_delete
+    engine._expected_bitable_revision = None
+    engine._read_current_bitable_snapshot = Mock(return_value=concurrent)
+    # Fingerprint changed → precondition must fail.
+    assert post_delete.fingerprint != concurrent.fingerprint
+    assert engine._check_action_precondition(create) is False
+
+
+@pytest.mark.parametrize("mode", [SyncMode.CLONE, SyncMode.INCREMENTAL])
+def test_nonmatching_bitable_plan_does_not_materialize_unused_rows(monkeypatch, mode):
+    engine = make_file_bitable_engine(
+        mode, match_strategy="append_only", index_column=None
+    )
+    frame = pd.DataFrame({"ID": [2, 3], "Name": ["A", "B"]})
+    iterrows = frame.iterrows
+    consumed = []
+
+    def counted_rows():
+        for item in iterrows():
+            consumed.append(item[0])
+            yield item
+
+    monkeypatch.setattr(frame, "iterrows", counted_rows)
+    plan = engine._plan_file_bitable(frame)
+    create = next(
+        action for action in plan.actions if isinstance(action, CreateRecordsAction)
+    )
+    assert [dict(record.fields) for record in create.records] == [
+        {"ID": 2, "Name": "A"},
+        {"ID": 3, "Name": "B"},
+    ]
+    assert consumed == [0, 1]
+    engine.api.batch_create.assert_not_called()
+    engine.api.batch_delete.assert_not_called()

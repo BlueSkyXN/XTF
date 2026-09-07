@@ -1,0 +1,41 @@
+name: Feishu Isolated Write UAT
+on:
+  workflow_dispatch:
+    inputs:
+      suite:
+        type: choice
+        options: [base_v3, bitable_v1, sheet]
+        default: base_v3
+        required: true
+permissions:
+  contents: read
+concurrency:
+  group: xtf-feishu-isolated-uat
+  cancel-in-progress: false
+jobs:
+  uat:
+    runs-on: ubuntu-22.04
+    environment: feishu-api-ci
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install -r requirements.txt
+      - name: Exercise source CLI on explicit fixtures
+        env:
+          SUITE: ${{ inputs.suite }}
+          XTF_UAT_APP_ID: ${{ secrets.XTF_UAT_APP_ID }}
+          XTF_UAT_APP_SECRET: ${{ secrets.XTF_UAT_APP_SECRET }}
+          XTF_UAT_BASE: ${{ secrets.XTF_UAT_BASE }}
+          XTF_UAT_SPREADSHEET: ${{ secrets.XTF_UAT_SPREADSHEET }}
+          XTF_UAT_SHEET_ID: ${{ secrets.XTF_UAT_SHEET_ID }}
+        run: python -m tools.feishu_uat --suite "$SUITE" --manifest reports/resource.json --report reports/uat.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: isolated-uat-${{ github.run_id }}
+          path: reports/
+          if-no-files-found: error
+          retention-days: 14

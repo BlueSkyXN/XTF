@@ -415,6 +415,11 @@ def _sync(
             "verification": "XTF_E_VERIFICATION_MISMATCH",
             "internal": "XTF_E_INTERNAL",
         }
+        if isinstance(error_data, Mapping) and isinstance(
+            error_data.get("confirmation"), Mapping
+        ):
+            if error_data["confirmation"].get("status") == "visibility_timeout":
+                error_codes["verification"] = "XTF_E_CONFIRMATION_TIMEOUT"
         raise CLIError(
             (
                 "XTF_E_INDETERMINATE"
@@ -439,7 +444,51 @@ def _sync(
             "config_path": str(resolved.path) if resolved.path else None,
             "outcome": outcome_data,
         },
-        f"Synchronization completed. Config: {config_label}.",
+        _sync_result_message(outcome_data, config_label),
+    )
+
+
+def _sync_result_message(outcome: Mapping[str, Any], config_label: str) -> str:
+    summary = outcome.get("summary") or {}
+    if outcome.get("status") == "noop":
+        return f"无需写入：没有待同步变更。配置：{config_label}。"
+    accepted = summary.get("accepted_by_unit", {})
+    confirmed = summary.get("confirmed_by_unit", {})
+    names = {
+        "record": "次记录操作",
+        "row": "行",
+        "column": "列",
+        "field": "字段",
+        "range": "范围",
+    }
+    counts = (
+        "，".join(
+            f"{count} {names.get(unit, unit)}" for unit, count in accepted.items()
+        )
+        or "全部计划操作"
+    )
+    if summary.get("confirmation_complete"):
+        return f"同步完成并已读回确认：{counts}。配置：{config_label}。"
+    verified = (
+        "，".join(
+            f"{count} {names.get(unit, unit)}"
+            for unit, count in confirmed.items()
+            if count
+        )
+        or "0"
+    )
+    not_requested = any(
+        item.get("status") == "not_requested"
+        for item in outcome.get("verification", [])
+    )
+    guidance = (
+        "需要数据结果确认时使用 --verify-remote-writes。"
+        if not_requested
+        else "附加配置等未确认项目见 verification / warnings；已确认的数据不会因此重写。"
+    )
+    return (
+        f"服务端已接受：{counts}；已读回确认：{verified}。"
+        "未确认项不等于写入失败；" + guidance + f"配置：{config_label}。"
     )
 
 
@@ -686,7 +735,7 @@ def _normalize_exception(exc: Exception, *, phase: str = "general") -> CLIError:
         if isinstance(exc, PartialBatchError):
             return CLIError("XTF_E_MUTATION_PARTIAL", str(exc), EXIT_PARTIAL)
         if isinstance(exc, FeishuAPIError):
-            auth_codes = {99991661, 99991663, 99991664, 99991668}
+            auth_codes = {10003, 99991661, 99991663, 99991664, 99991668}
             if exc.code in auth_codes or exc.http_status in {401, 403}:
                 return CLIError("XTF_E_AUTH", str(exc), EXIT_AUTH)
             if exc.http_status == 404:

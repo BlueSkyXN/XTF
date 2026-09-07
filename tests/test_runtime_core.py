@@ -210,3 +210,62 @@ def test_bootstrap_injects_logger_and_controller_without_process_global_state(
     for handler in tuple(root.handlers):
         root.removeHandler(handler)
         handler.close()
+
+
+# REPRO-501: config null, start_column, auth error
+
+
+def test_null_app_secret_becomes_empty_string_not_none_string():
+    """VAL-501/603: YAML null must not become str(None) = 'None'."""
+    # When app_secret is None, _optional_string returns None → "",
+    # then validation fails with "app secret is required".
+    with pytest.raises(ValueError, match="app secret is required"):
+        make_runtime_config(
+            TargetType.SHEET,
+            file_path="test.xlsx",
+            app_id="test_id",
+            app_secret=None,
+            spreadsheet_token="tok",
+            sheet_id="sheet",
+        )
+
+
+def test_start_column_rejects_non_letter_values():
+    """VAL-504/604: A1, A-, 1 must all be rejected."""
+    for bad in ("A1", "A-", "1", "1A"):
+        with pytest.raises(ValueError, match="start_column"):
+            runtime = make_runtime_config(
+                TargetType.SHEET,
+                file_path="test.xlsx",
+                app_id="test_id",
+                app_secret="test_secret",
+                spreadsheet_token="tok",
+                sheet_id="sheet",
+                start_column=bad,
+            )
+            runtime.validate()
+
+
+def test_column_letter_to_number_rejects_invalid():
+    """VAL-504: converter.column_letter_to_number must reject non-A-Z."""
+    from core.converter import DataConverter
+
+    converter = DataConverter(TargetType.SHEET)
+    for bad in ("A1", "A-", "1", ""):
+        with pytest.raises(ValueError, match="invalid column letter"):
+            converter.column_letter_to_number(bad)
+    # Valid cases
+    assert converter.column_letter_to_number("A") == 1
+    assert converter.column_letter_to_number("Z") == 26
+    assert converter.column_letter_to_number("AA") == 27
+
+
+def test_auth_error_10003_classified_as_auth():
+    """VAL-502: auth business code 10003 must map to XTF_E_AUTH, not RUNTIME."""
+    from api import FeishuAPIError
+    from xtf_cli.runtime import _normalize_exception, EXIT_AUTH
+
+    exc = FeishuAPIError(10003, "invalid param")
+    cli_err = _normalize_exception(exc)
+    assert cli_err.code == "XTF_E_AUTH"
+    assert cli_err.exit_code == EXIT_AUTH

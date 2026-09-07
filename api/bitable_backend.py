@@ -6,7 +6,8 @@ so Base v3 and Bitable v1 do not share request or response shapes accidentally.
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Mapping, Protocol, Sequence
+from typing import Any, Callable, Mapping, Protocol, Sequence
+import json
 
 
 class BitableBackendKind(str, Enum):
@@ -155,6 +156,12 @@ class BitableBackend(Protocol):
     max_batch_update_size: int
     max_batch_delete_size: int
     max_batch_get_size: int
+
+    def validate_records(
+        self,
+        records: Sequence[CanonicalRecord],
+        fields: Sequence[FieldSchema],
+    ) -> None: ...
 
     def list_fields(self, app_token: str, table_id: str) -> tuple[FieldSchema, ...]: ...
 
@@ -317,3 +324,21 @@ __all__ = [
     "field_is_writable",
     "field_kind_from_type",
 ]
+
+
+def validate_record_values(
+    records: Sequence[CanonicalRecord],
+    fields: Sequence[FieldSchema],
+    encode: Callable[[FieldSchema | None, Any], Any],
+) -> None:
+    """Use the actual wire codec before *any* batch is sent; allocate one row at a time."""
+    by_name = {item.name: item for item in fields}
+    for position, record in enumerate(records, 1):
+        for name, value in record.fields.items():
+            try:
+                encoded = encode(by_name.get(name), value)
+                json.dumps(encoded, allow_nan=False)
+            except (TypeError, ValueError, OverflowError) as error:
+                raise ValueError(
+                    f"待写第 {position} 条记录，字段 {name!r} 无法编码: {error}"
+                ) from error

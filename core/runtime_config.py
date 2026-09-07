@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+import math
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Union
 from zoneinfo import ZoneInfo
@@ -39,6 +41,8 @@ class RuntimeSyncConfig:
     index: RuntimeIndexConfig
     selective: RuntimeSelectiveConfig
     verify_remote_writes: bool
+    verify_timeout_seconds: float = 10.0
+    verify_interval_seconds: float = 0.5
 
 
 @dataclass(frozen=True)
@@ -77,8 +81,6 @@ class RuntimeSheetTarget:
     protect_formulas: bool = False
     verify_formulas: bool = False
     formula_max_locations: int = 20
-    report_column_diff: bool = False
-    diff_tolerance: float = 0.001
 
 
 RuntimeTargetConfig = Union[RuntimeBitableTarget, RuntimeSheetTarget]
@@ -180,14 +182,14 @@ class RuntimeConfig:
             "sheet_protect_formulas": False,
             "sheet_verify_formulas": False,
             "sheet_formula_max_locations": 20,
-            "sheet_report_column_diff": False,
-            "sheet_diff_tolerance": 0.001,
             "sync_mode": SyncMode.FULL.value,
             "match_strategy": MatchStrategy.BY_KEY.value,
             "index_column": None,
             "datetime_index_granularity": "exact",
             "datetime_index_timezone": None,
             "verify_remote_writes": False,
+            "verify_timeout_seconds": 10.0,
+            "verify_interval_seconds": 0.5,
             "batch_size": 500 if target is TargetType.BITABLE else 1000,
             "rate_limit_delay": 0.01 if target is TargetType.BITABLE else 0.1,
             "max_retries": 3,
@@ -301,7 +303,9 @@ class RuntimeConfig:
                 ),
                 sheet_id=_optional_string(values.get("sheet_id")) or "",
                 start_row=int(values.get("start_row", 1)),
-                start_column=str(values.get("start_column", "A")).strip().upper(),
+                start_column=(
+                    _optional_string(values.get("start_column", "A")) or ""
+                ).upper(),
                 value_render_option=value_render,
                 datetime_render_option=datetime_render,
                 scan_max_rows=int(values.get("sheet_scan_max_rows", 5000)),
@@ -317,14 +321,12 @@ class RuntimeConfig:
                 formula_max_locations=int(
                     values.get("sheet_formula_max_locations", 20)
                 ),
-                report_column_diff=bool(values.get("sheet_report_column_diff", False)),
-                diff_tolerance=float(values.get("sheet_diff_tolerance", 0.001)),
             )
 
         return cls(
             auth=RuntimeAuthConfig(
-                app_id=str(values.get("app_id", "")).strip(),
-                app_secret=str(values.get("app_secret", "")),
+                app_id=_optional_string(values.get("app_id")) or "",
+                app_secret=_optional_string(values.get("app_secret")) or "",
             ),
             source=source,
             target=target,
@@ -349,6 +351,8 @@ class RuntimeConfig:
                     ),
                 ),
                 verify_remote_writes=bool(values.get("verify_remote_writes", False)),
+                verify_timeout_seconds=values.get("verify_timeout_seconds", 10.0),
+                verify_interval_seconds=values.get("verify_interval_seconds", 0.5),
             ),
             conversion=RuntimeConversionConfig(
                 strategy=field_strategy,
@@ -420,6 +424,11 @@ class RuntimeConfig:
                 raise ValueError("start_row 必须为正整数")
             if not self.target.start_column:
                 raise ValueError("start_column 必须为非空列名")
+            if not re.fullmatch(r"[A-Z]+", self.target.start_column):
+                raise ValueError(
+                    f"start_column 必须为纯 A-Z 字母序列，当前值: "
+                    f"'{self.target.start_column}'"
+                )
             if (
                 min(
                     self.target.scan_max_rows,
@@ -432,10 +441,19 @@ class RuntimeConfig:
                 raise ValueError("Sheet 读取/写入分块上限必须为正整数")
             if self.target.formula_max_locations <= 0:
                 raise ValueError("sheet_formula_max_locations 必须为正整数")
-            if self.target.diff_tolerance < 0:
-                raise ValueError("sheet_diff_tolerance 不能为负数")
 
     def _validate_sync(self) -> None:
+        for name, value, low, high in (
+            ("verify_timeout_seconds", self.sync.verify_timeout_seconds, 0, 300),
+            ("verify_interval_seconds", self.sync.verify_interval_seconds, 0.05, 60),
+        ):
+            if (
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or not math.isfinite(value)
+                or not low <= value <= high
+            ):
+                raise ValueError(f"{name} 必须在 {low} 到 {high} 秒之间")
         index = self.sync.index
         selective = self.sync.selective
         if index.datetime_granularity not in {"exact", "day"}:
@@ -513,6 +531,16 @@ class RuntimeConfig:
                 raise ValueError("sheet_protect_formulas 必须配置有效的 index_column")
 
     def _validate_controls(self) -> None:
+        for name, value in (
+            ("rate_limit_delay", self.control.rate_limit_delay),
+            ("retry_initial_delay", self.control.retry.initial_delay),
+            ("retry_max_wait_time", self.control.retry.max_wait_time),
+            ("retry_multiplier", self.control.retry.multiplier),
+            ("retry_increment", self.control.retry.increment),
+            ("rate_limit_window_size", self.control.rate_limit.window_size),
+        ):
+            if value is not None and not math.isfinite(value):
+                raise ValueError(f"{name} 必须为有限数字")
         if self.control.batch_size <= 0:
             raise ValueError("batch_size 必须为正整数")
         if self.control.max_retries < 0:

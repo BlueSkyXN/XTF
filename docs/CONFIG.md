@@ -70,6 +70,8 @@ sync:
     datetime_granularity: exact
     timezone: null
   verify_remote_writes: false
+  verify_timeout_seconds: 10.0
+  verify_interval_seconds: 0.5
   selective:
     enabled: false
     columns: []
@@ -197,8 +199,6 @@ target:
     protect_formulas: false
     verify_formulas: false
     formula_max_locations: 20
-    report_column_diff: false
-    diff_tolerance: 0.001
 ```
 
 所有有效 leaf 都有显式 CLI override；多数使用 kebab-case，同步对象歧义较大的字段使用更明确的名称，例如 `source.file.path` → `--file`、`target.bitable.app_token` → `--target-app-token`。布尔配置提供成对 flags，例如 `--sheet-protect-formulas` / `--no-sheet-protect-formulas`。
@@ -214,6 +214,8 @@ sync:
     datetime_granularity: exact
     timezone: null
   verify_remote_writes: false
+  verify_timeout_seconds: 10.0
+  verify_interval_seconds: 0.5
   selective:
     enabled: true
     columns: [salary, department]
@@ -223,6 +225,7 @@ sync:
 --mode full --match-strategy by_key --index-column ID
 --datetime-index-granularity exact
 --verify-remote-writes --selective --column salary --column department
+--verify-timeout-seconds 10 --verify-interval-seconds 0.5
 ```
 
 - `exact`：日期时间统一到 UTC 后使用完整 epoch milliseconds；naive Python/pandas/string 值按同一 UTC 语义解释，同日不同时间不会误匹配。
@@ -230,6 +233,13 @@ sync:
 - `day`：必须同时设置 `sync.index.timezone` / `--datetime-index-timezone`
   为有效 IANA 时区，并按该业务时区的 `YYYY-MM-DD` 匹配；同日多条记录会触发重复索引保护。
 - `verify_remote_writes: false` 只表示 mutation receipt 被接受，不代表已经写后读回。
+- `verify_timeout_seconds` 为有限数字，范围 0–300 秒，默认 10；0 只读取一次。
+- `verify_interval_seconds` 为有限数字，范围 0.05–60 秒，默认 0.5；两个参数都拒绝布尔值。
+- 等待采用逐步退避并尊重 Retry-After；只重试读取，永久错误和不完整响应直接停止。
+  预算按一轮确认计算；它限制下一次读取何时启动，不会强制中断已经发送的 HTTP 请求，
+  因此不等于整个同步任务的最大耗时。连续 action 也可能分别需要确认。
+- 即使未启用普通读回，新字段创建后的 schema 可见性，以及后续 action 依赖的目标状态，
+  仍需确认后才能继续；这是执行顺序要求，不代表整个任务都完成了读回。
 - 命令行出现任何 `--column` 时，会替换 YAML columns 并自动启用 selective sync。
 - 若显式关闭 `auto_include_index`，配置的 `index.column` 必须由 `columns` 明确包含，否则在规划前失败。
 
@@ -287,10 +297,40 @@ mode/strategy/index 组合会在零 mutation 阶段直接失败。
 | `4` | 认证或权限错误 |
 | `5` | 远端资源、读取、计划不完整或 stale snapshot |
 | `6` | 已知 mutation failure / known partial |
-| `7` | verification failure / 写后读回不一致 |
+| `7` | 写后读回不一致、读取等待超时或公式检查失败 |
 | `8` | 已发送 mutation 的远端结果未知（`indeterminate`） |
 | `130` | 用户中断 |
 
 human 最终摘要写 stdout，progress/warning/error 写 stderr。`--json` 对成功和失败都只在 stdout 输出一个 JSON document，进程退出码仍按上表返回。结果状态的 wire value 固定为 `success`、`noop`、`failed`、`partial` 或 `indeterminate`；精确状态和稳定错误码以 JSON 为准。
 
 dry-run 的 `plan` 是 `schema_version: 1` 的公开 `PlanDocument`。每个 action 只公开 `kind`、`count`、`unit`、`scope`、`destructive` 和 `clears_values`；mutation payload、凭据、snapshot precondition 和 verification policy 只存在于进程内 `ExecutionPlan`，公开 plan 不能直接重放。
+
+## 2026-09-05 输入处理补充
+
+YAML 中同一映射的重复键会直接报错，不再采用最后一个值。`auth.app_id: null` 不会转成
+字符串 `None`；`auth.app_secret: null` 仍按未提供处理，可由 `XTF_APP_SECRET` 补充。
+`target.sheet.start_column` 必须是合法字母列号，null、`A1`、`A-`、`1` 均拒绝。
+重试延迟、倍率、等待时间、速率等必须为有限数值，NaN/Infinity 不可用。
+
+默认文件读取保留原始表头、文本前导零和 `NA`/`NULL` 字面量；空白或重复源表头直接报错，
+避免 pandas 将重名列悄悄改名后参与同步。这一变化可能使旧版本曾接受的含糊文件失败，
+应修正源文件列名，而不是依赖自动改名。
+
+## 2026-09-05 写入值与时间语义补充
+
+真实规划路径对所有待写值先转换、再按后端编码检查，不再把无法转换的非空数字、日期或布尔值
+静默变成空值。错误会尽量指出源记录位置与字段；这可能拒绝此前被错误接受的数据。
+空源 clone 仍是 clear-only；普通空单元格沿用跳过语义，不新增单元格强制清空功能。
+
+数字接受完整数值、科学计数法和合法千位分隔；不从混合文本中提取数字。
+为保持原行为，百分数字符串 `12%` 仍转换为数值 **12**，不是 0.12；比例业务请在源文件中明确单位。
+无法按目标数值类型无损表达的值提前报错；长业务编号应使用文本字段。
+
+普通非索引日期字段：带 offset 的完整日期时间保留同一瞬间；无时区完整日期时间按 UTC 解释，
+不跟随执行机器时区；缺少年份或含糊日期拒绝。需要北京时间时使用例如
+`2026-03-24T10:00:00+08:00`。索引的 `exact/day` 设置只决定匹配分组，
+不能用于判定写入的时间值是否相等；读回比较始终保留时间精度。
+
+这些是 XTF 文件同步的显式策略。直接调用 Base v3 底层 API 的无时区字符串仍可能按 Base 时区解释，
+不要把底层服务规则和本地文件策略混为一谈。Sheet 普通字符串不会因 `=` 前缀被自动执行为公式；
+本工具不是 Excel 公式、样式及对象的完整迁移器。

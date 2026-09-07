@@ -1,21 +1,25 @@
 # XTF 2.0 — Excel To Feishu CLI
 
-XTF 是一个 flags-first 的数据同步 CLI，将本地 Excel/CSV 或另一张多维表格的数据同步到飞书 Bitable 或 Sheet。它提供可审计的只读计划、结构化结果、稳定退出码、显式删除授权以及严格的 YAML v2 配置。
+XTF 是一个 flags-first 的数据同步 CLI，将本地 Excel/CSV 或另一张多维表格的数据同步到飞书 Bitable 或 Sheet。它提供只读计划、结构化执行结果、稳定退出码和 YAML v2 配置。
 
-> 🧪 CSV 格式为实验性支持（测试阶段）。Excel (.xlsx/.xls) 为生产就绪的主要格式。
+> 2026-09-05 本地 AI 接手版，版本仍为 `2.0.0-rc1`。本次以 cleaned 候选版为基线，独立比较 original / completed / cleaned / execution 四份文件树，修正两处局部问题；本地非集成测试 **766 passed**。真实飞书、远端 CI 和四平台构建未运行，Ruff/Black/MyPy/PyInstaller 缺失。先读 [本地 AI 应用说明](local/HANDOFF.md)，再看 [新老对照](local/COMPARISON.md) 和 [实际运行结果](local/VALIDATION.txt)。原 `.local/` 为历史材料，其中的旧状态与旧补丁不应自动重新应用。
+>
+> Excel 为主要输入格式，CSV 仍为实验性支持。本次实际文件测试覆盖 OpenPyXL 读取 `.xlsx` 和 CSV；Calamine / `.xls` 尚未在本次环境实测。
 
 ## 核心特性
 
 - **正式 CLI** — `sync`、`config`、`doctor` 和 `--version` 使用同一个 parser 与退出码契约
 - **双平台支持** — 多维表格 (Bitable) 与电子表格 (Sheet)，源码入口 `XTF.py`、发布二进制 `XTF`
-- **四种同步模式** — 全量 / 增量 / 覆盖 / 克隆，覆盖全场景数据同步需求
+- **四种同步模式** — 全量 / 增量 / 覆盖 / 克隆，使用显式的匹配与删除策略
 - **远端差异同步** — 从另一张多维表格读取数据，只新增缺失记录或更新真实差异，不删除目标多余记录
 - **精确 Dry-run** — 允许只读 Feishu API 调用并输出真实 action 计划，但不会执行任何 mutation
 - **机器可读输出** — `--json` 输出稳定的 plan/outcome/error 结构，适合 shell、Cron 和 CI
 - **智能字段类型** — Raw / Base / Auto / Intelligence 四种策略，从保守到智能逐级增强
 - **选择性列同步** — 精确列级控制，只更新指定列，其他列完全不受影响
 - **公式保护** — `full` 模式双读检测云端公式，无法确认公式状态时停止写入
-- **Typed 安全门禁** — 统一分块、mutation receipt、snapshot freshness 和可选写后读回
+- **分块与执行结果** — 全计划先做本地编码检查；可选有界读回等待，区分服务端接受、读回确认、部分完成和结果未知
+- **公式范围续扫** — 扫描截断后按范围二分继续，单格仍截断或达到有限次数上限则明确停止
+- **产物测试** — 提供临时资源真实读写套件和测试后原样发布工作流；本次仅完成离线运行，未连接真实飞书
 - **高级频控** — 3 种重试策略 × 3 种频控策略，9 种组合灵活配置
 - **Excel 引擎回退** — 优先使用可用的 Calamine 引擎，必要时回退 OpenPyXL
 
@@ -30,6 +34,16 @@ XTF 是一个 flags-first 的数据同步 CLI，将本地 Excel/CSV 或另一张
 ```bash
 pip install -r requirements.txt
 ```
+
+### 本地开发检查
+
+```bash
+python -m pip install -r requirements.txt -r requirements-dev.txt
+python tools/check_project.py
+# 只执行语法、CLI 与测试：python tools/check_project.py --runtime-only
+```
+
+完整检查不改写源码，会明确报告缺失工具。`--format` 会格式化整个项目，不作为本次接手的默认操作；需要格式调整时只处理明确的文件。
 
 ### 查看 CLI
 
@@ -144,7 +158,7 @@ SDK。`core.*`、`api.*`、`SyncService` 和 typed client constructor 都是仓�
 | `raw` | 文本 | 数据完整性要求极高 |
 | `base` | 文本 / 数字 / 日期 | ⭐ 日常使用（默认） |
 | `auto` | + 单选 / 多选（Excel 验证） | 标准化 Excel 模板 |
-| `intelligence` | 全部 8 种类型 | 高质量数据、进阶用户 |
+| `intelligence` | 文本 / 数字 / 日期 / 单选 / 多选 / 复选框 | 高质量数据、进阶用户 |
 
 ```bash
 python3 XTF.py sync --field-type-strategy base          # 默认推荐
@@ -157,8 +171,8 @@ python3 XTF.py sync --field-type-strategy intelligence  # 全面智能
 
 | 格式 | 扩展名 | 状态 | 读取引擎 |
 |------|--------|------|----------|
-| Excel 2007+ | `.xlsx` | ✅ 生产就绪 | Calamine（可用时）→ 回退 OpenPyXL |
-| Excel 97-2003 | `.xls` | ✅ 生产就绪 | Calamine → 回退 OpenPyXL |
+| Excel 2007+ | `.xlsx` | 本次实测 OpenPyXL 路径 | Calamine（可用时）→ 回退 OpenPyXL |
+| Excel 97-2003 | `.xls` | 支持 Calamine 路径，本次未实测 | Calamine；OpenPyXL 不读取旧 `.xls` |
 | CSV | `.csv` | 🧪 实验性 | pandas（UTF-8/GBK 自动检测） |
 
 ## 项目结构

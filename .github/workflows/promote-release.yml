@@ -1,0 +1,167 @@
+name: Test Candidate and Publish
+on:
+  workflow_dispatch:
+    inputs:
+      build_run_id:
+        description: Successful Multi-Platform Build run ID (not a PR build)
+        type: string
+        required: true
+      tag:
+        description: Existing vVERSION tag pointing at that exact build commit
+        type: string
+        required: true
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: xtf-feishu-isolated-uat
+  cancel-in-progress: false
+jobs:
+  candidate:
+    runs-on: ubuntu-22.04
+    outputs:
+      sha: ${{ steps.run.outputs.sha }}
+      version: ${{ steps.run.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Resolve exact source, version and pre-existing tag
+        id: run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_RUN: ${{ inputs.build_run_id }}
+          TAG: ${{ inputs.tag }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        shell: bash
+        run: |
+          test "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH"
+          [[ "$BUILD_RUN" =~ ^[1-9][0-9]*$ ]] || exit 1
+          [[ "$TAG" =~ ^v[A-Za-z0-9][A-Za-z0-9._+-]*$ ]] || exit 1
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN" > run.json
+          python - <<'PY'
+          import json, os, re, subprocess
+          run = json.load(open('run.json'))
+          assert run['status'] == 'completed' and run['conclusion'] == 'success'
+          assert run['event'] in {'push', 'workflow_dispatch'}
+          assert run['path'] == '.github/workflows/multi-platform-build.yml'
+          assert run['head_repository']['full_name'] == os.environ['GITHUB_REPOSITORY']
+          sha = run['head_sha']
+          assert re.fullmatch('[0-9a-f]{40}', sha)
+          tag = os.environ['TAG']
+          actual = subprocess.check_output(['git', 'rev-parse', f'refs/tags/{tag}^{{commit}}'], text=True).strip()
+          assert actual == sha, 'tag differs from tested build source'
+          version_file = subprocess.check_output(['git', 'show', f'{sha}:xtf_cli/version.py'], text=True)
+          version = re.search(r'^VERSION = "([^"]+)"', version_file, re.M)[1]
+          assert tag == 'v' + version, 'tag differs from executable version'
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'sha={sha}\nversion={version}\n')
+          PY
+  binary-uat:
+    needs: candidate
+    runs-on: ${{ matrix.os }}
+    environment: feishu-api-ci
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - {os: ubuntu-22.04, platform: linux-x64, arch: x64}
+          - {os: ubuntu-22.04-arm, platform: linux-arm64, arch: arm64}
+          - {os: windows-2022, platform: windows-x64, arch: x64}
+          - {os: macos-15, platform: macos-arm64, arch: arm64}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.candidate.outputs.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          architecture: ${{ matrix.arch }}
+      - run: python -m pip install -r requirements.txt -c constraints-build.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: ALL-XTF-${{ matrix.platform }}-${{ needs.candidate.outputs.version }}
+          run-id: ${{ inputs.build_run_id }}
+          github-token: ${{ github.token }}
+          path: packages
+      - name: Inspect and extract the actual release package
+        id: binary
+        env:
+          SOURCE_SHA: ${{ needs.candidate.outputs.sha }}
+          BUILD_RUN: ${{ inputs.build_run_id }}
+          VERSION: ${{ needs.candidate.outputs.version }}
+          PLATFORM: ${{ matrix.platform }}
+        shell: bash
+        run: |
+          python -m tools.release_artifacts --source-sha "$SOURCE_SHA" --run-id "$BUILD_RUN" --version "$VERSION" --platform "$PLATFORM" --packages packages --destination candidate --report "reports/package-$PLATFORM.json"
+      - name: Run all three live suites through this binary
+        env:
+          XTF_TESTED_SOURCE_SHA: ${{ needs.candidate.outputs.sha }}
+          EXECUTABLE: ${{ steps.binary.outputs.executable }}
+          PLATFORM: ${{ matrix.platform }}
+          XTF_UAT_APP_ID: ${{ secrets.XTF_UAT_APP_ID }}
+          XTF_UAT_APP_SECRET: ${{ secrets.XTF_UAT_APP_SECRET }}
+          XTF_UAT_BASE: ${{ secrets.XTF_UAT_BASE }}
+          XTF_UAT_SPREADSHEET: ${{ secrets.XTF_UAT_SPREADSHEET }}
+          XTF_UAT_SHEET_ID: ${{ secrets.XTF_UAT_SHEET_ID }}
+        shell: bash
+        run: |
+          for suite in base_v3 bitable_v1 sheet; do
+            python -m tools.feishu_uat --suite "$suite" --executable "$EXECUTABLE" --manifest "reports/resource-$PLATFORM-$suite.json" --report "reports/uat-$PLATFORM-$suite.json"
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: candidate-uat-${{ matrix.platform }}
+          path: reports/
+          if-no-files-found: error
+          retention-days: 14
+  publish:
+    needs: [candidate, binary-uat]
+    runs-on: ubuntu-22.04
+    environment: xtf-release
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.candidate.outputs.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: '*-XTF-*-${{ needs.candidate.outputs.version }}'
+          run-id: ${{ inputs.build_run_id }}
+          github-token: ${{ github.token }}
+          path: packages
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: candidate-uat-*
+          path: reports
+      - name: Recheck all binary reports and publish these exact bytes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+          SOURCE_SHA: ${{ needs.candidate.outputs.sha }}
+          BUILD_RUN: ${{ inputs.build_run_id }}
+          VERSION: ${{ needs.candidate.outputs.version }}
+        shell: bash
+        run: |
+          python -m tools.release_artifacts --source-sha "$SOURCE_SHA" --run-id "$BUILD_RUN" --version "$VERSION" --packages packages --reports reports --report RELEASE_TESTED.json
+          git fetch --force origin "refs/tags/$TAG:refs/tags/$TAG"
+          test "$(git rev-parse "refs/tags/$TAG^{commit}")" = "$SOURCE_SHA"
+          printf 'Built once from %s (run %s); the four packaged binaries passed the isolated API suites.\n' "$SOURCE_SHA" "$BUILD_RUN" > release-notes.txt
+          # Create a draft first. A failure leaves a draft, not a published partial release.
+          release_flags=()
+          if [[ "$VERSION" == *-* || "$VERSION" == *rc* || "$VERSION" == *.dev* ]]; then
+            release_flags+=(--prerelease --latest=false)
+          fi
+          gh release create "$TAG" --verify-tag --draft --notes-file release-notes.txt "${release_flags[@]}"
+          gh release upload "$TAG" packages/ALL-XTF-*-${VERSION}.zip packages/FULL-XTF-${VERSION}.zip RELEASE_TESTED.json
+          gh release edit "$TAG" --draft=false

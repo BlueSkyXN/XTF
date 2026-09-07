@@ -556,3 +556,85 @@ def test_verify_formulas_requires_at_least_one_sheet_id_before_network():
         api.verify_formulas("token", [], ["A2:B4"])
 
     client.call_api.assert_not_called()
+
+
+def test_nested_write_split_keeps_order_and_stops_before_remaining_chunks():
+    api, client = make_api(
+        FeishuAPIError(90227, "too large"),
+        FeishuAPIError(90227, "too large"),
+        response(),
+        response(),
+        FeishuAPIError(90202, "invalid range"),
+    )
+    api.write_max_rows = 4
+    receipt = api.write_values("token", "sh1!A1:A6", [[n] for n in range(1, 7)])
+    calls = [
+        call.kwargs["json"]["valueRange"] for call in client.call_api.call_args_list
+    ]
+    assert [call["range"] for call in calls] == [
+        "sh1!A1:A4",
+        "sh1!A1:A2",
+        "sh1!A1:A1",
+        "sh1!A2:A2",
+        "sh1!A3:A4",
+    ]
+    assert [call["values"] for call in calls] == [
+        [[1], [2], [3], [4]],
+        [[1], [2]],
+        [[1]],
+        [[2]],
+        [[3], [4]],
+    ]
+    assert receipt.outcome is MutationOutcome.PARTIAL
+    assert receipt.accepted_count == 2
+    assert receipt.failed_batch_index == 5
+    assert [part.text for part in receipt.actual_ranges] == ["sh1!A1:A1", "sh1!A2:A2"]
+
+
+def test_nested_append_split_runs_before_original_next_chunk():
+    def appended(text):
+        return response({"code": 0, "data": {"updates": {"updatedRange": text}}})
+
+    api, client = make_api(
+        FeishuAPIError(90227, "too large"),
+        FeishuAPIError(90227, "too large"),
+        appended("sh1!A10:A10"),
+        appended("sh1!A11:A11"),
+        appended("sh1!A12:A13"),
+        appended("sh1!A14:A15"),
+    )
+    api.write_max_rows = 4
+    receipt = api.append_values("token", "sh1!A1:A6", [[n] for n in range(1, 7)])
+    calls = [
+        call.kwargs["json"]["valueRange"] for call in client.call_api.call_args_list
+    ]
+    assert [call["range"] for call in calls] == [
+        "sh1!A1:A4",
+        "sh1!A1:A2",
+        "sh1!A1:A1",
+        "sh1!A11:A11",
+        "sh1!A12:A13",
+        "sh1!A14:A15",
+    ]
+    assert [call["values"] for call in calls] == [
+        [[1], [2], [3], [4]],
+        [[1], [2]],
+        [[1]],
+        [[2]],
+        [[3], [4]],
+        [[5], [6]],
+    ]
+    assert receipt.outcome is MutationOutcome.ACCEPTED
+    assert receipt.accepted_count == 6
+    assert [part.text for part in receipt.actual_ranges] == [
+        "sh1!A10:A10",
+        "sh1!A11:A11",
+        "sh1!A12:A13",
+        "sh1!A14:A15",
+    ]
+    assert [item["row_offset"] for item in receipt.raw_metadata["source_slices"]] == [
+        0,
+        1,
+        2,
+        4,
+    ]

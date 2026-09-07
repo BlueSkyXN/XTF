@@ -89,10 +89,12 @@ class SheetPlanCompiler:
         *,
         header_width: int,
         scope: Mapping[str, Any],
+        start_row: int | None = None,
     ) -> AppendRowsAction:
         return AppendRowsAction(
             values=tuple(tuple(row) for row in values),
             header_width=header_width,
+            start_row=start_row,
             scope=dict(scope),
         )
 

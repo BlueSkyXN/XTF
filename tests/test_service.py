@@ -407,6 +407,7 @@ def test_typed_bitable_delete_readback_requires_explicit_absence():
         ignored_fields=(),
         record_not_found=("rec1",),
         records=(),
+        fields=(),
     )
     receipt = MutationReceipt(
         operation="batch_delete",
@@ -649,7 +650,12 @@ def test_sheet_clear_readback_requires_observed_empty_cells():
     engine.api.get_sheet_data = Mock(return_value=[["still-present"]])
 
     assert engine._typed_sheet_clear("A1:B2") is False
-    engine.api.get_sheet_data.assert_called_once_with("sheet-token", "sh1!A1:B2")
+    assert engine.api.get_sheet_data.call_count > 1
+    assert all(
+        call.args == ("sheet-token", "sh1!A1:B2")
+        and call.kwargs == {"value_render_option": "Formula"}
+        for call in engine.api.get_sheet_data.call_args_list
+    )
 
 
 def test_sheet_clear_readback_accepts_trimmed_empty_matrix():
@@ -697,11 +703,11 @@ def test_formula_read_failure_restores_config_and_api_render_options():
     engine.api.get_sheet_data_chunked = Mock(side_effect=RuntimeError("formula failed"))
     engine.get_current_sheet_data = Mock(return_value=pd.DataFrame({"ID": [1]}))
 
-    result_df, formula_df, formula_columns = engine.get_sheet_data_with_validation()
+    with pytest.raises(RuntimeError, match="formula failed"):
+        engine.get_sheet_data_with_validation()
 
-    assert result_df.equals(pd.DataFrame({"ID": [1]}))
-    assert formula_df is None
-    assert formula_columns is None
+    engine.get_current_sheet_data.assert_not_called()
+    assert engine._sheet_read_complete is False
     assert engine._sheet_target().value_render_option == "ToString"
     assert engine._sheet_target().datetime_render_option == "FormattedString"
     assert engine.api.value_render_option == "ToString"
@@ -716,12 +722,50 @@ def test_result_read_failure_restores_config_and_api_render_options():
     )
     engine.get_current_sheet_data = Mock(return_value=pd.DataFrame({"ID": [1]}))
 
-    result_df, formula_df, formula_columns = engine.get_sheet_data_with_validation()
+    with pytest.raises(RuntimeError, match="result failed"):
+        engine.get_sheet_data_with_validation()
 
-    assert result_df.equals(pd.DataFrame({"ID": [1]}))
-    assert formula_df is None
-    assert formula_columns is None
+    engine.get_current_sheet_data.assert_not_called()
+    assert engine._sheet_read_complete is False
     assert engine._sheet_target().value_render_option is None
     assert engine._sheet_target().datetime_render_option is None
     assert engine.api.value_render_option is None
     assert engine.api.datetime_render_option is None
+
+
+# REPRO-401: applied-prefix must not mix row and column units
+
+
+def test_applied_prefix_does_not_mix_row_and_column_units():
+    """VAL-401: WriteColumnsAction partial receipt must not report row count as columns."""
+    from api import A1Range
+    from core.plan import WriteColumnsAction
+    from core.service import SyncService
+
+    engine = SyncService.__new__(SyncService)
+    engine._reset_action_execution_state()
+    action = WriteColumnsAction(
+        column_data={"A": tuple(range(100)), "B": tuple(range(100))},
+        column_positions={"A": 1, "B": 2},
+        start_row=2,
+        max_gap=0,
+        header_width=2,
+        scope={"target": "sheet"},
+    )
+    # Only 1 of 2 ranges was accepted (column A succeeded, B failed).
+    receipt = MutationReceipt(
+        operation="batch_update",
+        backend="sheet",
+        requested_count=2,
+        accepted_count=1,
+        unit="range",
+        actual_ranges=(A1Range.parse("sheet!A2:A101"),),
+    )
+    engine._record_action_receipt(receipt)
+    prefix = engine._applied_action_prefix(action)
+    assert prefix is not None
+    # Must NOT report 2 columns applied (which would be the physical row count).
+    assert prefix.count == 1  # 1 accepted unit, not 100 rows
+    assert prefix.scope["partial"] is True
+    assert prefix.scope["accepted_units"] == 1
+    assert prefix.scope["requested_count"] == 2

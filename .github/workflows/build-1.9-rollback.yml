@@ -128,14 +128,11 @@ jobs:
           # and Windows' default cp1252/cp936 codec cannot encode those
           # characters, crashing the binary with UnicodeEncodeError. The 1.9
           # tree is pinned to an exact SHA and cannot accept the
-          # _ensure_utf8_stdio() fix that the 2.0 CLI uses, so we try two
-          # environment-variable mitigations: PYTHONIOENCODING=utf-8 (classic)
-          # and PYTHONUTF8=1 (PEP 540 UTF-8 mode, more thorough). Empirically
-          # PyInstaller 6.19's Windows bootloader does not forward either to
-          # the frozen interpreter's stdio layer, so Windows smoke is treated
-          # as best-effort below. Linux and macOS default to UTF-8 and are
-          # unaffected. ROLLBACK.md documents the same environment variables
-          # for restore operators.
+          # _ensure_utf8_stdio() fix that the 2.0 CLI uses. We set the
+          # environment variables below for non-Windows platforms, but on
+          # Windows PyInstaller 6.19's bootloader does not forward them to
+          # the frozen interpreter, so Windows smoke is best-effort.
+          # Linux and macOS default to UTF-8 and are unaffected.
           export PYTHONIOENCODING=utf-8
           export PYTHONUTF8=1
           platform="${{ matrix.platform }}"
@@ -167,7 +164,7 @@ jobs:
           echo "--- end smoke log ---"
           tolerate_unicode=0
           if [[ "$platform" == "windows-x64" ]] && grep -q 'UnicodeEncodeError' "$smoke_log"; then
-            echo "::warning::Windows 1.9 binary hit the known cp1252 UnicodeEncodeError despite PYTHONIOENCODING=utf-8 and PYTHONUTF8=1. PyInstaller's Windows bootloader does not forward these to the frozen interpreter. Windows rollback is best-effort; ROLLBACK.md documents the mitigation for restore operators."
+            echo "::warning::Windows 1.9 binary hit the known cp1252 UnicodeEncodeError. PyInstaller 6.19 bootloader does not forward PYTHONIOENCODING/PYTHONUTF8 to the frozen interpreter. No env-var mitigation is effective; Windows rollback is best-effort. Use Python source directly if Windows rollback is required."
             tolerate_unicode=1
           fi
           if [ "$tolerate_unicode" != "1" ]; then
@@ -227,14 +224,13 @@ jobs:
 
           **Windows only**: the 1.9 executables print Chinese welcome text at
           startup, which crashes under the default `cp1252`/`cp936` console
-          codec with `UnicodeEncodeError`. Set `PYTHONIOENCODING=utf-8` before
-          invoking any of the three `.exe` files, for example
-          `set PYTHONIOENCODING=utf-8` in `cmd.exe` or
-          `$env:PYTHONIOENCODING="utf-8"` in PowerShell. Linux and macOS
-          default to UTF-8 and do not need this step. The 1.9 source tree is
-          pinned to an exact SHA and cannot accept the `_ensure_utf8_stdio()`
-          fix that the 2.0 CLI uses, so the environment variable is the only
-          available mitigation without patching frozen 1.9 source.
+          codec with `UnicodeEncodeError`. PyInstaller 6.19's Windows bootloader
+          does not forward `PYTHONIOENCODING` or `PYTHONUTF8` to the frozen
+          interpreter, so no environment-variable mitigation is effective.
+          Windows 1.9 rollback is **best-effort only**; if Windows rollback is
+          required, use the XTF 1.9 Python source directly with
+          `python XTF.py` instead of the frozen binary. Linux and macOS
+          default to UTF-8 and do not need this step.
 
           Rolling back the executable does not reverse remote mutations already applied by XTF 2.0.
           EOF

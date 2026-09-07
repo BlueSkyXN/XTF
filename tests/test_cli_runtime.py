@@ -129,7 +129,7 @@ def test_formal_sync_executes_plan(monkeypatch, capsys):
     assert main(BASE_FLAGS) == 0
     captured = capsys.readouterr()
     assert calls == {"plan": 1, "execute": 1}
-    assert "Synchronization completed" in captured.out
+    assert "服务端已接受" in captured.out
 
 
 def destructive_file_flags(path, mode):

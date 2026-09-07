@@ -261,3 +261,15 @@ def temp_config_file(tmp_path, sample_config_dict) -> Path:
     with open(file_path, "w", encoding="utf-8") as f:
         yaml.dump(sample_config_dict, f, allow_unicode=True)
     return file_path
+
+
+@pytest.fixture(autouse=True)
+def readback_clock(monkeypatch):
+    import core.verification as verification
+
+    now = [0.0]
+    monkeypatch.setattr(verification, "monotonic", lambda: now[0])
+    monkeypatch.setattr(
+        verification, "sleep", lambda seconds: now.__setitem__(0, now[0] + seconds)
+    )
+    return now

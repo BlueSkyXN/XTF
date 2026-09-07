@@ -2,7 +2,7 @@
 
 `.github/` contains workflows for quality gates, coverage, PyInstaller builds, bundles, and releases.
 Read this card before changing workflow commands, Python or OS matrices, artifact names, release assets, package contents, retention, or secrets usage.
-Key files: `workflows/test.yml`, `workflows/multi-platform-build.yml`, and the manual-only `workflows/build-1.9-rollback.yml`.
+Key files: `workflows/test.yml`, `workflows/multi-platform-build.yml`, and the manual-only `workflows/build-1.9-rollback.yml`. Current live tests and publication use `workflows/api-live-write.yml` and `workflows/promote-release.yml`; read `docs/CI_API.md`.
 
 ## Why this is high-risk
 
@@ -33,3 +33,9 @@ Key files: `workflows/test.yml`, `workflows/multi-platform-build.yml`, and the m
 
 - Local validation can run the commands invoked by `test.yml`: Ruff, Black check, MyPy, `py_compile`, and pytest.
 - Complete matrix, artifact packaging, release bundle, and release upload behavior require GitHub Actions.
+
+## Current delivery flow (2026-09-05)
+
+PR runs Tests; push/manual build calls the same-event Tests instead of a second push test run. Do not restore release-published builds. Promotion downloads a specified successful build run, executes all three live suites through each of its four packaged binaries, and uploads the same ZIP bytes after those results pass. `tools/release_artifacts.py` checks this correspondence. `tools/smoke_binary.py` is the offline real-XLSX binary smoke, not live API validation.
+
+Use the shared `xtf-feishu-isolated-uat` concurrency group for these explicit fixtures. Live test and cleanup instructions are in `docs/EXECUTION_AND_UAT.md`. Missing setup or a failed cleanup is not a skipped pass. No live or release action was executed when preparing this source handoff.

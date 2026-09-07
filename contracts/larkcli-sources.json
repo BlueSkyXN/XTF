@@ -1,0 +1,17 @@
+{
+  "repository": "larksuite/cli",
+  "commit": "7fd6ef3c07182257ce776cdc5a614e122d5bd4b3",
+  "commit_date": "2026-09-04T10:34:52Z",
+  "reviewed_at": "2026-09-05",
+  "evidence_kind": "official_cli_source_not_live_server_recording",
+  "files": [
+    "skills/lark-base/SKILL.md",
+    "skills/lark-base/references/lark-base-field-create.md",
+    "shortcuts/base/record_ops.go",
+    "shortcuts/base/record_batch_update.go",
+    "shortcuts/base/helpers.go",
+    "shortcuts/sheets/sheet_ai_api.go",
+    "shortcuts/sheets/lark_sheet_formula_verify.go",
+    "skills/lark-sheets/references/lark-sheets-formula-verify.md"
+  ]
+}

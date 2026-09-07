@@ -11,6 +11,8 @@ from typing import Any, Mapping, Sequence, Union
 
 import pandas as pd
 
+from .key_policy import KeyPolicy
+
 from api.bitable_backend import (
     BitableBackendKind,
     CanonicalRecord,
@@ -64,12 +66,21 @@ class SourceTable:
 
     @classmethod
     def from_dataframe(cls, frame: pd.DataFrame) -> "SourceTable":
-        columns = tuple(str(column) for column in frame.columns)
+        columns = tuple(str(column).strip() for column in frame.columns)
+        if any(KeyPolicy.is_empty(column) for column in frame.columns) or any(
+            not column for column in columns
+        ):
+            raise ValueError("源数据列名不能为空")
+        if len(set(columns)) != len(columns):
+            raise ValueError("源数据列名重复，无法确定写入字段")
+        if len(frame) and not columns:
+            raise ValueError("源数据有行但没有列，不能生成写计划")
         rows = tuple(tuple(row) for row in frame.itertuples(index=False, name=None))
         return cls(columns, rows)
 
     def to_dataframe(self) -> pd.DataFrame:
-        return pd.DataFrame(self.rows, columns=self.columns)
+        # Keep mixed numeric rows from coercing large integer keys to float.
+        return pd.DataFrame(self.rows, columns=self.columns, dtype=object)
 
 
 @dataclass(frozen=True)
@@ -123,6 +134,29 @@ class BitableSnapshot:
 
 
 @dataclass(frozen=True)
+class SheetLayout:
+    """Physical row/column mapping preserved from raw Sheet read.
+
+    When ``values_to_df`` strips intermediate blank rows or empty-header
+    columns the returned DataFrame loses the connection to physical Sheet
+    coordinates.  This lightweight record keeps that mapping so that
+    mutation planning can target the correct physical cells.
+    """
+
+    start_row: int
+    start_column: int
+    header_physical_cols: tuple[int, ...]
+    header_names: tuple[str, ...]
+    header_to_physical_col: Mapping[str, int]
+    physical_row_numbers: tuple[int, ...]
+    raw_width: int
+
+    def physical_row_for_logical(self, logical_index: int) -> int:
+        """Return the physical Sheet row for a DataFrame row index."""
+        return self.physical_row_numbers[logical_index]
+
+
+@dataclass(frozen=True)
 class SheetSnapshot:
     actual_ranges: tuple[str, ...]
     grid: tuple[int, int] | None
@@ -132,6 +166,8 @@ class SheetSnapshot:
     complete: bool
     inspected_at: datetime
     content_fingerprint: str
+    layout: SheetLayout | None = None
+    raw_values: tuple[tuple[Any, ...], ...] | None = field(default=None, repr=False)
 
     @classmethod
     def from_dataframe(
@@ -143,20 +179,39 @@ class SheetSnapshot:
         index_mapping: Mapping[str, int],
         formula_columns: Sequence[str] = (),
         complete: bool,
+        layout: SheetLayout | None = None,
+        raw_values: Sequence[Sequence[Any]] | None = None,
+        formula_values: Sequence[Sequence[Any]] | None = None,
     ) -> "SheetSnapshot":
+        physical_mapping = {
+            key: layout.physical_row_for_logical(position) if layout else position
+            for key, position in index_mapping.items()
+        }
+        material = {
+            "columns": [str(column) for column in frame.columns],
+            "rows": frame.where(pd.notna(frame), None).values.tolist(),
+        }
+        if raw_values is not None:
+            material["raw_values"] = [list(row) for row in raw_values]
+        if formula_values is not None:
+            material["formula_values"] = [list(row) for row in formula_values]
+        if layout is not None:
+            material["physical_rows"] = list(layout.physical_row_numbers)
+            material["physical_columns"] = list(layout.header_physical_cols)
         return cls(
             actual_ranges=tuple(actual_ranges),
             grid=grid,
             header=tuple(str(column) for column in frame.columns),
-            index_mapping=tuple(sorted(index_mapping.items())),
+            index_mapping=tuple(sorted(physical_mapping.items())),
             formula_columns=tuple(sorted(str(item) for item in formula_columns)),
             complete=complete,
             inspected_at=datetime.now(timezone.utc),
-            content_fingerprint=content_fingerprint(
-                {
-                    "columns": [str(column) for column in frame.columns],
-                    "rows": frame.where(pd.notna(frame), None).values.tolist(),
-                }
+            content_fingerprint=content_fingerprint(material),
+            layout=layout,
+            raw_values=(
+                tuple(tuple(row) for row in raw_values)
+                if raw_values is not None
+                else None
             ),
         )
 
@@ -166,6 +221,7 @@ TargetSnapshot = Union[BitableSnapshot, SheetSnapshot]
 
 __all__ = [
     "BitableSnapshot",
+    "SheetLayout",
     "SheetSnapshot",
     "SourceTable",
     "TargetSnapshot",

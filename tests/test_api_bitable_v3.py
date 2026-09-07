@@ -36,6 +36,7 @@ def matrix(
     types=("text",),
     has_more=False,
     timezone="Asia/Shanghai",
+    start_id=0,
 ):
     return {
         "code": 0,
@@ -44,7 +45,7 @@ def matrix(
             "fields": list(fields),
             "field_id_list": list(field_ids),
             "field_type_list": list(types),
-            "record_id_list": [f"rec_{i}" for i in range(len(rows))],
+            "record_id_list": [f"rec_{i + start_id}" for i in range(len(rows))],
             "data": rows,
             "has_more": has_more,
         },
@@ -70,7 +71,7 @@ def test_v3_matrix_reads_records_and_offsets_by_actual_rows():
     api, transport = make_backend(
         [
             response(matrix([["A"]], has_more=True)),
-            response(matrix([["B"]], has_more=False)),
+            response(matrix([["B"]], has_more=False, start_id=1)),
         ]
     )
     result = api.list_records("base", "table")
@@ -171,6 +172,7 @@ def test_v3_matrix_allows_field_order_change_when_schema_identity_is_stable():
             response(
                 matrix(
                     [[2, "B"]],
+                    start_id=1,
                     fields=("Count", "Name"),
                     field_ids=("fld_count", "fld_name"),
                     types=("number", "text"),
@@ -401,3 +403,52 @@ def test_v3_unknown_code_and_transport_failure_never_fallback():
     assert receipt.outcome is MutationOutcome.UNKNOWN_OUTCOME
     transport.call_api.assert_called_once()
     assert transport.call_api.call_args.kwargs["retry_transport"] is False
+
+
+# REPRO-502: Base v3 business retry parity with v1
+
+
+def test_base_v3_retries_retryable_business_code(monkeypatch):
+    """VAL-505: HTTP 200 + 1254290 must be retried."""
+    sleep_calls = []
+    monkeypatch.setattr("api.bitable_v3.time.sleep", lambda s: sleep_calls.append(s))
+    responses = [
+        response({"code": 1254290, "msg": "rate limited", "data": {}}),
+        response({"code": 0, "data": {"items": [], "total": 0}}),
+    ]
+    backend, transport = make_backend(responses)
+    transport.max_retries = 3
+    result = backend._call("GET", "https://example.test")
+    assert result == {"items": [], "total": 0}
+    assert transport.call_api.call_count == 2
+    assert len(sleep_calls) == 1
+
+
+def test_base_v3_retry_exhaustion_raises(monkeypatch):
+    """VAL-505: exhausted retries raise with original code."""
+    monkeypatch.setattr("api.bitable_v3.time.sleep", lambda s: None)
+    responses = [
+        response({"code": 1254290, "msg": "rate limited", "data": {}}),
+        response({"code": 1254290, "msg": "rate limited", "data": {}}),
+    ]
+    backend, transport = make_backend(responses)
+    transport.max_retries = 1
+    with pytest.raises(FeishuAPIError) as exc_info:
+        backend._call("GET", "https://example.test")
+    assert exc_info.value.code == 1254290
+
+
+def test_base_v3_non_retryable_code_raises_immediately(monkeypatch):
+    """VAL-506: non-retryable business code raises without retry."""
+    sleep_calls = []
+    monkeypatch.setattr("api.bitable_v3.time.sleep", lambda s: sleep_calls.append(s))
+    responses = [
+        response({"code": 1254003, "msg": "bad request", "data": {}}),
+    ]
+    backend, transport = make_backend(responses)
+    transport.max_retries = 3
+    with pytest.raises(FeishuAPIError) as exc_info:
+        backend._call("GET", "https://example.test")
+    assert exc_info.value.code == 1254003
+    assert transport.call_api.call_count == 1
+    assert not sleep_calls

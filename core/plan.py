@@ -8,7 +8,7 @@ from typing import Any, ClassVar, Mapping, Protocol, Sequence, TypeAlias
 
 import pandas as pd
 
-from api.bitable_backend import CanonicalRecord
+from api.bitable_backend import CanonicalRecord, FieldSchema
 
 
 class ActionUnit(str, Enum):
@@ -199,6 +199,7 @@ class WriteRangeAction(_ActionBase):
 class AppendRowsAction(_ActionBase):
     values: tuple[tuple[Any, ...], ...] = field(repr=False, compare=False)
     header_width: int
+    start_row: int | None = None
 
     kind: ClassVar[str] = "append_rows"
     unit: ClassVar[ActionUnit] = ActionUnit.ROW
@@ -296,6 +297,10 @@ class ExecutionPlan:
     clears_values: bool = False
     config_sources: Mapping[str, str] = field(default_factory=dict)
 
+    bitable_fields: tuple[FieldSchema, ...] = field(
+        default=(), repr=False, compare=False
+    )
+
     def to_public(self) -> PlanDocument:
         return PlanDocument(
             requested_mode=self.requested_mode,
@@ -325,6 +330,31 @@ class SyncResult:
     def ok(self) -> bool:
         return self.status in {OutcomeStatus.SUCCESS, OutcomeStatus.NOOP}
 
+    def summary(self) -> dict[str, Any]:
+        accepted: dict[str, int] = {}
+        confirmed: dict[str, int] = {}
+        for action in self.applied:
+            unit = action.unit.value
+            accepted[unit] = accepted.get(unit, 0) + action.count
+        for item in self.verification:
+            unit_name = item.get("unit")
+            if unit_name:
+                confirmed[str(unit_name)] = confirmed.get(str(unit_name), 0) + int(
+                    item.get("confirmed_count", 0)
+                )
+        return {
+            "accepted_by_unit": accepted,
+            "confirmed_by_unit": confirmed,
+            "counts_are_operations": True,
+            "confirmation_complete": self.ok
+            and bool(self.verification)
+            and all(
+                item.get("ok") is True
+                and item.get("status") in {"verified", "schema_confirmed"}
+                for item in self.verification
+            ),
+        }
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "status": self.status.value,
@@ -332,6 +362,7 @@ class SyncResult:
             "plan": self.plan.to_dict(),
             "applied": [action.to_dict() for action in self.applied],
             "verification": [dict(item) for item in self.verification],
+            "summary": self.summary(),
             "warnings": list(self.warnings),
             "error": dict(self.error) if self.error is not None else None,
         }

@@ -2,11 +2,7 @@ name: Multi-Platform Build
 
 on:
   push:
-    branches: [ main, dev, codex/xtf-cli-v2 ]
-  pull_request:
-    branches: [ main, dev, codex/xtf-cli-v2 ]
-  release:
-    types: [ published ]
+    branches: [ main, master, dev, codex/xtf-cli-v2 ]
   workflow_dispatch:
     inputs:
       build_1_9_rollback:
@@ -19,7 +15,12 @@ env:
   PYTHON_VERSION: '3.11'
 
 jobs:
+  source-tests:
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.build_1_9_rollback }}
+    uses: ./.github/workflows/test.yml
+
   build-xtf:
+    needs: [source-tests]
     name: Build XTF
     if: ${{ github.event_name != 'workflow_dispatch' || !inputs.build_1_9_rollback }}
     runs-on: ${{ matrix.os }}
@@ -84,16 +85,20 @@ jobs:
         # back to OpenPyXL, losing the 4-20x read speedup. pandas<3 keeps pip
         # off pandas 3.x, which requires numpy>=2 and would reintroduce the
         # openblas failure above.
-        constraints="$RUNNER_TEMP/pyinstaller-constraints.txt"
-        printf 'pandas>=2.2,<3\nnumpy<2\n' > "$constraints"
-        python -m pip install -c "$constraints" -r requirements.txt
+        python -m pip install -c constraints-build.txt -r requirements.txt -r requirements-dev.txt
+        python -m pip check
+        python -m pip freeze > build-dependencies.txt
       shell: bash
-    
+
+    - name: Test with the packaging dependency set
+      run: python -m pytest tests/ -q -m "not integration"
+
     - name: Build XTF
       run: |
         pyinstaller --onefile \
           --collect-all=charset_normalizer \
           --collect-all=python_calamine \
+          --collect-all=tzdata \
           --hidden-import=core.config \
           --hidden-import=core.bootstrap \
           --hidden-import=core.compiler \
@@ -122,77 +127,15 @@ jobs:
           --distpath dist/${{ matrix.platform }}
       shell: bash
 
-    - name: Smoke XTF CLI
-      run: |
-        platform="${{ matrix.platform }}"
-        if [[ "${{ matrix.platform }}" == "windows-x64" ]]; then
-          executable="dist/${platform}/XTF.exe"
-        else
-          executable="dist/${platform}/XTF"
-        fi
-        "$executable" --version
-        "$executable" sync --help
-        smoke_dir=$(mktemp -d)
-        "$executable" config init --target-type bitable --output "$smoke_dir/config.yaml"
-        test -f "$smoke_dir/config.yaml"
-        # Runtime smoke: force the packaged binary through the pandas-import path.
-        # --version / sync --help / config init never import pandas, so a broken
-        # numpy/openblas bundle would otherwise pass CI silently and only crash
-        # on real user sync. We generate a minimal xlsx with the runner Python
-        # (whose pandas is installed above), point the freshly-initialised v2
-        # config at it, then invoke `sync --dry-run --json`. Fake credentials
-        # guarantee a controlled auth failure downstream, which still proves the
-        # binary loaded pandas/numpy and reached the structured-output layer.
-        SMOKE_DIR="$smoke_dir" python - <<'PY'
-        import os
-        import pathlib
-
-        import pandas as pd
-        import yaml
-
-        smoke = pathlib.Path(os.environ["SMOKE_DIR"])
-        pd.DataFrame({"ID": ["1"], "Name": ["a"]}).to_excel(
-            smoke / "data.xlsx", index=False
-        )
-        cfg_path = smoke / "config.yaml"
-        cfg = yaml.safe_load(cfg_path.read_text())
-        cfg["source"]["file"]["path"] = str(smoke / "data.xlsx")
-        cfg_path.write_text(yaml.safe_dump(cfg))
-        PY
-        set +e
-        "$executable" sync --config "$smoke_dir/config.yaml" --dry-run --json \
-          > "$smoke_dir/out.json" 2>&1
-        rc=$?
-        set -e
-        echo "--- runtime smoke output (rc=$rc) ---"
-        cat "$smoke_dir/out.json"
-        echo
-        echo "--- end runtime smoke output ---"
-        # Classify failures so a red smoke names the exact regression instead of
-        # a generic "PyInstaller crashed" message. Each branch corresponds to a
-        # distinct historical failure mode we have already hit or defended against.
-        if grep -Eiq 'libscipy_openblas|ELF load command' "$smoke_dir/out.json"; then
-          echo "::error::numpy/openblas PyInstaller regression (Linux page-alignment). Check pandas>=2.2,<3 / numpy<2 constraints in the install step."
-          exit 1
-        fi
-        if grep -Eiq 'UnicodeEncodeError|charmap.*codec' "$smoke_dir/out.json"; then
-          echo "::error::Windows stdio encoding regression. Check _ensure_utf8_stdio() is called at the top of xtf_cli.runtime.main()."
-          exit 1
-        fi
-        if grep -Eiq 'Unknown engine: calamine' "$smoke_dir/out.json"; then
-          echo "::error::python_calamine missing from the frozen bundle. Check --collect-all=python_calamine in the Build XTF step."
-          exit 1
-        fi
-        if grep -Eiq 'Failed to execute script' "$smoke_dir/out.json"; then
-          echo "::error::PyInstaller bootloader crash (unclassified). Inspect the runtime smoke output above."
-          exit 1
-        fi
-        grep -q '"command"' "$smoke_dir/out.json" || {
-          echo "::error::Runtime smoke did not produce structured JSON output"
-          exit 1
-        }
+    - name: Smoke the packaged CLI with real XLSX files offline
       shell: bash
-    
+      run: |
+        executable="dist/${{ matrix.platform }}/XTF"
+        if [[ "${{ matrix.platform }}" == "windows-x64" ]]; then
+          executable="${executable}.exe"
+        fi
+        python -m tools.smoke_binary --executable "$executable" --expected-version "$VERSION"
+
     - name: Prepare XTF artifacts
       run: |
         platform="${{ matrix.platform }}"
@@ -214,9 +157,12 @@ jobs:
         cp config.example.yaml README.md QUICKSTART.md "$package_dir/"
         export PACKAGE_DIR="$package_dir"
         export BINARY_NAME="$binary_name"
+        export TARGET_PLATFORM="$platform"
         python - <<'PY'
         import hashlib
+        import json
         import os
+        import platform
         from pathlib import Path
 
         package = Path(os.environ["PACKAGE_DIR"])
@@ -226,6 +172,17 @@ jobs:
             "README.md",
             "QUICKSTART.md",
         ]
+        (package / "BUILD_INFO.json").write_text(json.dumps({
+            "source_sha": os.environ.get("GITHUB_SHA"),
+            "run_id": os.environ.get("GITHUB_RUN_ID"),
+            "version": os.environ["VERSION"],
+            "target_platform": os.environ["TARGET_PLATFORM"],
+            "binary_sha256": hashlib.sha256((package / os.environ["BINARY_NAME"]).read_bytes()).hexdigest(),
+            "python": platform.python_version(),
+            "platform": platform.platform(),
+            "dependencies": Path("build-dependencies.txt").read_text(),
+        }, indent=2), encoding="utf-8")
+        names.append("BUILD_INFO.json")
         lines = []
         for name in names:
             digest = hashlib.sha256((package / name).read_bytes()).hexdigest()
@@ -353,6 +310,9 @@ jobs:
         # Create full release directory
         mkdir -p "FULL-XTF-${version}"
         
+        for platform in linux-x64 linux-arm64 windows-x64 macos-arm64; do
+          test -f "ALL-XTF-${platform}-${version}.zip" || exit 1
+        done
         # Extract and organize all platform bundles with error handling
         for zip_file in ALL-XTF-*-"${version}".zip; do
           if [[ -f "$zip_file" ]]; then
@@ -377,62 +337,6 @@ jobs:
         path: FULL-XTF-${{ env.VERSION }}.zip
         compression-level: 0
         retention-days: 30
-
-  publish-release:
-    runs-on: ubuntu-latest
-    needs: [create-platform-bundles, create-release-bundle]
-    if: github.event_name == 'release'
-    permissions:
-      contents: write
-    
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-    
-    - name: Set XTF version
-      id: version
-      run: |
-        VERSION=$(sed -n 's/^VERSION = "\([^"]*\)"/\1/p' xtf_cli/version.py)
-        if [ -z "$VERSION" ]; then
-          echo "Unable to read VERSION from xtf_cli/version.py"
-          exit 1
-        fi
-        echo "XTF version: $VERSION"
-        echo "VERSION=$VERSION" >> "$GITHUB_ENV"
-        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-      shell: bash
-    
-    - name: Download all artifacts
-      uses: actions/download-artifact@v4
-      with:
-        pattern: "*-XTF-*-${{ env.VERSION }}"
-        merge-multiple: true
-    
-    - name: Prepare release assets
-      run: |
-        version="${{ env.VERSION }}"
-        
-        # Verify platform bundles exist for release
-        for platform in linux-x64 linux-arm64 windows-x64 macos-arm64; do
-          if [[ -f "ALL-XTF-${platform}-${version}.zip" ]]; then
-            echo "Found platform bundle: ALL-XTF-${platform}-${version}.zip"
-          else
-            echo "Warning: Missing platform bundle for ${platform}"
-          fi
-        done
-      shell: bash
-    
-    - name: Upload release assets
-      uses: softprops/action-gh-release@v2
-      with:
-        files: |
-          ALL-XTF-linux-x64-${{ env.VERSION }}.zip
-          ALL-XTF-linux-arm64-${{ env.VERSION }}.zip
-          ALL-XTF-windows-x64-${{ env.VERSION }}.zip
-          ALL-XTF-macos-arm64-${{ env.VERSION }}.zip
-          FULL-XTF-${{ env.VERSION }}.zip
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   build-1-9-rollback:
     name: Build XTF 1.9 Rollback Package

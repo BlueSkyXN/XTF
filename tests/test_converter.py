@@ -100,10 +100,12 @@
 import hashlib
 import os
 import time
+from decimal import Decimal
 
 import pytest
 import pandas as pd
 
+from api.bitable_backend import FieldKind, FieldSchema
 from core.config import TargetType
 from core.converter import DataConverter
 
@@ -870,3 +872,197 @@ class TestDfToRecords:
             converter.df_to_records(
                 pd.DataFrame({"Protected": ["value"]}), {"Protected": schema}
             )
+
+
+# REPRO-101: strict canonical key pipeline
+
+
+def _number_schema(name="ID"):
+    return FieldSchema("fld_id", name, FieldKind.NUMBER, writable=True, raw_type=2)
+
+
+class TestStrictKeyValue:
+    """VAL-101/102: strict key conversion must align with key_policy canonical."""
+
+    def setup_method(self):
+        self.converter = DataConverter(TargetType.BITABLE)
+
+    def test_scientific_notation_is_lossless(self):
+        """1e3 must produce 1000, not 1."""
+        result = self.converter.convert_strict_key_value(
+            "1e3", "ID", {"ID": _number_schema()}
+        )
+        assert result == 1000
+
+    def test_integer_string_is_lossless(self):
+        result = self.converter.convert_strict_key_value(
+            "1000", "ID", {"ID": _number_schema()}
+        )
+        assert result == 1000
+
+    def test_decimal_string_is_lossless(self):
+        result = self.converter.convert_strict_key_value(
+            "1.5", "ID", {"ID": _number_schema()}
+        )
+        assert result == 1.5
+
+    def test_not_a_number_raises(self):
+        """VAL-102: non-numeric string for number key must fail."""
+        with pytest.raises(ValueError, match="无法无损转换"):
+            self.converter.convert_strict_key_value(
+                "not-a-number", "ID", {"ID": _number_schema()}
+            )
+
+    def test_embedded_text_number_raises(self):
+        """VAL-102: 'abc123def' must not be regex-extracted to 123."""
+        with pytest.raises(ValueError, match="无法无损转换"):
+            self.converter.convert_strict_key_value(
+                "abc123def", "ID", {"ID": _number_schema()}
+            )
+
+    def test_empty_key_raises(self):
+        with pytest.raises(ValueError, match="不能为空"):
+            self.converter.convert_strict_key_value(
+                None, "ID", {"ID": _number_schema()}
+            )
+
+    def test_native_int_passes(self):
+        assert (
+            self.converter.convert_strict_key_value(42, "ID", {"ID": _number_schema()})
+            == 42
+        )
+
+    def test_infinite_float_raises(self):
+        import math
+
+        with pytest.raises(ValueError, match="必须有限"):
+            self.converter.convert_strict_key_value(
+                float("inf"), "ID", {"ID": _number_schema()}
+            )
+
+
+class TestDfToRecordsStrictKey:
+    """VAL-101: df_to_records must use strict key for index_column."""
+
+    def test_index_column_scientific_notation_is_canonical(self):
+        converter = DataConverter(TargetType.BITABLE)
+        schema = _number_schema()
+        records = converter.df_to_records(
+            pd.DataFrame({"ID": ["1e3"], "Name": ["A"]}),
+            {"ID": schema, "Name": schema},
+            index_column="ID",
+        )
+        assert records[0]["fields"]["ID"] == 1000
+
+    def test_index_column_invalid_raises(self):
+        converter = DataConverter(TargetType.BITABLE)
+        schema = _number_schema()
+        with pytest.raises(ValueError, match="无法无损转换"):
+            converter.df_to_records(
+                pd.DataFrame({"ID": ["not-a-number"], "Name": ["A"]}),
+                {"ID": schema, "Name": schema},
+                index_column="ID",
+            )
+
+
+# REPRO-201: build_sheet_layout preserves physical row/column mapping
+
+
+class TestBuildSheetLayout:
+    """VAL-201/202: layout must track physical rows after blank-row removal."""
+
+    def setup_method(self):
+        self.converter = DataConverter(TargetType.SHEET)
+
+    def test_intermediate_blank_row_preserved(self):
+        values = [
+            ["ID", "Name"],
+            [1, "A"],
+            [None, None],
+            [2, "B"],
+        ]
+        layout = self.converter.build_sheet_layout(values, start_row=1, start_column=1)
+        assert layout is not None
+        # Two data rows at physical rows 2 and 4; row 3 is blank.
+        assert layout.physical_row_numbers == (2, 4)
+        assert layout.header_names == ("ID", "Name")
+        assert layout.header_to_physical_col == {"ID": 1, "Name": 2}
+
+    def test_empty_header_column_preserved(self):
+        values = [
+            ["ID", None, "Name"],
+            [1, None, "A"],
+            [2, None, "B"],
+        ]
+        layout = self.converter.build_sheet_layout(values, start_row=1, start_column=1)
+        assert layout is not None
+        # Empty header column 2 is excluded from header_names
+        assert layout.header_names == ("ID", "Name")
+        assert layout.header_to_physical_col["Name"] == 3
+        assert layout.physical_row_numbers == (2, 3)
+
+    def test_non_a1_start_position(self):
+        values = [
+            ["ID", "Name"],
+            [1, "A"],
+        ]
+        layout = self.converter.build_sheet_layout(values, start_row=5, start_column=3)
+        assert layout is not None
+        assert layout.start_row == 5
+        assert layout.start_column == 3
+        assert layout.physical_row_numbers == (6,)
+        assert layout.header_to_physical_col["ID"] == 3
+        assert layout.header_to_physical_col["Name"] == 4
+
+    def test_empty_values_returns_none(self):
+        assert self.converter.build_sheet_layout([]) is None
+
+
+def test_data_index_keeps_dataframe_labels_and_empty_warning():
+    converter = DataConverter(TargetType.SHEET)
+    frame = pd.DataFrame({"ID": ["001", None, "002"]}, index=[9, 20, 31])
+    result = converter.build_data_index(frame, "ID", context="test-index")
+    assert result == {
+        hashlib.md5(b"001").hexdigest(): 9,
+        hashlib.md5(b"002").hexdigest(): 31,
+    }
+    assert converter.consume_key_warnings() == [
+        "test-index有 1 条记录的 key 为空；这些记录保持不变"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("values", "field_types", "message"),
+    [
+        (["A", "A", "B"], None, "Sheet 索引列存在重复值 key: A"),
+        (["A", None, "B"], None, "Sheet 索引列第 2 条记录的 key 为空"),
+        ([1, float("inf"), 2], {"ID": 2}, "第 2 条记录的 key 无法安全归一化"),
+    ],
+)
+def test_data_index_stops_iteration_at_first_invalid_key(
+    monkeypatch, values, field_types, message
+):
+    converter = DataConverter(TargetType.SHEET)
+    frame = pd.DataFrame({"ID": values})
+    iterrows = frame.iterrows
+    consumed = []
+
+    def counted_rows():
+        for item in iterrows():
+            consumed.append(item[0])
+            yield item
+
+    monkeypatch.setattr(frame, "iterrows", counted_rows)
+    with pytest.raises(ValueError, match=message):
+        converter.build_data_index(frame, "ID", field_types, allow_empty=False)
+    assert consumed == [0, 1]
+
+
+def test_data_index_without_key_does_not_iterate(monkeypatch):
+    frame = pd.DataFrame({"ID": [1]})
+
+    def unexpected_iteration():
+        pytest.fail("an absent index column must not request rows")
+
+    monkeypatch.setattr(frame, "iterrows", unexpected_iteration)
+    assert DataConverter(TargetType.SHEET).build_data_index(frame, None) == {}

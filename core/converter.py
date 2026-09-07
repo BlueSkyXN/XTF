@@ -77,9 +77,11 @@
 """
 
 import re
+import math
 import logging
 import datetime as dt
 import numbers
+from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Optional, TypedDict
 
 import pandas as pd
@@ -145,10 +147,6 @@ class DataConverter:
         """判断值是否为空，兼容 list/dict 等非标量对象。"""
         return KeyPolicy.is_empty(value)
 
-    def _normalize_number_index_value(self, value: Any) -> Optional[str]:
-        """使用无损十进制规则规范化数字索引。"""
-        return self.key_policy.normalize_number(value)
-
     @classmethod
     def _numeric_timestamp_to_milliseconds(
         cls, value: float, *, strict: bool = True
@@ -179,11 +177,6 @@ class DataConverter:
             )
         )
         return policy.normalize_datetime(value)
-
-    def _exact_index_timestamp_ms(self, value: Any) -> Optional[int]:
-        """Normalize every exact DATETIME index representation through UTC."""
-        normalized = KeyPolicy(datetime_granularity="exact").normalize_datetime(value)
-        return int(normalized) if normalized is not None else None
 
     @staticmethod
     def _datetime_like_to_milliseconds(value: Any, *, naive_utc: bool) -> Optional[int]:
@@ -220,6 +213,55 @@ class DataConverter:
         )
         key = policy.normalize(value, field_type)
         return key.value if key is not None else None
+
+    def convert_strict_key_value(
+        self,
+        value: Any,
+        field_name: str,
+        field_types: Optional[Dict[str, Any]] = None,
+    ) -> Any:
+        """Convert a key to its writable type without changing its match value."""
+        if self._is_empty_value(value):
+            raise ValueError(f"索引列 '{field_name}' 的值不能为空")
+        schema = field_types.get(field_name) if field_types else None
+        field_type = self._field_schema_type_code(schema)
+        from api.bitable_backend import FieldSchema
+
+        if isinstance(schema, FieldSchema) and not schema.writable:
+            raise ValueError(f"索引列 '{field_name}' 不可写")
+        if field_type == 2 and isinstance(value, float) and not math.isfinite(value):
+            raise ValueError(f"索引列 '{field_name}' 的数字值必须有限")
+        key = self.key_policy.normalize(value, field_type)
+        if key is None:
+            raise ValueError(f"索引列 '{field_name}' 的值无法归一化: {value}")
+
+        converted: Any
+        if field_type == 2:
+            try:
+                number = Decimal(key.value)
+            except (InvalidOperation, ValueError) as exc:
+                raise ValueError(f"索引列 '{field_name}' 无法无损转换为数字") from exc
+            if not number.is_finite():
+                raise ValueError(f"索引列 '{field_name}' 的数字值必须有限")
+            converted = (
+                int(number) if number == number.to_integral_value() else float(number)
+            )
+            if isinstance(converted, float) and not math.isfinite(converted):
+                raise ValueError(f"索引列 '{field_name}' 的数字超出可写范围")
+        elif field_type == 5:
+            converted = self.key_policy.datetime_to_milliseconds(value)
+        elif field_type == 7:
+            converted = key.value == "true"
+        elif field_type == 1:
+            converted = key.value
+        else:
+            converted = self.convert_field_value_safe(field_name, value, field_types)
+        written_key = self.key_policy.normalize(converted, field_type)
+        if written_key is None or written_key.value != key.value:
+            raise ValueError(
+                f"索引列 '{field_name}' 转换后的写入值与匹配值不同，拒绝有损转换"
+            )
+        return converted
 
     def get_index_value_hash(
         self,
@@ -880,6 +922,113 @@ class DataConverter:
 
         return analysis
 
+    def convert_write_value(
+        self, field_name: str, value: Any, field_types: Dict[str, Any]
+    ) -> Any:
+        """Planning rejects nonempty values that a permissive converter would drop/coerce."""
+        code = self._field_schema_type_code(field_types.get(field_name))
+        if code == 1 and isinstance(value, str):
+            return value
+        if code == 2:
+            if isinstance(value, bool):
+                raise ValueError(f"字段 '{field_name}' 的数字值不能是布尔值")
+            raw = str(value).strip()
+            # Preserve the existing percent-point convention ("12%" -> 12),
+            # but accept punctuation only in unambiguous numeric positions.
+            if not re.fullmatch(
+                r"[￥$]?[-+]?(?:\d{1,3}(?:,\d{3})+|\d+|\d*\.\d+)(?:\.\d+)?(?:[eE][-+]?\d+)?%?",
+                raw,
+            ):
+                raise ValueError(
+                    f"字段 '{field_name}' 需要完整数字，不能从文本猜测数值"
+                )
+            raw = raw.lstrip("￥$").rstrip("%").replace(",", "")
+            try:
+                number = Decimal(raw)
+            except InvalidOperation as error:
+                raise ValueError(
+                    f"字段 '{field_name}' 需要完整数字，不能从文本猜测数值"
+                ) from error
+            if not number.is_finite():
+                raise ValueError(f"字段 '{field_name}' 需要有限数字")
+            converted = (
+                int(number) if number == number.to_integral_value() else float(number)
+            )
+            if (
+                abs(number) > Decimal("1.7976931348623157e308")
+                or (isinstance(converted, int) and abs(converted) > 2**53 - 1)
+                or Decimal(str(converted)) != number
+            ):
+                raise ValueError(
+                    f"字段 '{field_name}' 的数字无法无损转换；请使用文本字段"
+                )
+            return converted
+        if code == 7:
+            if isinstance(value, bool):
+                return value
+            text = str(value).strip().lower()
+            if text not in {
+                "true",
+                "是",
+                "yes",
+                "1",
+                "1.0",
+                "on",
+                "checked",
+                "对",
+                "正确",
+                "ok",
+                "y",
+                "false",
+                "否",
+                "no",
+                "0",
+                "0.0",
+                "off",
+                "unchecked",
+                "错",
+                "错误",
+                "n",
+            }:
+                raise ValueError(f"字段 '{field_name}' 需要明确的是/否，不能按非空判真")
+            if text in {"1.0", "0.0"}:
+                return text == "1.0"
+        if code == 3:
+            if isinstance(value, (list, tuple)):
+                if len(value) != 1:
+                    raise ValueError(f"字段 '{field_name}' 是单选，不能丢弃多余选项")
+                value = value[0]
+            # A comma can be part of an option name; do not split single-select cells.
+            return str(value).strip()
+        if code == 5:
+            if isinstance(value, bool):
+                raise ValueError(f"字段 '{field_name}' 的日期值不能是布尔值")
+            if isinstance(value, (numbers.Real, Decimal)) or (
+                isinstance(value, str) and value.strip().lstrip("+-").isdigit()
+            ):
+                # File numeric dates retain the existing seconds/milliseconds policy.
+                return KeyPolicy(datetime_granularity="exact").datetime_to_milliseconds(
+                    value
+                )
+            if isinstance(value, str):
+                text = value.strip()
+                if not re.match(r"^\d{4}[-/年]", text):
+                    raise ValueError(
+                        f"字段 '{field_name}' 请使用含年份的 ISO 日期（YYYY-MM-DD）"
+                    )
+                if "年" in text:
+                    value = dt.datetime.strptime(text, "%Y年%m月%d日")
+            # Ordinary date fields are instants, independent of index day grouping
+            # and of the machine running CI. Naive values retain the default UTC.
+            millis = self._datetime_like_to_milliseconds(value, naive_utc=True)
+            if millis is None:
+                raise ValueError(f"字段 '{field_name}' 的非空值不是有效日期")
+            return millis
+        converted = self.convert_field_value_safe(field_name, value, field_types)
+        if converted is None and not self._is_empty_value(value):
+            raise ValueError(f"字段 '{field_name}' 的非空值无法转换；未发送任何写请求")
+        return converted
+
     def convert_field_value_safe(
         self, field_name: str, value, field_types: Optional[Dict[str, Any]] = None
     ):
@@ -1008,6 +1157,20 @@ class DataConverter:
                 .replace("%", "")
             )
 
+            # A valid scientific literal is a complete number, not text from
+            # which the leading mantissa should be extracted.
+            if re.fullmatch(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)[eE][+-]?\d+", cleaned):
+                from decimal import Decimal
+                import math
+
+                numeric = Decimal(cleaned)
+                as_float = float(numeric)
+                if not math.isfinite(as_float):
+                    raise ValueError(f"字段 '{field_name}': 数字超出有限数值范围")
+                return (
+                    int(numeric) if numeric == numeric.to_integral_value() else as_float
+                )
+
             try:
                 # 尝试转换为数字
                 if "." in cleaned:
@@ -1105,7 +1268,6 @@ class DataConverter:
                 "%m/%d/%Y",
                 "%d/%m/%Y",
                 "%Y年%m月%d日",
-                "%m月%d日",
                 "%Y-%m-%d %H:%M",
                 "%Y/%m/%d %H:%M",
             ]
@@ -1354,9 +1516,8 @@ class DataConverter:
             if field_types
             else None
         )
-        rows = list(df.iterrows())
         result = self.key_policy.build_index(
-            rows,
+            df.iterrows(),
             value_getter=lambda item: (
                 item[1][index_column] if index_column in item[1] else None
             ),
@@ -1381,6 +1542,8 @@ class DataConverter:
 
     def column_letter_to_number(self, col_letter: str) -> int:
         """将列字母转换为数字（A->1, B->2, ..., Z->26, AA->27）"""
+        if not col_letter or not re.fullmatch(r"[A-Z]+", col_letter):
+            raise ValueError(f"invalid column letter: {col_letter!r}")
         result = 0
         for char in col_letter:
             result = result * 26 + (ord(char) - ord("A") + 1)
@@ -1467,62 +1630,77 @@ class DataConverter:
 
         return positions
 
-    def values_to_df(self, values: List[List[Any]]) -> pd.DataFrame:
-        """将电子表格值格式转换为DataFrame"""
+    def values_to_df(self, values: List[List[Any]], *, layout=None) -> pd.DataFrame:
+        """Project named columns without ever promoting a data row to a header."""
+        if layout is None:
+            layout = self.build_sheet_layout(values)
+        if layout is None:
+            return pd.DataFrame()
+        rows = []
+        for physical_row in layout.physical_row_numbers:
+            offset = physical_row - layout.start_row
+            row = values[offset] if offset < len(values) else []
+            rows.append(
+                [
+                    (
+                        row[column - layout.start_column]
+                        if column - layout.start_column < len(row)
+                        else None
+                    )
+                    for column in layout.header_physical_cols
+                ]
+            )
+        return pd.DataFrame(rows, columns=layout.header_names, dtype=object)
+
+    def build_sheet_layout(
+        self,
+        values: List[List[Any]],
+        *,
+        start_row: int = 1,
+        start_column: int = 1,
+    ):
+        """Retain the physical header and occupied rows of a Sheet read."""
+        from .snapshot import SheetLayout
+
         if not values:
-            return pd.DataFrame()
-
-        # 清理数据：移除完全空的行和列
-        cleaned_values = []
-        for row in values:
-            # 移除行尾的空值
-            while row and (
-                row[-1] is None or row[-1] == "" or str(row[-1]).strip() == ""
-            ):
-                row = row[:-1]
-            # 如果行不为空，则保留
-            if row and any(
-                cell is not None and str(cell).strip() != "" for cell in row
-            ):
-                cleaned_values.append(row)
-
-        if not cleaned_values:
-            return pd.DataFrame()
-
-        # 第一行作为表头
-        headers = cleaned_values[0] if cleaned_values else []
-        data_rows = cleaned_values[1:] if len(cleaned_values) > 1 else []
-
-        # 清理表头：移除空的列名
-        valid_headers = []
-        valid_col_indices = []
-        for i, header in enumerate(headers):
-            if header is not None and str(header).strip() != "":
-                valid_headers.append(str(header).strip())
-                valid_col_indices.append(i)
-
-        # 如果没有有效的表头，返回空DataFrame
-        if not valid_headers:
-            return pd.DataFrame()
-
-        # 清理数据行：只保留有效列的数据
-        cleaned_data_rows = []
-        for row in data_rows:
-            cleaned_row = []
-            for i in valid_col_indices:
-                if i < len(row):
-                    cleaned_row.append(row[i])
-                else:
-                    cleaned_row.append(None)
-            cleaned_data_rows.append(cleaned_row)
-
-        # 创建DataFrame
-        if cleaned_data_rows:
-            df = pd.DataFrame(cleaned_data_rows, columns=valid_headers)
-        else:
-            df = pd.DataFrame(columns=valid_headers)
-
-        return df
+            return None
+        if any(not isinstance(row, (list, tuple)) for row in values):
+            raise ValueError("Sheet values 必须为二维数组")
+        occupied = [
+            idx
+            for idx, row in enumerate(values)
+            if any(not self._is_empty_value(cell) for cell in row)
+        ]
+        if not occupied:
+            return None
+        if occupied[0] != 0:
+            raise ValueError("Sheet 起始行表头为空但下方存在数据，拒绝将数据行作为表头")
+        header_physical_cols = []
+        header_names = []
+        for idx, cell in enumerate(values[0]):
+            if not self._is_empty_value(cell):
+                header_names.append(str(cell).strip())
+                header_physical_cols.append(start_column + idx)
+        if len(set(header_names)) != len(header_names):
+            raise ValueError("目标 Sheet header 包含重复列名")
+        raw_width = max(
+            (
+                idx + 1
+                for row in values
+                for idx, cell in enumerate(row)
+                if not self._is_empty_value(cell)
+            ),
+            default=0,
+        )
+        return SheetLayout(
+            start_row=start_row,
+            start_column=start_column,
+            header_physical_cols=tuple(header_physical_cols),
+            header_names=tuple(header_names),
+            header_to_physical_col=dict(zip(header_names, header_physical_cols)),
+            physical_row_numbers=tuple(start_row + idx for idx in occupied if idx > 0),
+            raw_width=raw_width,
+        )
 
     def get_range_string(
         self, sheet_id: str, start_row: int, start_col: str, end_row: int, end_col: str
@@ -1533,7 +1711,11 @@ class DataConverter:
     # ========== 统一接口方法 ==========
 
     def df_to_records(
-        self, df: pd.DataFrame, field_types: Optional[Dict[str, Any]] = None
+        self,
+        df: pd.DataFrame,
+        field_types: Optional[Dict[str, Any]] = None,
+        *,
+        index_column: Optional[str] = None,
     ) -> List[Dict]:
         """将DataFrame转换为飞书记录格式（多维表格模式）"""
         if self.target_type != TargetType.BITABLE:
@@ -1544,11 +1726,19 @@ class DataConverter:
             fields = {}
             for k, v in row.to_dict().items():
                 if not self._is_empty_value(v):
-                    converted_value = self.convert_field_value_safe(
-                        str(k), v, field_types
-                    )
+                    field_name = str(k)
+                    # Use strict key conversion for the index column so that
+                    # match digest and mutation payload share one canonical value.
+                    if index_column and field_name == index_column:
+                        converted_value = self.convert_strict_key_value(
+                            v, field_name, field_types
+                        )
+                    else:
+                        converted_value = self.convert_field_value_safe(
+                            field_name, v, field_types
+                        )
                     if converted_value is not None:
-                        fields[str(k)] = converted_value
+                        fields[field_name] = converted_value
 
             record = {"fields": fields}
             records.append(record)

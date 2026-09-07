@@ -65,6 +65,26 @@ class FeishuAPIError(Exception):
             details.append(f"log_id={log_id}")
         super().__init__(f"Feishu API error {code}: {message} ({', '.join(details)})")
 
+    @property
+    def mutation_outcome_unknown(self) -> bool:
+        """Whether a sent mutation may have applied despite this error."""
+        if self.response_data.get("request_started") is False:
+            return False
+        return self.kind in {"transport", "invalid_response"} or (
+            self.http_status is not None and self.http_status >= 500
+        )
+
+    def to_metadata(self) -> Dict[str, Any]:
+        return {
+            "error": str(self),
+            "error_code": self.code,
+            "http_status": self.http_status,
+            "log_id": self.log_id,
+            "error_kind": self.kind,
+            "retryable": self.retryable,
+            "retry_after": self.retry_after,
+        }
+
     @classmethod
     def from_transport(
         cls, message: str, *, cause: Optional[BaseException] = None
@@ -144,7 +164,21 @@ class FeishuResponseParser:
                 kind="invalid_response",
             )
 
-        code = cls._coerce_code(result.get("code", 0))
+        raw_code = result.get("code")
+        if status_code < 400 and (
+            isinstance(raw_code, bool)
+            or not isinstance(raw_code, (int, str))
+            or (isinstance(raw_code, str) and not raw_code.lstrip("-").isdigit())
+        ):
+            raise FeishuAPIError(
+                -1,
+                "OpenAPI 响应缺少有效业务码 code",
+                http_status=status_code,
+                log_id=cls._extract_log_id(response, result),
+                response_data=result,
+                kind="invalid_response",
+            )
+        code = cls._coerce_code(raw_code if raw_code is not None else status_code)
         if status_code >= 400 or code != 0:
             effective_code = code if code != 0 else status_code
             raise FeishuAPIError(

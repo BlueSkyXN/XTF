@@ -45,6 +45,8 @@ TEMPLATE: dict[str, Any] = {
             "timezone": None,
         },
         "verify_remote_writes": False,
+        "verify_timeout_seconds": 10.0,
+        "verify_interval_seconds": 0.5,
         "selective": {
             "enabled": False,
             "columns": [],
@@ -124,14 +126,14 @@ SECTION_KEYS: dict[str, set[str]] = {
         "protect_formulas",
         "verify_formulas",
         "formula_max_locations",
-        "report_column_diff",
-        "diff_tolerance",
     },
     "sync": {
         "mode",
         "match_strategy",
         "index",
         "verify_remote_writes",
+        "verify_timeout_seconds",
+        "verify_interval_seconds",
         "selective",
     },
     "sync.index": {"column", "datetime_granularity", "timezone"},
@@ -167,7 +169,6 @@ BOOLEAN_PATHS = {
     "target.sheet.validate_results",
     "target.sheet.protect_formulas",
     "target.sheet.verify_formulas",
-    "target.sheet.report_column_diff",
     "sync.verify_remote_writes",
     "sync.selective.enabled",
     "sync.selective.auto_include_index",
@@ -188,7 +189,8 @@ INTEGER_PATHS = {
     "control.advanced.rate_limit.max_requests",
 }
 NUMBER_PATHS = {
-    "target.sheet.diff_tolerance",
+    "sync.verify_timeout_seconds",
+    "sync.verify_interval_seconds",
     "conversion.intelligence.date_confidence",
     "conversion.intelligence.choice_confidence",
     "conversion.intelligence.boolean_confidence",
@@ -256,14 +258,14 @@ YAML_TO_FLAT: dict[str, str] = {
     "target.sheet.protect_formulas": "sheet_protect_formulas",
     "target.sheet.verify_formulas": "sheet_verify_formulas",
     "target.sheet.formula_max_locations": "sheet_formula_max_locations",
-    "target.sheet.report_column_diff": "sheet_report_column_diff",
-    "target.sheet.diff_tolerance": "sheet_diff_tolerance",
     "sync.mode": "sync_mode",
     "sync.match_strategy": "match_strategy",
     "sync.index.column": "index_column",
     "sync.index.datetime_granularity": "datetime_index_granularity",
     "sync.index.timezone": "datetime_index_timezone",
     "sync.verify_remote_writes": "verify_remote_writes",
+    "sync.verify_timeout_seconds": "verify_timeout_seconds",
+    "sync.verify_interval_seconds": "verify_interval_seconds",
     "sync.selective.enabled": "selective_sync.enabled",
     "sync.selective.columns": "selective_sync.columns",
     "sync.selective.auto_include_index": "selective_sync.auto_include_index",
@@ -319,14 +321,14 @@ CLI_TO_FLAT: dict[str, str] = {
         "sheet_protect_formulas",
         "sheet_verify_formulas",
         "sheet_formula_max_locations",
-        "sheet_report_column_diff",
-        "sheet_diff_tolerance",
         "sync_mode",
         "match_strategy",
         "index_column",
         "datetime_index_granularity",
         "datetime_index_timezone",
         "verify_remote_writes",
+        "verify_timeout_seconds",
+        "verify_interval_seconds",
         "batch_size",
         "rate_limit_delay",
         "max_retries",
@@ -384,8 +386,6 @@ TARGET_SHEET_OVERRIDES = frozenset(
         "sheet_protect_formulas",
         "sheet_verify_formulas",
         "sheet_formula_max_locations",
-        "sheet_report_column_diff",
-        "sheet_diff_tolerance",
     }
 )
 
@@ -609,10 +609,36 @@ def validate_v2_document(document: Any) -> Mapping[str, Any]:
     return root
 
 
+class _UniqueKeyLoader(yaml.SafeLoader):
+    def construct_mapping(self, node, deep=False):
+        self.flatten_mapping(node)
+        seen = set()
+        for key_node, _ in node.value:
+            key = self.construct_object(key_node, deep=deep)
+            try:
+                duplicate = key in seen
+                seen.add(key)
+            except TypeError as exc:
+                raise yaml.constructor.ConstructorError(
+                    "while constructing a mapping",
+                    node.start_mark,
+                    "unhashable configuration key",
+                    key_node.start_mark,
+                ) from exc
+            if duplicate:
+                raise yaml.constructor.ConstructorError(
+                    "while constructing a mapping",
+                    node.start_mark,
+                    f"duplicate configuration key: {key}",
+                    key_node.start_mark,
+                )
+        return super().construct_mapping(node, deep=deep)
+
+
 def read_v2_file(path: Path) -> Mapping[str, Any]:
     try:
         with path.open("r", encoding="utf-8") as stream:
-            document = yaml.safe_load(stream)
+            document = yaml.load(stream, Loader=_UniqueKeyLoader)
     except FileNotFoundError as exc:
         raise CLIError(
             "XTF_E_CONFIG_NOT_FOUND",
@@ -816,8 +842,6 @@ def make_template(source_type: str, target_type: str) -> dict[str, Any]:
             "protect_formulas": False,
             "verify_formulas": False,
             "formula_max_locations": 20,
-            "report_column_diff": False,
-            "diff_tolerance": 0.001,
         }
         template["control"]["batch_size"] = 1000
         template["control"]["rate_limit_delay"] = 0.1

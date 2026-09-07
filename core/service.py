@@ -12,7 +12,7 @@ import pandas as pd
 import numbers
 from dataclasses import replace
 from datetime import date, datetime
-from typing import Optional, Dict, Any, List, Mapping, Union, Tuple, cast
+from typing import Optional, Dict, Any, List, Mapping, Union, Tuple, Sequence, cast
 
 from .config import MatchStrategy, SourceType, SyncMode, TargetType
 from .converter import DataConverter
@@ -20,6 +20,7 @@ from .bootstrap import bootstrap_runtime
 from .compiler import BitablePlanCompiler, SheetPlanCompiler
 from .key_policy import KeyPolicy
 from .mode_policy import ModeDecision, ModePolicy
+from .verification import cells_equal, sheet_values_equal, wait_for_readback
 from .reconcile import Reconciler
 from .plan import (
     AppendRowsAction,
@@ -41,7 +42,13 @@ from .plan import (
     WriteRangeAction,
 )
 from .runtime_config import RuntimeBitableTarget, RuntimeConfig, RuntimeSheetTarget
-from .snapshot import BitableSnapshot, SheetSnapshot, SourceTable, content_fingerprint
+from .snapshot import (
+    BitableSnapshot,
+    SheetSnapshot,
+    SheetLayout,
+    SourceTable,
+    content_fingerprint,
+)
 from api import (
     A1Range,
     BitableBackend,
@@ -59,6 +66,9 @@ from api import (
 
 class SyncService:
     """XTF 2.0 单一 typed 同步服务。"""
+
+    # Client work budget, not an assertion about the server's hidden scan limit.
+    MAX_FORMULA_PROBES = 128
 
     def __init__(self, config: RuntimeConfig):
         """
@@ -115,6 +125,9 @@ class SyncService:
     def _bitable_backend(self) -> BitableBackend:
         return cast(BitableBackend, self.api)
 
+    def _sheet_api(self) -> SheetAPI:
+        return cast(SheetAPI, self.api)
+
     def _bitable_target(self) -> RuntimeBitableTarget:
         if not isinstance(self.target, RuntimeBitableTarget):
             raise TypeError("当前 runtime 目标不是 Bitable")
@@ -166,6 +179,7 @@ class SyncService:
                 "目标 Bitable 缺少字段且 create_missing_fields=false: "
                 f"{[str(name) for name in missing_fields]}"
             )
+        self._planned_bitable_fields = tuple(field_types.values())
         if not missing_fields:
             return [], field_types
 
@@ -195,6 +209,7 @@ class SyncService:
                 writable=field_is_writable(kind),
                 raw_type=suggested_type,
             )
+        self._planned_bitable_fields = tuple(field_types.values())
         return actions, field_types
 
     def get_all_bitable_records(
@@ -370,6 +385,7 @@ class SyncService:
         target_fields = backend.list_fields(target_app_token, target_table_id)
         source_by_name = {field.name: field for field in source_fields}
         target_by_name = {field.name: field for field in target_fields}
+        self._planned_bitable_fields = tuple(target_fields)
 
         requested_names: List[str]
         explicit_selection = bool(
@@ -570,6 +586,9 @@ class SyncService:
             if not isinstance(receipt, MutationReceipt):
                 raise TypeError("typed backend mutation 必须返回 MutationReceipt")
             receipts.append(receipt)
+            self.logger.info(
+                f"第 {batch_index} 批：服务端接受 {receipt.accepted_count}/{len(batch)} 条；累计 {start + receipt.accepted_count}/{len(items)} 条"
+            )
             if receipt_callback is not None:
                 receipt_callback(receipt)
             if (
@@ -585,15 +604,106 @@ class SyncService:
                 return False, receipts
         return True, receipts
 
-    @staticmethod
-    def _canonical_records(records: List[Dict[str, Any]]) -> List[CanonicalRecord]:
-        return [
-            CanonicalRecord(
-                record_id=record.get("record_id"),
-                fields=dict(record.get("fields", {})),
+    def _read_bitable_verification(
+        self, backend, record_ids: List[str], field_names=None
+    ) -> RecordReadResult:
+        """Read by the GET limit and split Base v3 field projections at 100.
+
+        This aggregates explicit read results; it does not replay a mutation or
+        assume that an accepted write is immediately visible at the server.
+        """
+        limit = getattr(backend, "max_batch_get_size", 100)
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+            limit = 100  # Conservative for protocol-compatible test/legacy adapters.
+        projections = (
+            [None]
+            if not field_names
+            else [
+                tuple(field_names[i : i + 100]) for i in range(0, len(field_names), 100)
+            ]
+        )
+        records: Dict[str, Dict[str, Any]] = {}
+        schemas: Dict[str, Any] = {}
+        absent = set()
+        ignored = []
+        complete = True
+        timezone = None
+        for start in range(0, len(record_ids), limit):
+            ids = record_ids[start : start + limit]
+            projection_presence = None
+            for projection in projections:
+                result = backend.batch_get_records(
+                    self._bitable_target().app_token,
+                    self._bitable_target().table_id,
+                    ids,
+                    field_names=projection,
+                )
+                if result.timezone is not None:
+                    if timezone is not None and timezone != result.timezone:
+                        complete = False
+                    timezone = result.timezone
+                present_ids = {record.record_id for record in result.records}
+                missing_ids = set(result.record_not_found)
+                presence = (frozenset(present_ids), frozenset(missing_ids))
+                complete = bool(
+                    complete
+                    and result.complete
+                    and len(present_ids) == len(result.records)
+                    and not present_ids & missing_ids
+                    and present_ids | missing_ids == set(ids)
+                    and (projection_presence is None or projection_presence == presence)
+                )
+                projection_presence = presence
+                absent.update(missing_ids)
+                ignored.extend(result.ignored_fields)
+                for schema in result.fields:
+                    if schema.name in schemas and schemas[schema.name] != schema:
+                        complete = False
+                    schemas[schema.name] = schema
+                for record in result.records:
+                    if record.record_id is not None:
+                        records.setdefault(record.record_id, {}).update(record.fields)
+        return RecordReadResult(
+            records=tuple(
+                CanonicalRecord(rid, values) for rid, values in records.items()
+            ),
+            fields=tuple(schemas.values()),
+            complete=complete,
+            backend=BitableBackendKind(self._bitable_target().backend),
+            ignored_fields=tuple(ignored),
+            record_not_found=tuple(sorted(absent)),
+            timezone=timezone,
+        )
+
+    def _wait_for_confirmation(self, check, label: str) -> bool:
+        try:
+            result = wait_for_readback(
+                check,
+                timeout=self.sync_config.verify_timeout_seconds,
+                interval=self.sync_config.verify_interval_seconds,
+                on_wait=lambda: self.logger.info(
+                    f"{label}暂未可见，正在等待；不会重复写入"
+                ),
             )
-            for record in records
-        ]
+        except Exception:
+            self._last_action_error_kind = ErrorKind.VERIFICATION
+            self._last_action_confirmation: Dict[str, Any] = {"status": "read_failed"}
+            raise
+        self._last_action_confirmation = {
+            "attempts": result.attempts,
+            "elapsed_seconds": round(result.elapsed_seconds, 3),
+            "status": "verified" if result.verified else "visibility_timeout",
+        }
+        if not result.verified:
+            self._last_action_failure_message = (
+                f"{label}在等待窗口内仍未确认。写请求已接受，不代表未写入；"
+                "已停止后续操作，请先读取目标状态，不要直接重跑追加或清空任务。"
+            )
+            if result.last_error:
+                self._last_action_failure_message += (
+                    f" 最后一次读取错误: {result.last_error}"
+                )
+        return result.verified
 
     def _verify_bitable_mutation(
         self,
@@ -601,92 +711,82 @@ class SyncService:
         requested: List[CanonicalRecord] | List[str],
         receipts: List[MutationReceipt],
     ) -> bool:
-        if not self.sync_config.verify_remote_writes:
+        if not self.sync_config.verify_remote_writes or not receipts:
             return True
-        if not receipts:
-            return True
-
+        backend = self._bitable_backend()
+        records = [item for item in requested if isinstance(item, CanonicalRecord)]
         if operation == "delete":
             record_ids = [str(item) for item in requested]
-            if not record_ids:
-                return True
-            if (
-                not self._bitable_target().app_token
-                or not self._bitable_target().table_id
+        elif operation == "create":
+            record_ids = [rid for receipt in receipts for rid in receipt.record_ids]
+            if len(record_ids) != len(records) or len(set(record_ids)) != len(
+                record_ids
             ):
-                return False
-            backend = self._bitable_backend()
-            result = backend.batch_get_records(
-                self._bitable_target().app_token,
-                self._bitable_target().table_id,
-                record_ids,
-            )
-            missing = set(result.record_not_found)
-            present = {record.record_id for record in result.records}
-            verified = result.complete and not present and missing == set(record_ids)
-            self._set_receipt_readback(
-                receipts,
-                ReadbackStatus.VERIFIED if verified else ReadbackStatus.MISMATCH,
-                len(record_ids) if verified else 0,
-            )
-            return verified
-
-        records = [item for item in requested if isinstance(item, CanonicalRecord)]
-        record_ids = [record.record_id for record in records if record.record_id]
-        if operation == "create" and not record_ids:
-            record_ids = [
-                record_id for receipt in receipts for record_id in receipt.record_ids
-            ]
-            if len(record_ids) != len(records):
-                self.logger.error("创建响应没有完整 record IDs，无法证明写后读回范围")
                 self._set_receipt_readback(receipts, ReadbackStatus.UNKNOWN, 0)
+                self._last_action_failure_message = (
+                    "创建响应没有完整且唯一的记录 ID，不能确认结果；不要重复创建"
+                )
                 return False
             records = [
-                CanonicalRecord(record_id, record.fields)
-                for record_id, record in zip(record_ids, records)
+                CanonicalRecord(rid, record.fields)
+                for rid, record in zip(record_ids, records)
             ]
+        else:
+            record_ids = [record.record_id for record in records if record.record_id]
         if not record_ids:
-            return False
-        if not self._bitable_target().app_token or not self._bitable_target().table_id:
-            return False
-        backend = self._bitable_backend()
-        observed = backend.batch_get_records(
-            self._bitable_target().app_token,
-            self._bitable_target().table_id,
-            record_ids,
-            field_names=tuple(
-                dict.fromkeys(name for record in records for name in record.fields)
-            ),
+            return not requested
+        # Remember successful chunks: later probes need only the unresolved IDs.
+        pending = set(record_ids)
+        expected = {record.record_id: record for record in records}
+        projection = (
+            tuple(dict.fromkeys(name for record in records for name in record.fields))
+            or None
         )
-        if (
-            not observed.complete
-            or observed.ignored_fields
-            or observed.record_not_found
-        ):
-            self._set_receipt_readback(receipts, ReadbackStatus.INCOMPLETE, 0)
-            return False
-        schema_by_name = {field.name: field for field in observed.fields}
-        by_id = {record.record_id: record for record in observed.records}
-        for expected in records:
-            actual = by_id.get(expected.record_id)
-            if actual is None:
-                self._set_receipt_readback(receipts, ReadbackStatus.MISMATCH, 0)
-                return False
-            for name, value in expected.fields.items():
-                schema = schema_by_name.get(name)
-                actual_value = actual.fields.get(name)
-                type_code = self.converter._field_schema_type_code(schema)
-                expected_normalized = self.converter._normalize_index_value(
-                    value, type_code
-                )
-                actual_normalized = self.converter._normalize_index_value(
-                    actual_value, type_code
-                )
-                if expected_normalized != actual_normalized:
-                    self._set_receipt_readback(receipts, ReadbackStatus.MISMATCH, 0)
-                    return False
-        self._set_receipt_readback(receipts, ReadbackStatus.VERIFIED, len(records))
-        return True
+
+        def check() -> bool:
+            observed = self._read_bitable_verification(
+                backend,
+                [rid for rid in record_ids if rid in pending],
+                field_names=projection,
+            )
+            if not observed.complete or observed.ignored_fields:
+                raise RuntimeError("写后读取不完整或字段被忽略，不能当作可见性延迟继续")
+            if operation == "delete":
+                pending.difference_update(observed.record_not_found)
+            else:
+                schemas = {field.name: field for field in observed.fields}
+                for record in observed.records:
+                    target = expected.get(record.record_id)
+                    if target is not None and all(
+                        cells_equal(
+                            value,
+                            record.fields.get(name),
+                            schemas.get(name),
+                            observed.timezone,
+                        )
+                        for name, value in target.fields.items()
+                    ):
+                        pending.discard(record.record_id)
+            self._last_action_confirmed_count = len(record_ids) - len(pending)
+            return not pending
+
+        verified = self._wait_for_confirmation(check, "Bitable 写入结果")
+        # Successful IDs need not form a prefix. Count within each actual batch.
+        offset = 0
+        for index, receipt in enumerate(receipts):
+            ids = record_ids[offset : offset + receipt.requested_count]
+            count = sum(rid not in pending for rid in ids)
+            receipts[index] = replace(
+                receipt,
+                verified_count=count,
+                readback=(
+                    ReadbackStatus.VERIFIED
+                    if count == len(ids)
+                    else ReadbackStatus.UNKNOWN
+                ),
+            )
+            offset += receipt.requested_count
+        return verified
 
     @staticmethod
     def _set_receipt_readback(
@@ -695,7 +795,6 @@ class SyncService:
         verified_count: int,
     ) -> None:
         """Dataclass 保持 frozen；engine 用返回副本记录本次读回状态。"""
-        from dataclasses import replace
 
         remaining = verified_count
         for index, receipt in enumerate(receipts):
@@ -750,7 +849,16 @@ class SyncService:
                 f"Sheet {receipt.operation} 结果为 {receipt.outcome.value}；"
                 "已成功前缀不会回滚，停止后续阶段"
             )
-            return self._mark_action_failure(ErrorKind.MUTATION)
+            code = receipt.raw_metadata.get("error_code")
+            status = receipt.raw_metadata.get("http_status")
+            kind = (
+                ErrorKind.AUTH
+                if code in {10003, 99991661, 99991663, 99991664, 99991668}
+                or status in {401, 403}
+                else ErrorKind.RESOURCE if status == 404 else ErrorKind.MUTATION
+            )
+            self._last_action_failure_message = receipt.raw_metadata.get("error")
+            return self._mark_action_failure(kind)
         if receipt.readback is ReadbackStatus.UNKNOWN:
             self.logger.error(
                 f"Sheet {receipt.operation} 已接受但实际应用范围未知；"
@@ -773,17 +881,31 @@ class SyncService:
                 or not self._sheet_target().spreadsheet_token
             ):
                 return self._mark_action_failure(ErrorKind.VERIFICATION)
-            for range_text, expected in expected_ranges.items():
-                try:
-                    observed = self.api.get_sheet_data(
-                        self._sheet_target().spreadsheet_token, range_text
+            remaining = dict(expected_ranges)
+
+            def check_values() -> bool:
+                for range_text, expected in tuple(remaining.items()):
+                    observed = self._sheet_api().get_sheet_data(
+                        self._sheet_target().spreadsheet_token,
+                        range_text,
+                        value_render_option=(
+                            "Formula"
+                            if any(
+                                isinstance(value, dict)
+                                and value.get("type") == "formula"
+                                for row in expected
+                                for value in row
+                            )
+                            else "UnformattedValue"
+                        ),
                     )
-                except Exception as error:
-                    self.logger.error(f"Sheet 写后读回失败: {error}")
-                    return self._mark_action_failure(ErrorKind.VERIFICATION)
-                if observed != expected:
-                    self.logger.error(f"Sheet 写后读回不一致: {range_text}")
-                    return self._mark_action_failure(ErrorKind.VERIFICATION)
+                    if sheet_values_equal(expected, observed):
+                        remaining.pop(range_text)
+                return not remaining
+
+            if not self._wait_for_confirmation(check_values, "Sheet 单元格结果"):
+                return self._mark_action_failure(ErrorKind.VERIFICATION)
+            self._last_action_confirmed_count = self._last_action_applied_count
 
         if not self._sheet_target().verify_formulas or not verify_formulas:
             return True
@@ -818,23 +940,116 @@ class SyncService:
         if not ranges:
             self.logger.error("公式验证范围未知：无法证明表头宽度、起始列或实际行区间")
             return self._mark_action_failure(ErrorKind.VERIFICATION)
-        try:
-            result = self.api.verify_formulas(
-                self._sheet_target().spreadsheet_token,
-                [str(self._sheet_target().sheet_id)],
-                ranges,
-                max_locations_per_error=self._sheet_target().formula_max_locations,
-            )
-        except Exception as error:
-            self.logger.error(f"Sheet AI 公式验证失败: {error}")
+        return self._verify_formula_ranges(ranges)
+
+    def _verify_formula_ranges(self, ranges: List[str]) -> bool:
+        """Subdivide truncated scans; count only complete disjoint leaf ranges."""
+        if not isinstance(self.api, SheetAPI):
             return self._mark_action_failure(ErrorKind.VERIFICATION)
-        if not result.passed:
-            self.logger.error(
-                f"Sheet AI 公式验证未通过: status={result.status}, "
-                f"has_more={result.has_more}"
-            )
+        target = self._sheet_target()
+        if not target.spreadsheet_token or not target.sheet_id:
             return self._mark_action_failure(ErrorKind.VERIFICATION)
-        return True
+        pending = [ranges]
+        complete_ranges = 0
+        requests = 0
+        failure = "公式扫描次数达到本次上限；剩余区域未确认"
+        failure_kind = ErrorKind.VERIFICATION
+        while pending and requests < self.MAX_FORMULA_PROBES:
+            group = pending.pop()
+            requests += 1
+            try:
+                result = self.api.verify_formulas(
+                    target.spreadsheet_token,
+                    [str(target.sheet_id)],
+                    group,
+                    max_locations_per_error=target.formula_max_locations,
+                )
+            except Exception as error:
+                failure = f"Sheet AI 公式读取失败: {error}"
+                if self._is_auth_error(error):
+                    failure_kind = ErrorKind.AUTH
+                elif self._is_resource_error(error):
+                    failure_kind = ErrorKind.RESOURCE
+                break
+            if result.passed:
+                complete_ranges += len(group)
+                continue
+            if (
+                result.status not in {"partial", "success"}
+                or result.has_more is not True
+                or result.total_errors
+            ):
+                failure = f"Sheet AI 公式扫描未通过: status={result.status}, has_more={result.has_more}, ranges={group}"
+                break
+            if len(group) > 1:
+                middle = len(group) // 2
+                pending.extend([group[middle:], group[:middle]])
+                continue
+            region = A1Range.parse(f"{target.sheet_id}!{group[0]}")
+            if region.row_count > 1:
+                middle = (region.start_row + region.end_row) // 2
+                parts = [
+                    A1Range(
+                        region.sheet_id,
+                        region.start_row,
+                        middle,
+                        region.start_col,
+                        region.end_col,
+                    ),
+                    A1Range(
+                        region.sheet_id,
+                        middle + 1,
+                        region.end_row,
+                        region.start_col,
+                        region.end_col,
+                    ),
+                ]
+            elif region.col_count > 1:
+                middle = (region.start_col + region.end_col) // 2
+                parts = [
+                    A1Range(
+                        region.sheet_id,
+                        region.start_row,
+                        region.end_row,
+                        region.start_col,
+                        middle,
+                    ),
+                    A1Range(
+                        region.sheet_id,
+                        region.start_row,
+                        region.end_row,
+                        middle + 1,
+                        region.end_col,
+                    ),
+                ]
+            else:
+                failure = f"单个单元格 {group[0]} 的公式扫描仍被截断，不能确认完整结果"
+                break
+            pending.extend([[part.text.split("!", 1)[1]] for part in reversed(parts)])
+        else:
+            if not pending:
+                detail = getattr(self, "_last_action_confirmation", {})
+                self._last_action_confirmation = {
+                    **detail,
+                    "formula_scan": {
+                        "status": "verified",
+                        "requests": requests,
+                        "complete_ranges": complete_ranges,
+                    },
+                }
+                return True
+        detail = getattr(self, "_last_action_confirmation", {})
+        self._last_action_confirmation = {
+            **detail,
+            "formula_scan": {
+                "status": "failed_or_incomplete",
+                "requests": requests,
+                "complete_ranges": complete_ranges,
+            },
+        }
+        self._last_action_failure_message = failure + "；写入不会重放。"
+        self.logger.error(self._last_action_failure_message)
+        return self._mark_action_failure(failure_kind)
 
     def _typed_sheet_write(
         self, values: List[List[Any]], *, verify_formulas: bool = True
@@ -879,7 +1094,11 @@ class SyncService:
         )
 
     def _typed_sheet_append(
-        self, values: List[List[Any]], *, header_width: int
+        self,
+        values: List[List[Any]],
+        *,
+        header_width: int,
+        start_row: Optional[int] = None,
     ) -> bool:
         if (
             not values
@@ -888,11 +1107,14 @@ class SyncService:
             or not self._sheet_target().sheet_id
         ):
             return False
-        placeholder_end_row = self._sheet_target().start_row + len(values) - 1
+        append_start_row = (
+            start_row if start_row is not None else self._sheet_target().start_row
+        )
+        placeholder_end_row = append_start_row + len(values) - 1
         end_col = self.api.start_col_num + len(values[0]) - 1
         requested = A1Range(
             str(self._sheet_target().sheet_id),
-            self._sheet_target().start_row,
+            append_start_row,
             placeholder_end_row,
             self.api.start_col_num,
             end_col,
@@ -1046,20 +1268,35 @@ class SyncService:
             return False
         if not self.sync_config.verify_remote_writes:
             return True
-        try:
-            observed = self.api.get_sheet_data(
-                self._sheet_target().spreadsheet_token, a1.text
-            )
-        except Exception as error:
-            self.logger.error(f"Sheet clear 写后读回失败: {error}")
+        # Clear can cover more than one read window. Never allocate an empty
+        # matrix the size of the sheet or treat whitespace as an empty cell.
+        pending = []
+        for row in range(a1.start_row, a1.end_row + 1, self.api.scan_max_rows):
+            for col in range(a1.start_col, a1.end_col + 1, self.api.scan_max_cols):
+                pending.append(
+                    A1Range(
+                        a1.sheet_id,
+                        row,
+                        min(row + self.api.scan_max_rows - 1, a1.end_row),
+                        col,
+                        min(col + self.api.scan_max_cols - 1, a1.end_col),
+                    ).text
+                )
+
+        def check_clear() -> bool:
+            for text in tuple(pending):
+                observed = self._sheet_api().get_sheet_data(
+                    self._sheet_target().spreadsheet_token,
+                    text,
+                    value_render_option="Formula",
+                )
+                if sheet_values_equal([], observed):
+                    pending.remove(text)
+            return not pending
+
+        if not self._wait_for_confirmation(check_clear, "Sheet 清空结果"):
             return self._mark_action_failure(ErrorKind.VERIFICATION)
-        if any(
-            cell is not None and str(cell).strip() != ""
-            for row in observed
-            for cell in row
-        ):
-            self.logger.error(f"Sheet clear 写后读回不一致: {a1.text}")
-            return self._mark_action_failure(ErrorKind.VERIFICATION)
+        self._last_action_confirmed_count = self._last_action_applied_count
         return True
 
     def _get_operation_max_batch_size(self, processor_func) -> Optional[int]:
@@ -1100,6 +1337,8 @@ class SyncService:
             self._sheet_grid_cache_key = cache_key
             return grid
         except Exception as e:
+            if self._is_auth_error(e) or self._is_resource_error(e):
+                raise
             self.logger.warning(f"获取工作表网格属性失败: {e}")
             return None
 
@@ -1120,6 +1359,9 @@ class SyncService:
         """获取当前电子表格数据"""
         self._sheet_read_complete = True
         self._last_sheet_read_range = None
+        self._last_sheet_layout: Optional[SheetLayout] = None
+        self._last_sheet_values: Optional[tuple[tuple[Any, ...], ...]] = None
+        self._last_sheet_formula_values: Optional[tuple[tuple[Any, ...], ...]] = None
         if self.target.type != TargetType.SHEET:
             return pd.DataFrame()
 
@@ -1204,28 +1446,18 @@ class SyncService:
                 self._sheet_target().start_column,
                 end_col,
             )
-            df = self.converter.values_to_df(values)
-
-            if not df.empty:
-                # 检查是否包含有效数据（至少有一行数据包含非空值）
-                has_valid_data = False
-                for _, row in df.iterrows():
-                    if any(pd.notnull(val) and str(val).strip() != "" for val in row):
-                        has_valid_data = True
-                        break
-
-                if has_valid_data:
-                    self.logger.info(
-                        f"成功获取电子表格数据: {len(df)} 行 x {len(df.columns)} 列 (从 {start_cell} 开始)"
-                    )
-                    return df
-
-            # 如果df为空或数据全为空，说明表格在指定范围确实是空的
-            self.logger.info(f"在范围 {read_range} 内未找到有效数据，视为空表")
-            return pd.DataFrame()
+            df = self._store_sheet_read(values)
+            self.logger.info(f"读取电子表格: {len(df)} 行 x {len(df.columns)} 列")
+            return df
 
         except Exception as e:
             self._sheet_read_complete = False
+            if (
+                self._is_auth_error(e)
+                or self._is_resource_error(e)
+                or isinstance(e, ValueError)
+            ):
+                raise
             self.logger.warning(f"尝试从范围 {read_range} 读取数据失败: {e}")
             self.logger.warning("无法完整获取电子表格数据；依赖远端现状的同步将停止")
             return pd.DataFrame()
@@ -1239,127 +1471,107 @@ class SyncService:
         )
         return False
 
+    def _store_sheet_read(self, values, formula_values=None) -> pd.DataFrame:
+        """Keep raw cells and a shared coordinate map for both render modes."""
+        self._last_sheet_values = tuple(tuple(row) for row in values)
+        self._last_sheet_formula_values = (
+            tuple(tuple(row) for row in formula_values)
+            if formula_values is not None
+            else None
+        )
+        occupied_values = values
+        if formula_values is not None:
+            if len(values) != len(formula_values):
+                raise RuntimeError(
+                    "Sheet Formula/FormattedValue 两次读取的行范围不一致"
+                )
+            if values and formula_values and values[0] != formula_values[0]:
+                raise RuntimeError("Sheet Formula/FormattedValue 两次读取的表头不一致")
+            occupied_values = []
+            for row, formulas in zip(values, formula_values):
+                width = max(len(row), len(formulas))
+                occupied_values.append(
+                    [
+                        (
+                            formulas[idx]
+                            if idx < len(formulas)
+                            and not self.converter._is_empty_value(formulas[idx])
+                            else row[idx] if idx < len(row) else None
+                        )
+                        for idx in range(width)
+                    ]
+                )
+        layout = self.converter.build_sheet_layout(
+            occupied_values,
+            start_row=self._sheet_target().start_row,
+            start_column=self.converter.column_letter_to_number(
+                self._sheet_target().start_column
+            ),
+        )
+        self._last_sheet_layout = layout
+        return self.converter.values_to_df(values, layout=layout)
+
     def get_sheet_data_with_validation(
         self,
     ) -> tuple[pd.DataFrame, Optional[pd.DataFrame], Optional[set]]:
-        """
-        获取电子表格数据（支持双读用于结果检测）
-
-        Returns:
-            (result_df, formula_df, formula_columns):
-            - result_df: 计算结果数据（用于比较）
-            - formula_df: 公式数据（仅在启用 validate_results 时返回）
-            - formula_columns: 包含公式的列集合（列名）
-        """
+        """Read Formula and FormattedValue against the same physical grid."""
         if not self._sheet_target().validate_results:
-            # 未启用检测，使用原有单次读取逻辑
             return self.get_current_sheet_data(), None, None
-
-        # 启用检测，执行双读
+        self._sheet_read_complete = False
+        self._last_sheet_layout = None
+        self._last_sheet_values = None
+        self._last_sheet_formula_values = None
         if not isinstance(self.api, SheetAPI):
-            return pd.DataFrame(), None, None
-
-        if (
-            not self._sheet_target().spreadsheet_token
-            or not self._sheet_target().sheet_id
-        ):
-            return pd.DataFrame(), None, None
-
-        # 获取网格范围
+            raise RuntimeError("Sheet 双读缺少可用客户端")
+        target = self._sheet_target()
         grid = self._get_sheet_grid_properties()
-        if not grid:
-            self.logger.warning("无法获取工作表网格属性，无法进行双读")
-            return self.get_current_sheet_data(), None, None
-
+        if not grid or not target.spreadsheet_token or not target.sheet_id:
+            raise RuntimeError("无法获取 Sheet 双读范围")
         row_count, col_count = grid
-        start_col_num = self.api.column_letter_to_number(
-            self._sheet_target().start_column
-        )
-        if row_count < self._sheet_target().start_row or col_count < start_col_num:
-            self.logger.info("工作表范围小于起始位置，视为空表")
-            return pd.DataFrame(), None, None
-
-        end_row = row_count
+        start_col = self.converter.column_letter_to_number(target.start_column)
+        if row_count < target.start_row or col_count < start_col:
+            raise ValueError("Sheet 起始位置超出工作表网格")
         end_col = self.api.column_number_to_letter(col_count)
-
-        self.logger.info("🔍 启用结果检测，开始双读云端数据...")
-
-        # 第一次读取：公式模式
-        self.logger.info("  📖 读取公式数据...")
-        original_value_option = self._sheet_target().value_render_option
-        original_datetime_option = self._sheet_target().datetime_render_option
-        original_api_value_option = self.api.value_render_option
-        original_api_datetime_option = self.api.datetime_render_option
-        self._last_sheet_read_range = (
-            f"{self._sheet_target().sheet_id}!{self._sheet_target().start_column}{self._sheet_target().start_row}:"
-            f"{end_col}{end_row}"
-        )
+        self._last_sheet_read_range = f"{target.sheet_id}!{target.start_column}{target.start_row}:{end_col}{row_count}"
+        original_value = self.api.value_render_option
+        original_datetime = self.api.datetime_render_option
         try:
-            # 强制使用 Formula 模式读取
             self.api.value_render_option = "Formula"
             self.api.datetime_render_option = None
-
             formula_values = self.api.get_sheet_data_chunked(
-                self._sheet_target().spreadsheet_token,
-                self._sheet_target().sheet_id,
-                self._sheet_target().start_row,
-                end_row,
-                self._sheet_target().start_column,
+                target.spreadsheet_token,
+                target.sheet_id,
+                target.start_row,
+                row_count,
+                target.start_column,
                 end_col,
             )
-            formula_df = self.converter.values_to_df(formula_values)
-
-        except Exception as e:
-            self.logger.warning(f"读取公式数据失败: {e}")
-            return self.get_current_sheet_data(), None, None
-        finally:
-            self.api.value_render_option = original_api_value_option
-            self.api.datetime_render_option = original_api_datetime_option
-
-        # 第二次读取：结果模式
-        self.logger.info("  📊 读取计算结果数据...")
-        try:
-            # 使用配置的读取选项（或 FormattedValue 作为默认）
-            self.api.value_render_option = original_value_option or "FormattedValue"
+            self.api.value_render_option = "FormattedValue"
             self.api.datetime_render_option = (
-                original_datetime_option or "FormattedString"
+                target.datetime_render_option or "FormattedString"
             )
-
-            result_values = self.api.get_sheet_data_chunked(
-                self._sheet_target().spreadsheet_token,
-                self._sheet_target().sheet_id,
-                self._sheet_target().start_row,
-                end_row,
-                self._sheet_target().start_column,
+            values = self.api.get_sheet_data_chunked(
+                target.spreadsheet_token,
+                target.sheet_id,
+                target.start_row,
+                row_count,
+                target.start_column,
                 end_col,
             )
-            result_df = self.converter.values_to_df(result_values)
-
-        except Exception as e:
-            self.logger.warning(f"读取结果数据失败: {e}")
-            return self.get_current_sheet_data(), None, None
         finally:
-            self.api.value_render_option = original_api_value_option
-            self.api.datetime_render_option = original_api_datetime_option
-
-        # 识别公式列
-        if formula_df.empty:
-            formula_columns = set()
-        else:
-            # 转换为二维列表用于识别
-            formula_data = [formula_df.columns.tolist()] + formula_df.values.tolist()
-            formula_columns = set(
-                str(col)
-                for col in self.api.identify_formula_columns(
-                    formula_data, headers=formula_df.columns.tolist()
-                )
+            self.api.value_render_option = original_value
+            self.api.datetime_render_option = original_datetime
+        result_df = self._store_sheet_read(values, formula_values)
+        formula_df = self.converter.values_to_df(
+            formula_values, layout=self._last_sheet_layout
+        )
+        formula_columns = set(
+            self.api.identify_formula_columns(
+                [formula_df.columns.tolist()] + formula_df.values.tolist(),
+                headers=formula_df.columns.tolist(),
             )
-
-        if formula_columns:
-            self.logger.info(f"  🔒 识别到公式列: {sorted(formula_columns)}")
-        else:
-            self.logger.info("  ℹ️  未识别到公式列")
-
+        )
+        self._sheet_read_complete = True
         return result_df, formula_df, formula_columns
 
     def _get_effective_selective_columns(self, df: pd.DataFrame) -> List[str]:
@@ -1670,7 +1882,12 @@ class SyncService:
                     "backend": snapshot.backend.value,
                     "revision": snapshot.revision,
                     "fingerprint": snapshot.fingerprint,
-                    "index_column": self.sync_config.index.column,
+                    "index_column": (
+                        None
+                        if effective_mode is SyncMode.CLONE
+                        else self.sync_config.index.column
+                    ),
+                    "clone": effective_mode is SyncMode.CLONE,
                 }
                 index_schema = next(
                     (
@@ -1680,7 +1897,7 @@ class SyncService:
                     ),
                     None,
                 )
-                if index_schema is not None:
+                if index_schema is not None and effective_mode is not SyncMode.CLONE:
                     record_keys = {
                         record.record_id: key
                         for record in snapshot.records
@@ -1764,7 +1981,8 @@ class SyncService:
         actions = self._attach_snapshot_preconditions(actions, effective_mode)
         plan_warnings = list(warnings or ())
         plan_warnings.extend(self.converter.consume_key_warnings())
-        return ExecutionPlan(
+        plan = ExecutionPlan(
+            bitable_fields=getattr(self, "_planned_bitable_fields", ()),
             requested_mode=requested_mode.value,
             effective_mode=effective_mode.value,
             source=source,
@@ -1779,17 +1997,69 @@ class SyncService:
             config_sources=self._plan_config_sources(),
         )
 
+        self._preflight_plan(plan)
+        return plan
+
+    def _preflight_plan(self, plan: ExecutionPlan) -> None:
+        """Validate the entire payload before field creation, deletion, or data writes."""
+        import json
+
+        for action in plan.actions:
+            if isinstance(action, CreateFieldAction):
+                if action.suggested_type not in {1, 2, 3, 4, 5, 7}:
+                    raise ValueError(f"字段 {action.field_name!r} 不能自动创建为此类型")
+            elif isinstance(action, (CreateRecordsAction, UpdateRecordsAction)):
+                if isinstance(action, UpdateRecordsAction):
+                    ids = [record.record_id for record in action.records]
+                    if any(
+                        not isinstance(rid, str) or not rid.strip() for rid in ids
+                    ) or len(ids) != len(set(ids)):
+                        raise ValueError("待更新记录 ID 为空或重复；未发送写请求")
+                self._bitable_backend().validate_records(
+                    action.records, plan.bitable_fields
+                )
+            elif isinstance(action, DeleteRecordsAction):
+                if len(action.record_ids) != len(set(action.record_ids)) or any(
+                    not rid for rid in action.record_ids
+                ):
+                    raise ValueError("待删除记录 ID 为空或重复")
+            elif isinstance(action, ClearRangeAction):
+                A1Range.parse(action.a1_range)
+            elif isinstance(action, (WriteRangeAction, AppendRowsAction)):
+                width = len(action.values[0]) if action.values else 0
+                if not width or any(len(row) != width for row in action.values):
+                    raise ValueError("Sheet 待写数据必须为非空等宽矩阵")
+                json.dumps(action.values, allow_nan=False)
+            elif isinstance(action, WriteColumnsAction):
+                lengths = {len(column) for column in action.column_data.values()}
+                if not lengths or 0 in lengths or len(lengths) != 1:
+                    raise ValueError("Sheet 待写列的长度必须相同且非空")
+                positions = [
+                    action.column_positions.get(name) for name in action.column_data
+                ]
+                if len(set(positions)) != len(positions) or any(
+                    not isinstance(pos, int) or pos < 1 for pos in positions
+                ):
+                    raise ValueError("Sheet 待写列物理位置缺失或重复")
+                json.dumps(dict(action.column_data), allow_nan=False)
+
     def _row_to_canonical_fields(
         self, row: pd.Series, field_types: Mapping[str, FieldSchema]
     ) -> Dict[str, Any]:
         fields: Dict[str, Any] = {}
+        index_column = self.sync_config.index.column
+        schemas = field_types if isinstance(field_types, dict) else dict(field_types)
         for raw_name, value in row.to_dict().items():
             name = str(raw_name)
             if self.converter._is_empty_value(value):
                 continue
-            converted = self.converter.convert_field_value_safe(
-                name, value, dict(field_types)
-            )
+            # Use strict canonical key conversion for the index column.
+            if index_column and name == index_column:
+                converted = self.converter.convert_strict_key_value(
+                    value, name, schemas
+                )
+            else:
+                converted = self.converter.convert_write_value(name, value, schemas)
             if converted is not None:
                 fields[name] = converted
         return fields
@@ -1833,11 +2103,24 @@ class SyncService:
                 allow_empty=False,
                 context=f"本地数据索引列 '{index_column}' ",
             )
+            # Strict canonical key pre-flight: every source row's index value
+            # must be losslessly convertible.  Failure here stops the plan
+            # before any mutation actions are generated.
+            for pos, (_, row) in enumerate(df.iterrows(), start=1):
+                if index_column in row:
+                    try:
+                        self.converter.convert_strict_key_value(
+                            row[index_column], index_column, field_types
+                        )
+                    except ValueError as exc:
+                        raise ValueError(
+                            f"本地数据第 {pos} 条记录的索引列 '{index_column}' 无效: {exc}"
+                        ) from exc
 
         creates: List[CanonicalRecord] = []
         updates: List[CanonicalRecord] = []
         deletes: List[str] = []
-        source_rows = tuple(row for _, row in df.iterrows())
+        source_rows = (row for _, row in df.iterrows())
         reconciliation = (
             Reconciler.by_key(
                 source_rows,
@@ -1856,13 +2139,15 @@ class SyncService:
                 for record in existing_records
                 if record.get("record_id")
             ]
-            creates = self._canonical_records(
-                self.converter.df_to_records(df, field_types)
-            )
+            creates = [
+                CanonicalRecord(None, self._row_to_canonical_fields(row, field_types))
+                for _, row in df.iterrows()
+            ]
         elif match_strategy is MatchStrategy.APPEND_ONLY:
-            creates = self._canonical_records(
-                self.converter.df_to_records(df, field_types)
-            )
+            creates = [
+                CanonicalRecord(None, self._row_to_canonical_fields(row, field_types))
+                for _, row in df.iterrows()
+            ]
         elif mode is SyncMode.OVERWRITE:
             if not index_column:
                 raise ValueError("覆盖同步模式需要指定索引列")
@@ -1871,9 +2156,10 @@ class SyncService:
                 record_id = target_record.get("record_id")
                 if record_id:
                     deletes.append(str(record_id))
-            creates = self._canonical_records(
-                self.converter.df_to_records(df, field_types)
-            )
+            creates = [
+                CanonicalRecord(None, self._row_to_canonical_fields(row, field_types))
+                for _, row in df.iterrows()
+            ]
         else:
             assert reconciliation is not None
             if mode is SyncMode.FULL:
@@ -1927,17 +2213,124 @@ class SyncService:
 
     def _sheet_write_action(self, df: pd.DataFrame) -> WriteRangeAction:
         values = self.converter.df_to_values(df)
+        from api.sheet import RangeChunker
+
+        RangeChunker.copy_matrix(values)
+        A1Range(
+            str(self._sheet_target().sheet_id),
+            self._sheet_target().start_row,
+            self._sheet_target().start_row + len(values) - 1,
+            self.converter.column_letter_to_number(self._sheet_target().start_column),
+            self.converter.column_letter_to_number(self._sheet_target().start_column)
+            + len(values[0])
+            - 1,
+        )
         return SheetPlanCompiler.write(
             values,
             scope={"target": "sheet", "columns": len(df.columns)},
         )
 
-    def _sheet_append_action(self, df: pd.DataFrame) -> AppendRowsAction:
-        values = self.converter.df_to_values(df, include_headers=False)
-        return SheetPlanCompiler.append(
-            values,
-            header_width=len(df.columns),
-            scope={"target": "sheet", "columns": len(df.columns)},
+    def _read_sheet_header(self) -> Optional[List[str]]:
+        frame = self.get_current_sheet_data()
+        if not self._require_complete_sheet_read("Sheet 表头读取"):
+            raise RuntimeError("无法完整读取目标 Sheet 表头")
+        return [str(column) for column in frame.columns] or None
+
+    def _sheet_column_positions(
+        self, frame: pd.DataFrame, columns: List[str]
+    ) -> Dict[str, int]:
+        missing = [column for column in columns if column not in frame.columns]
+        if missing:
+            raise ValueError(f"源数据列 {missing} 不存在于目标 Sheet header 中")
+        layout = getattr(self, "_last_sheet_layout", None)
+        if layout is not None:
+            return {column: layout.header_to_physical_col[column] for column in columns}
+        offset = (
+            self.converter.column_letter_to_number(self._sheet_target().start_column)
+            - 1
+        )
+        return self.converter.get_column_positions(frame, columns, offset)
+
+    def _build_aligned_append_actions(
+        self,
+        df: pd.DataFrame,
+        target_header: Optional[List[str]],
+        source: Mapping[str, Any],
+        target: Mapping[str, Any],
+    ) -> List[ExecutionAction]:
+        """Build append actions aligned to the target header.
+
+        For empty targets, writes header + data.  For non-empty targets,
+        projects source values to target header order.
+        """
+        source_columns = [str(c) for c in df.columns]
+
+        if target_header is None:
+            # Empty target: validate source columns are unique, write header + data
+            if len(set(source_columns)) != len(source_columns):
+                raise ValueError("源数据列名重复，无法作为 Sheet header 写入")
+            values = self.converter.df_to_values(df, include_headers=True)
+            return [
+                SheetPlanCompiler.write(
+                    values,
+                    scope={"target": "sheet", "columns": len(source_columns)},
+                )
+            ]
+
+        # Validate target header
+        if len(set(target_header)) != len(target_header):
+            raise ValueError("目标 Sheet header 包含重复列名")
+        index_col = self.sync_config.index.column
+        if index_col and index_col not in target_header:
+            raise ValueError(f"目标 Sheet header 缺少索引列 '{index_col}'")
+
+        # Check for source columns not in target
+        extra = [c for c in source_columns if c not in target_header]
+        if extra:
+            raise ValueError(f"源数据列 {extra} 不存在于目标 Sheet header 中")
+
+        # Project onto physical positions, including unnamed header gaps.
+        positions = self._sheet_column_positions(
+            pd.DataFrame(columns=target_header), target_header
+        )
+        start_col = self.converter.column_letter_to_number(
+            self._sheet_target().start_column
+        )
+        width = max(positions.values()) - start_col + 1
+        values = []
+        for row in df.to_dict(orient="records"):
+            projected = [""] * width
+            for column in target_header:
+                projected[positions[column] - start_col] = (
+                    self.converter.simple_convert_value(row.get(column))
+                )
+            values.append(projected)
+        layout = getattr(self, "_last_sheet_layout", None)
+        return [
+            SheetPlanCompiler.append(
+                values,
+                header_width=width,
+                start_row=(
+                    max(
+                        layout.physical_row_numbers,
+                        default=self._sheet_target().start_row,
+                    )
+                    + 1
+                    if layout is not None
+                    else self._sheet_target().start_row + 1
+                ),
+                scope={"target": "sheet", "columns": width},
+            )
+        ]
+
+    def _sheet_physical_width(
+        self, current_df: pd.DataFrame, columns: Sequence[str]
+    ) -> int:
+        layout = getattr(self, "_last_sheet_layout", None)
+        return (
+            layout.raw_width
+            if layout is not None
+            else len(current_df.columns) or len(columns)
         )
 
     def _sheet_columns_action(
@@ -1967,12 +2360,7 @@ class SyncService:
                 column_data[column] = values
         else:
             column_data = self.converter.df_to_column_data(df, columns)
-        start_col_offset = (
-            self.api.start_col_num - 1 if isinstance(self.api, SheetAPI) else 0
-        )
-        positions = self.converter.get_column_positions(
-            current_df, columns, start_col_offset
-        )
+        positions = self._sheet_column_positions(current_df, columns)
         max_gap = (
             self.sync_config.selective.max_gap_for_merge
             if self.sync_config.selective.optimize_ranges
@@ -1983,7 +2371,7 @@ class SyncService:
             column_positions=dict(positions),
             start_row=start_row,
             max_gap=max_gap,
-            header_width=len(current_df.columns) or len(columns),
+            header_width=self._sheet_physical_width(current_df, columns),
             scope={
                 "target": "sheet",
                 "columns": len(columns),
@@ -2007,7 +2395,11 @@ class SyncService:
         current_index: Mapping[str, int],
         index_field_types: Mapping[str, Any],
     ) -> List[ExecutionAction]:
-        update_data_map: Dict[int, Dict[str, Any]] = {}
+        if len(current_df.columns) == 0:
+            if df.empty:
+                return []
+            return self._build_aligned_append_actions(df, None, {}, {})
+        self._sheet_column_positions(current_df, columns)
         reconciliation = Reconciler.by_key(
             (row for _, row in df.iterrows()),
             current_index,
@@ -2015,35 +2407,106 @@ class SyncService:
                 row, self.sync_config.index.column, dict(index_field_types)
             ),
         )
-        if mode in {SyncMode.FULL, SyncMode.OVERWRITE}:
-            for _, row, row_index in reconciliation.matched:
-                update_data_map[row_index] = {
-                    column: row[column] for column in columns if column in row
-                }
+
+        # --- physical row mapping ---
+        layout = getattr(self, "_last_sheet_layout", None)
+        physical_rows = layout.physical_row_numbers if layout else None
 
         actions: List[ExecutionAction] = []
-        if update_data_map:
-            action = self._sheet_columns_action(
-                df,
-                current_df,
-                columns,
-                start_row=self._sheet_target().start_row + 1,
-                preserve_rows=True,
-                update_data_map=update_data_map,
+
+        # --- matched-row patches (FULL / OVERWRITE) ---
+        if mode in {SyncMode.FULL, SyncMode.OVERWRITE} and reconciliation.matched:
+            # Build (physical_row, update_values) pairs
+            patched: List[tuple] = []
+            for _, row, logical_idx in reconciliation.matched:
+                phys = (
+                    physical_rows[logical_idx]
+                    if physical_rows and logical_idx < len(physical_rows)
+                    else self._sheet_target().start_row + 1 + logical_idx
+                )
+                patched.append(
+                    (
+                        phys,
+                        {col: row[col] for col in columns if col in row},
+                    )
+                )
+
+            # Group contiguous physical rows into one WriteColumnsAction
+            patched.sort(key=lambda pair: pair[0])
+            groups: List[List[tuple]] = []
+            cur: List[tuple] = []
+            max_gap = (
+                self.sync_config.selective.max_gap_for_merge
+                if self.sync_config.selective.optimize_ranges
+                else 0
             )
-            if action:
+            for pair in patched:
+                # Row gaps are never merged: the matrix has no rows for them.
+                if cur and pair[0] != cur[-1][0] + 1:
+                    groups.append(cur)
+                    cur = []
+                cur.append(pair)
+            if cur:
+                groups.append(cur)
+
+            positions = self._sheet_column_positions(current_df, columns)
+            header_width = self._sheet_physical_width(current_df, columns)
+
+            for group in groups:
+                group_rows = [p[0] for p in group]
+                col_data: Dict[str, list] = {}
+                for col in columns:
+                    col_data[col] = [
+                        self.converter.simple_convert_value(p[1].get(col, ""))
+                        for p in group
+                    ]
+                action = SheetPlanCompiler.columns(
+                    column_data={n: tuple(v) for n, v in col_data.items()},
+                    column_positions=dict(positions),
+                    start_row=group_rows[0],
+                    max_gap=max_gap,
+                    header_width=header_width,
+                    scope={
+                        "target": "sheet",
+                        "columns": len(columns),
+                        "affected_rows": len(group),
+                        "physical_rows": group_rows,
+                    },
+                    clears_values=any(
+                        self.converter._is_empty_value(val)
+                        for vals in col_data.values()
+                        for val in vals
+                    ),
+                )
                 actions.append(action)
+
+        # --- missing-row appends ---
         if reconciliation.missing:
             new_df = pd.DataFrame(reconciliation.missing)
-            action = self._sheet_columns_action(
-                new_df,
-                current_df,
-                columns,
-                start_row=self._sheet_target().start_row + len(current_df) + 1,
-                preserve_rows=False,
-            )
-            if action:
-                actions.append(action)
+            if self.sync_config.selective.enabled or (
+                mode is SyncMode.FULL and self._sheet_target().protect_formulas
+            ):
+                # Selective mode uses column writes for new rows.
+                append_start = (
+                    (physical_rows[-1] + 1)
+                    if physical_rows
+                    else self._sheet_target().start_row + len(current_df) + 1
+                )
+                col_action = self._sheet_columns_action(
+                    new_df,
+                    current_df,
+                    columns,
+                    start_row=append_start,
+                    preserve_rows=False,
+                )
+                if col_action:
+                    actions.append(col_action)
+            else:
+                actions.extend(
+                    self._build_aligned_append_actions(
+                        new_df, list(current_df.columns) or None, {}, {}
+                    )
+                )
         return actions
 
     def _sheet_index_field_types(
@@ -2135,6 +2598,9 @@ class SyncService:
             index_mapping=index_mapping,
             formula_columns=tuple(str(item) for item in (formula_columns or ())),
             complete=getattr(self, "_sheet_read_complete", True),
+            layout=getattr(self, "_last_sheet_layout", None),
+            raw_values=getattr(self, "_last_sheet_values", None),
+            formula_values=getattr(self, "_last_sheet_formula_values", None),
         )
         self._planned_target_snapshot = snapshot
         return snapshot
@@ -2146,7 +2612,33 @@ class SyncService:
         warnings: List[str] = []
         actions: List[ExecutionAction]
         if self.sync_config.match_strategy is MatchStrategy.APPEND_ONLY:
-            actions = [self._sheet_append_action(df)] if not df.empty else []
+            if df.empty:
+                return self._make_plan(
+                    requested_mode=requested_mode,
+                    effective_mode=requested_mode,
+                    source=source,
+                    target=target,
+                    actions=[],
+                )
+            # Read target header to align append payload.
+            target_header = self._read_sheet_header()
+            self._capture_sheet_snapshot(
+                (
+                    self.converter.values_to_df(
+                        [
+                            list(row)
+                            for row in getattr(self, "_last_sheet_values", ()) or ()
+                        ],
+                        layout=getattr(self, "_last_sheet_layout", None),
+                    )
+                    if getattr(self, "_last_sheet_values", None) is not None
+                    else pd.DataFrame(columns=target_header or ())
+                ),
+                index_mapping={},
+            )
+            actions = self._build_aligned_append_actions(
+                df, target_header, source, target
+            )
             return self._make_plan(
                 requested_mode=requested_mode,
                 effective_mode=requested_mode,
@@ -2168,8 +2660,15 @@ class SyncService:
         )
 
         if requested_mode is SyncMode.CLONE:
-            actions = [self._sheet_clear_action(), self._sheet_write_action(df)]
-            actions.append(SheetPlanCompiler.enrichment(df))
+            # DEC-001: empty source clone = clear-only, no degenerate write.
+            if df.empty:
+                actions = [self._sheet_clear_action()]
+            else:
+                actions = [
+                    self._sheet_clear_action(),
+                    self._sheet_write_action(df),
+                ]
+                actions.append(SheetPlanCompiler.enrichment(df))
             return self._make_plan(
                 requested_mode=requested_mode,
                 effective_mode=SyncMode.CLONE,
@@ -2249,26 +2748,69 @@ class SyncService:
                 ),
             )
             matched_rows = {row_index for _, _, row_index in reconciliation.matched}
-            rows = [
-                row
-                for row_index, row in current_df.iterrows()
-                if row_index not in matched_rows
-            ]
-            rows.extend(row for _, row in sync_df.iterrows())
-            merged = pd.DataFrame(rows)
-            actions = (
-                [self._sheet_write_action(merged)]
-                if not merged.empty
-                else [self._sheet_clear_action()]
-            )
-            first = actions[0]
-            if isinstance(first, WriteRangeAction):
-                actions[0] = SheetPlanCompiler.write(
-                    first.values,
-                    scope=first.scope,
-                    destructive=True,
-                    clears_values=True,
+            layout = getattr(self, "_last_sheet_layout", None)
+            raw_values = getattr(self, "_last_sheet_values", None)
+            if layout is not None and raw_values is not None:
+                positions = self._sheet_column_positions(
+                    current_df, list(sync_df.columns)
                 )
+                width = layout.raw_width
+                matched_physical = {
+                    layout.physical_row_for_logical(pos) for pos in matched_rows
+                }
+                last_row = max(layout.physical_row_numbers, default=layout.start_row)
+                values = []
+                for offset, raw_row in enumerate(
+                    raw_values[: last_row - layout.start_row + 1]
+                ):
+                    if layout.start_row + offset in matched_physical:
+                        continue
+                    row_values = list(raw_row[:width])
+                    values.append(row_values + [""] * (width - len(row_values)))
+                for row in sync_df.to_dict(orient="records"):
+                    projected = [""] * width
+                    for column, value in row.items():
+                        projected[positions[column] - layout.start_column] = (
+                            self.converter.simple_convert_value(value)
+                        )
+                    values.append(projected)
+                actions = [
+                    SheetPlanCompiler.write(
+                        values,
+                        scope={"target": "sheet", "columns": width},
+                        destructive=True,
+                        clears_values=True,
+                    )
+                ]
+            else:
+                # Empty target (or a non-network adapter without physical metadata).
+                if current_df.empty:
+                    actions = (
+                        self._build_aligned_append_actions(
+                            sync_df,
+                            list(current_df.columns) or None,
+                            source,
+                            target,
+                        )
+                        if not sync_df.empty
+                        else []
+                    )
+                else:
+                    rows = [
+                        row
+                        for row_index, row in current_df.iterrows()
+                        if row_index not in matched_rows
+                    ]
+                    rows.extend(row for _, row in sync_df.iterrows())
+                    actions = [self._sheet_write_action(pd.DataFrame(rows))]
+                if actions and isinstance(actions[0], WriteRangeAction):
+                    first = actions[0]
+                    actions[0] = SheetPlanCompiler.write(
+                        first.values,
+                        scope=first.scope,
+                        destructive=True,
+                        clears_values=True,
+                    )
             return self._make_plan(
                 requested_mode=requested_mode,
                 effective_mode=requested_mode,
@@ -2277,28 +2819,17 @@ class SyncService:
                 actions=actions,
             )
 
-        reconciliation = Reconciler.by_key(
-            (row for _, row in sync_df.iterrows()),
+        # For FULL mode without formula protection and without selective,
+        # route through _plan_sheet_selective to preserve physical row layout.
+        full_columns = list(sync_df.columns)
+        actions = self._plan_sheet_selective(
+            sync_df,
+            current_df,
+            requested_mode,
+            full_columns,
             current_index,
-            source_key=lambda row: self.converter.get_index_value_hash(
-                row, self.sync_config.index.column, index_field_types
-            ),
+            index_field_types,
         )
-
-        actions = []
-        if requested_mode is SyncMode.FULL and reconciliation.matched:
-            updated = current_df.copy()
-            for _, row, row_index in reconciliation.matched:
-                for column in sync_df.columns:
-                    if column in updated.columns:
-                        updated.iloc[row_index, updated.columns.get_loc(column)] = row[
-                            column
-                        ]
-            actions.append(self._sheet_write_action(updated))
-        if reconciliation.missing:
-            actions.append(
-                self._sheet_append_action(pd.DataFrame(reconciliation.missing))
-            )
         return self._make_plan(
             requested_mode=requested_mode,
             effective_mode=requested_mode,
@@ -2310,7 +2841,13 @@ class SyncService:
     def plan(self, df: Optional[pd.DataFrame] = None) -> ExecutionPlan:
         """Build a complete mutation plan using reads and local classification only."""
         self._planned_target_snapshot = None
+        self._planned_bitable_fields = ()
         self._planned_bitable_schema_fingerprint = None
+        self._last_sheet_layout = None
+        self._last_sheet_values = None
+        self._last_sheet_formula_values = None
+        self._sheet_grid_cache = None
+        self._sheet_grid_cache_key = None
         self._mode_decision = ModePolicy.decide(
             mode=self.sync_config.mode,
             strategy=self.sync_config.match_strategy,
@@ -2339,7 +2876,10 @@ class SyncService:
         if not self._bitable_target().app_token or not self._bitable_target().table_id:
             raise RuntimeError("目标 Bitable 配置不完整")
         field_names = (
-            [self.sync_config.index.column] if self.sync_config.index.column else None
+            [self.sync_config.index.column]
+            if self.sync_config.index.column
+            and self.sync_config.mode is not SyncMode.CLONE
+            else None
         )
         result = self._bitable_backend().list_records(
             self._bitable_target().app_token,
@@ -2368,7 +2908,10 @@ class SyncService:
         }
 
     def _current_sheet_snapshot(self) -> SheetSnapshot:
-        frame = self.get_current_sheet_data()
+        # Re-read grid metadata as rows/columns can have been inserted since plan.
+        self._sheet_grid_cache = None
+        self._sheet_grid_cache_key = None
+        frame, _, formula_columns = self.get_sheet_data_with_validation()
         if not self._require_complete_sheet_read("snapshot freshness"):
             raise RuntimeError("目标 Sheet freshness read 不完整")
         mapping: Mapping[str, int] = {}
@@ -2390,7 +2933,11 @@ class SyncService:
             actual_ranges=((read_range,) if read_range else ()),
             grid=getattr(self, "_sheet_grid_cache", None),
             index_mapping=mapping,
+            formula_columns=tuple(str(item) for item in (formula_columns or ())),
             complete=True,
+            layout=getattr(self, "_last_sheet_layout", None),
+            raw_values=getattr(self, "_last_sheet_values", None),
+            formula_values=getattr(self, "_last_sheet_formula_values", None),
         )
 
     def _check_action_precondition(self, action: ExecutionAction) -> bool:
@@ -2464,8 +3011,10 @@ class SyncService:
                         }
                         if desired & set(current_keys.values()):
                             raise RuntimeError("目标 Bitable 已出现计划创建的 key")
-                elif self._expected_bitable_snapshot is None and (
-                    current.fingerprint != precondition.expected.get("fingerprint")
+                elif current.fingerprint != (
+                    self._expected_bitable_snapshot.fingerprint
+                    if self._expected_bitable_snapshot is not None
+                    else precondition.expected.get("fingerprint")
                 ):
                     raise RuntimeError("目标 Bitable 内容在计划后发生变化")
                 self._expected_bitable_snapshot = current
@@ -2495,6 +3044,16 @@ class SyncService:
                         raise RuntimeError(
                             "目标 Sheet header 或 key-row mapping 已漂移"
                         )
+                    expected_fingerprint = (
+                        baseline.content_fingerprint
+                        if baseline is not None
+                        else precondition.expected.get("fingerprint")
+                    )
+                    if (
+                        expected_fingerprint is not None
+                        and current_sheet.content_fingerprint != expected_fingerprint
+                    ):
+                        raise RuntimeError("目标 Sheet 待写范围的内容或物理位置已变化")
                 else:
                     expected_fingerprint = (
                         baseline.content_fingerprint
@@ -2506,16 +3065,69 @@ class SyncService:
                 self._expected_sheet_snapshot = current_sheet
                 return True
         except Exception as error:
-            self._last_action_error_kind = ErrorKind.STALE_SNAPSHOT
+            self._last_action_error_kind = (
+                ErrorKind.AUTH
+                if self._is_auth_error(error)
+                else (
+                    ErrorKind.RESOURCE
+                    if self._is_resource_error(error)
+                    else ErrorKind.STALE_SNAPSHOT
+                )
+            )
             self._last_action_failure_message = str(error)
             return False
         return True
+
+    def _check_sheet_unmodified_cells(
+        self, before: SheetSnapshot, after: SheetSnapshot
+    ) -> None:
+        """Do not adopt unrelated concurrent changes as the next action's baseline."""
+        if (
+            before.raw_values is None
+            or after.raw_values is None
+            or before.layout is None
+        ):
+            return
+        from itertools import zip_longest
+
+        formula_positions = {
+            before.layout.header_to_physical_col[name]
+            for name in before.formula_columns
+            if name in before.layout.header_to_physical_col
+        }
+        ranges = self._last_action_actual_ranges
+        for offset, (old_row, new_row) in enumerate(
+            zip_longest(before.raw_values, after.raw_values, fillvalue=())
+        ):
+            if old_row == new_row:
+                continue
+            row = before.layout.start_row + offset
+            row_ranges = [
+                item for item in ranges if item.start_row <= row <= item.end_row
+            ]
+            for col_offset, (old, new) in enumerate(
+                zip_longest(old_row, new_row, fillvalue=None)
+            ):
+                col = before.layout.start_column + col_offset
+                if col in formula_positions or any(
+                    item.start_col <= col <= item.end_col for item in row_ranges
+                ):
+                    continue
+                if self.converter._is_empty_value(
+                    old
+                ) and self.converter._is_empty_value(new):
+                    continue
+                if old != new:
+                    raise RuntimeError(
+                        f"Sheet 本次写入范围外的单元格发生变化: row={row}, column={col}"
+                    )
 
     def _advance_snapshot_after_mutation(self, action: ExecutionAction) -> bool:
         precondition = action.precondition
         if precondition is None:
             return True
-        try:
+
+        def advance() -> bool:
             if precondition.kind == "bitable_schema":
                 fields = tuple(
                     self._bitable_backend().list_fields(
@@ -2526,9 +3138,7 @@ class SyncService:
                 if isinstance(action, CreateFieldAction) and not any(
                     field.name == action.field_name for field in fields
                 ):
-                    raise RuntimeError(
-                        f"字段 '{action.field_name}' 创建后未出现在服务端 schema 中"
-                    )
+                    return False
                 self._expected_bitable_schema_fingerprint = self._schema_fingerprint(
                     fields
                 )
@@ -2539,14 +3149,70 @@ class SyncService:
                     and self._last_action_revision is not None
                     and current.revision != self._last_action_revision
                 ):
-                    raise RuntimeError(
-                        "mutation receipt revision 与后续 Base readback 不一致"
-                    )
+                    expected_rev = self._last_action_revision
+                    if (
+                        isinstance(expected_rev, int)
+                        and isinstance(current.revision, int)
+                        and current.revision > expected_rev
+                    ):
+                        raise RuntimeError("写入后目标版本再次变化，请读取最新状态")
+                    # Opaque revisions cannot be ordered: an intermediate batch
+                    # revision may still be propagating. Never adopt it as current.
+                    return False
+                previous = self._expected_bitable_snapshot
+                if isinstance(action, DeleteRecordsAction) and previous is not None:
+                    expected_ids = {
+                        record.record_id for record in previous.records
+                    } - set(action.record_ids)
+                    actual_ids = {record.record_id for record in current.records}
+                    if (
+                        not expected_ids <= actual_ids
+                        or actual_ids - expected_ids - set(action.record_ids)
+                    ):
+                        raise RuntimeError("删除后出现未预期的记录变化；停止后续写入")
+                    if actual_ids != expected_ids:
+                        return False
+                if isinstance(action, CreateRecordsAction):
+                    created_ids = {
+                        rid
+                        for receipt in self._last_action_receipts
+                        for rid in receipt.record_ids
+                    }
+                    if not created_ids <= {
+                        record.record_id for record in current.records
+                    }:
+                        return False
                 self._expected_bitable_snapshot = current
                 self._expected_bitable_revision = current.revision
             elif precondition.kind.startswith("sheet_"):
-                self._expected_sheet_snapshot = self._current_sheet_snapshot()
+                previous_sheet = self._expected_sheet_snapshot
+                current_sheet = self._current_sheet_snapshot()
+                if (
+                    isinstance(action, (WriteColumnsAction, AppendRowsAction))
+                    and previous_sheet is not None
+                ):
+                    if current_sheet.header != previous_sheet.header:
+                        raise RuntimeError("写入后 Sheet 表头发生变化")
+                    old_mapping = dict(previous_sheet.index_mapping)
+                    new_mapping = dict(current_sheet.index_mapping)
+                    if any(
+                        new_mapping.get(key) != row for key, row in old_mapping.items()
+                    ):
+                        raise RuntimeError(
+                            "写入后既有 Sheet 记录物理行发生变化；停止后续写入"
+                        )
+                    self._check_sheet_unmodified_cells(previous_sheet, current_sheet)
+                self._expected_sheet_snapshot = current_sheet
             return True
+
+        try:
+            prior = getattr(self, "_last_action_confirmation", {})
+            success = self._wait_for_confirmation(advance, "后续操作所需的目标状态")
+            if success:
+                self._last_action_confirmation = prior
+            else:
+                self._last_action_error_kind = ErrorKind.VERIFICATION
+            return success
         except Exception as error:
             self._last_action_error_kind = ErrorKind.VERIFICATION
             self._last_action_failure_message = (
@@ -2559,18 +3225,24 @@ class SyncService:
         self._last_action_applied_count = 0
         self._last_action_accepted_units = 0
         self._last_action_applied_rows = set()
+        self._last_action_receipts: List[MutationReceipt] = []
+        self._last_action_actual_ranges: List[A1Range] = []
         self._last_action_mutation_complete = False
         self._last_action_remote_outcome = None
         self._last_action_revision = None
         self._last_action_failure_message = None
+        self._last_action_confirmation = {}
+        self._last_action_confirmed_count = 0
 
     def _record_action_receipt(self, receipt: MutationReceipt) -> None:
         if not hasattr(self, "_last_action_accepted_units"):
             self._reset_action_execution_state()
+        self._last_action_receipts.append(receipt)
         accepted = max(0, int(receipt.accepted_count))
         self._last_action_accepted_units += accepted
         for item in receipt.actual_ranges:
             if isinstance(item, A1Range):
+                self._last_action_actual_ranges.append(item)
                 self._last_action_applied_rows.update(
                     range(item.start_row, item.end_row + 1)
                 )
@@ -2584,6 +3256,10 @@ class SyncService:
 
     def _mark_action_failure(self, kind: ErrorKind) -> bool:
         self._last_action_error_kind = kind
+        if kind is ErrorKind.VERIFICATION:
+            detail = getattr(self, "_last_action_confirmation", {})
+            if detail.get("status") in {None, "verified"}:
+                self._last_action_confirmation = {**detail, "status": "failed"}
         return False
 
     @staticmethod
@@ -2591,7 +3267,7 @@ class SyncService:
         from api import FeishuAPIError
 
         return isinstance(error, FeishuAPIError) and (
-            error.code in {99991661, 99991663, 99991664, 99991668}
+            error.code in {10003, 99991661, 99991663, 99991664, 99991668}
             or error.http_status in {401, 403}
         )
 
@@ -2601,27 +3277,115 @@ class SyncService:
 
         return isinstance(error, FeishuAPIError) and error.http_status == 404
 
+    @staticmethod
+    def _covered_interval(
+        start: int, end: int, intervals: Sequence[tuple[int, int]]
+    ) -> bool:
+        cursor = start
+        for lo, hi in sorted(intervals):
+            if lo > cursor:
+                return False
+            if hi >= cursor:
+                cursor = hi + 1
+            if cursor > end:
+                return True
+        return cursor > end
+
+    def _confirmed_action_units(self, action: ExecutionAction) -> int:
+        if self._last_action_mutation_complete:
+            return action.count
+        ranges = self._last_action_actual_ranges
+        if isinstance(action, WriteColumnsAction):
+            return sum(
+                self._covered_interval(
+                    action.start_row,
+                    action.start_row + len(values) - 1,
+                    [
+                        (item.start_row, item.end_row)
+                        for item in ranges
+                        if item.start_col
+                        <= action.column_positions[column]
+                        <= item.end_col
+                    ],
+                )
+                for column, values in action.column_data.items()
+                if values
+            )
+        if isinstance(action, (WriteRangeAction, ClearRangeAction)):
+            if isinstance(action, ClearRangeAction):
+                requested = A1Range.parse(action.a1_range)
+            else:
+                if not action.values:
+                    return 0
+                start_row = self._sheet_target().start_row
+                start_col = self.converter.column_letter_to_number(
+                    self._sheet_target().start_column
+                )
+                requested = A1Range(
+                    str(self._sheet_target().sheet_id),
+                    start_row,
+                    start_row + len(action.values) - 1,
+                    start_col,
+                    start_col + len(action.values[0]) - 1,
+                )
+            cuts = sorted(
+                {requested.start_row, requested.end_row + 1}
+                | {
+                    max(requested.start_row, min(requested.end_row + 1, pos))
+                    for item in ranges
+                    for pos in (item.start_row, item.end_row + 1)
+                }
+            )
+            rows = sum(
+                hi - lo
+                for lo, hi in zip(cuts, cuts[1:])
+                if self._covered_interval(
+                    requested.start_col,
+                    requested.end_col,
+                    [
+                        (item.start_col, item.end_col)
+                        for item in ranges
+                        if item.sheet_id == requested.sheet_id
+                        and item.start_row <= lo
+                        and item.end_row >= hi - 1
+                    ],
+                )
+            )
+            return (
+                int(rows == requested.row_count)
+                if isinstance(action, ClearRangeAction)
+                else rows
+            )
+        return min(self._last_action_accepted_units, action.count)
+
     def _applied_action_prefix(
         self, action: ExecutionAction
     ) -> Optional[PlanActionDocument]:
         if self._last_action_mutation_complete:
             return action.to_public()
-        if (
-            self._last_action_applied_count <= 0
-            and self._last_action_accepted_units <= 0
-        ):
+        accepted = self._last_action_accepted_units
+        applied_rows = len(self._last_action_applied_rows)
+        if accepted <= 0 and applied_rows <= 0:
             return None
-        count = self._last_action_applied_count or self._last_action_accepted_units
-        if action.count:
-            count = min(action.count, count)
+        count = self._confirmed_action_units(action)
+        units = {receipt.unit for receipt in self._last_action_receipts if receipt.unit}
         scope = dict(action.scope)
         scope.update(
             {
                 "partial": True,
-                "accepted_units": self._last_action_accepted_units,
+                "accepted_units": accepted,
+                "receipt_unit": next(iter(units)) if len(units) == 1 else "unspecified",
                 "requested_count": action.count,
+                "confirmed_count": getattr(self, "_last_action_confirmed_count", 0),
+                "confirmation": getattr(self, "_last_action_confirmation", {}),
+                "next_step": "读取目标状态后再决定如何继续；不要自动重跑整个任务",
+                "actual_ranges": [
+                    item.text for item in self._last_action_actual_ranges
+                ],
             }
         )
+        if applied_rows:
+            scope["applied_physical_rows"] = applied_rows
         if self._last_action_remote_outcome:
             scope["remote_outcome"] = self._last_action_remote_outcome
         return PlanActionDocument(
@@ -2639,8 +3403,15 @@ class SyncService:
             "kind": self._last_action_error_kind.value,
             "message": message,
             "failed_action": action.kind,
-            "accepted_count": self._last_action_applied_count,
+            "accepted_count": self._confirmed_action_units(action),
+            "accepted_units": self._last_action_accepted_units,
+            "unit": action.unit.value,
             "requested_count": action.count,
+            "confirmed_count": min(
+                action.count, getattr(self, "_last_action_confirmed_count", 0)
+            ),
+            "confirmation": getattr(self, "_last_action_confirmation", {}),
+            "next_step": "先读取目标状态；不要自动重跑整个追加、覆盖或清空任务",
         }
         if self._last_action_remote_outcome:
             error["remote_outcome"] = self._last_action_remote_outcome
@@ -2649,6 +3420,35 @@ class SyncService:
                 == MutationOutcome.UNKNOWN_OUTCOME.value
             )
         return error
+
+    def _confirmation_document(
+        self, action: ExecutionAction, *, failed: bool = False
+    ) -> Mapping[str, Any]:
+        detail = getattr(self, "_last_action_confirmation", {})
+        status = (
+            detail.get("status", "failed")
+            if failed
+            else (
+                "verified" if self.sync_config.verify_remote_writes else "not_requested"
+            )
+        )
+        if isinstance(action, CreateFieldAction) and not failed:
+            status = "pending_schema"
+        count = (
+            min(action.count, getattr(self, "_last_action_confirmed_count", 0))
+            if failed
+            else action.count if status == "verified" else 0
+        )
+        return {
+            "kind": action.kind,
+            "unit": action.unit.value,
+            "status": status,
+            "ok": not failed,
+            "confirmed_count": count,
+            "attempts": detail.get("attempts", 0),
+            "elapsed_seconds": detail.get("elapsed_seconds", 0.0),
+            "formula_scan": detail.get("formula_scan"),
+        }
 
     def _execute_action(self, action: ExecutionAction) -> bool:
         if isinstance(action, CreateFieldAction):
@@ -2713,6 +3513,7 @@ class SyncService:
             return self._typed_sheet_append(
                 [list(row) for row in action.values],
                 header_width=action.header_width,
+                start_row=action.start_row,
             )
         if isinstance(action, WriteColumnsAction):
             return self._typed_sheet_selective_write(
@@ -2734,6 +3535,17 @@ class SyncService:
     def _refresh_and_verify_created_fields(
         self, actions: List[CreateFieldAction]
     ) -> Tuple[bool, str]:
+        valid = self._wait_for_confirmation(
+            lambda: self._refresh_created_fields_once(actions)[0],
+            "新建字段",
+        )
+        return valid, (
+            "" if valid else self._last_action_failure_message or "新建字段尚未可见"
+        )
+
+    def _refresh_created_fields_once(
+        self, actions: List[CreateFieldAction]
+    ) -> Tuple[bool, str]:
         """Refresh backend schema cache and validate every planned field."""
         if not self._bitable_target().app_token or not self._bitable_target().table_id:
             return False, "目标 Bitable 配置不完整"
@@ -2742,6 +3554,7 @@ class SyncService:
         fields = self._bitable_backend().list_fields(
             self._bitable_target().app_token, self._bitable_target().table_id
         )
+        self._refreshed_bitable_fields = tuple(fields)
         by_name = {field.name: field for field in fields}
         backend_kind = BitableBackendKind(self._bitable_target().backend)
         for action in actions:
@@ -2757,12 +3570,12 @@ class SyncService:
                 or actual.kind is not expected_kind
                 or actual.multiple != expected_multiple
             ):
-                return False, f"字段 '{name}' 创建后的写入形状与计划不兼容"
+                raise ValueError(f"字段 '{name}' 创建后的写入形状与计划不兼容")
             if (
                 backend_kind is BitableBackendKind.BITABLE_V1
                 and actual.raw_type != suggested_type
             ):
-                return False, f"字段 '{name}' 创建后的 raw_type 与计划不一致"
+                raise ValueError(f"字段 '{name}' 创建后的 raw_type 与计划不一致")
         return True, ""
 
     def execute_plan(self, plan: ExecutionPlan) -> SyncResult:
@@ -2785,6 +3598,19 @@ class SyncService:
                 public_plan,
                 warnings=tuple(result_warnings),
             )
+        try:
+            self._preflight_plan(plan)
+        except (ValueError, TypeError, OverflowError) as error:
+            return SyncResult(
+                OutcomeStatus.FAILED,
+                public_plan,
+                warnings=tuple(result_warnings),
+                error={
+                    "kind": ErrorKind.VALIDATION.value,
+                    "message": str(error),
+                    "accepted_units": 0,
+                },
+            )
         for action in plan.actions:
             if (
                 action.kind != "create_fields"
@@ -2800,6 +3626,18 @@ class SyncService:
                     refresh_error = error
                     valid, message = False, str(error)
                 if not valid:
+                    verification = [
+                        (
+                            {
+                                **item,
+                                **getattr(self, "_last_action_confirmation", {}),
+                                "ok": False,
+                            }
+                            if item.get("kind") == "create_fields"
+                            else item
+                        )
+                        for item in verification
+                    ]
                     error_kind = ErrorKind.VERIFICATION
                     if refresh_error is not None:
                         if self._is_auth_error(refresh_error):
@@ -2816,22 +3654,50 @@ class SyncService:
                             "kind": error_kind.value,
                             "message": message,
                             "failed_action": "create_fields",
+                            "accepted_units": len(created_field_actions),
+                            "unit": "field",
+                            "confirmed_count": 0,
+                            "confirmation": dict(
+                                getattr(self, "_last_action_confirmation", {})
+                            ),
+                        },
+                    )
+                try:
+                    self._preflight_plan(
+                        replace(
+                            plan,
+                            bitable_fields=getattr(
+                                self, "_refreshed_bitable_fields", plan.bitable_fields
+                            ),
+                        )
+                    )
+                except (ValueError, TypeError, OverflowError) as error:
+                    return SyncResult(
+                        OutcomeStatus.PARTIAL,
+                        public_plan,
+                        applied=tuple(applied),
+                        verification=tuple(verification),
+                        warnings=tuple(result_warnings),
+                        error={
+                            "kind": "validation",
+                            "message": str(error),
+                            "failed_action": "prepare_records",
                         },
                     )
                 fields_refreshed = True
-                if self.sync_config.verify_remote_writes:
-                    verification = [
-                        (
-                            {
-                                "kind": verification_item["kind"],
-                                "status": "verified",
-                                "ok": True,
-                            }
-                            if verification_item.get("kind") == "create_fields"
-                            else verification_item
-                        )
-                        for verification_item in verification
-                    ]
+                verification = [
+                    (
+                        {
+                            **item,
+                            "confirmed_count": 1,
+                            "status": "schema_confirmed",
+                            "ok": True,
+                        }
+                        if item.get("kind") == "create_fields"
+                        else item
+                    )
+                    for item in verification
+                ]
             self._reset_action_execution_state()
             if action.verification_policy is VerificationPolicy.BEST_EFFORT:
                 try:
@@ -2883,7 +3749,7 @@ class SyncService:
                     applied.append(prefix)
                 if self._last_action_error_kind is ErrorKind.VERIFICATION:
                     verification.append(
-                        {"kind": action.kind, "status": "failed", "ok": False}
+                        self._confirmation_document(action, failed=True)
                     )
                 unknown = (
                     self._last_action_remote_outcome
@@ -2915,7 +3781,7 @@ class SyncService:
                     applied.append(prefix)
                 if self._last_action_error_kind is ErrorKind.VERIFICATION:
                     verification.append(
-                        {"kind": action.kind, "status": "failed", "ok": False}
+                        self._confirmation_document(action, failed=True)
                     )
                 unknown = (
                     self._last_action_remote_outcome
@@ -2943,9 +3809,7 @@ class SyncService:
                 )
             if not self._advance_snapshot_after_mutation(action):
                 applied.append(action.to_public())
-                verification.append(
-                    {"kind": action.kind, "status": "failed", "ok": False}
-                )
+                verification.append(self._confirmation_document(action, failed=True))
                 return SyncResult(
                     OutcomeStatus.PARTIAL,
                     public_plan,
@@ -2959,23 +3823,7 @@ class SyncService:
             applied.append(action.to_public())
             if isinstance(action, CreateFieldAction):
                 created_field_actions.append(action)
-            verification.append(
-                {
-                    "kind": action.kind,
-                    "status": (
-                        "verified"
-                        if self.sync_config.verify_remote_writes
-                        and action.kind not in {"create_fields", "apply_sheet_config"}
-                        else (
-                            "not_supported"
-                            if self.sync_config.verify_remote_writes
-                            and action.kind == "apply_sheet_config"
-                            else "not_requested"
-                        )
-                    ),
-                    "ok": True,
-                }
-            )
+            verification.append(self._confirmation_document(action))
         if created_field_actions and not fields_refreshed:
             refresh_error = None
             try:
@@ -2986,6 +3834,18 @@ class SyncService:
                 refresh_error = error
                 valid, message = False, str(error)
             if not valid:
+                verification = [
+                    (
+                        {
+                            **item,
+                            **getattr(self, "_last_action_confirmation", {}),
+                            "ok": False,
+                        }
+                        if item.get("kind") == "create_fields"
+                        else item
+                    )
+                    for item in verification
+                ]
                 error_kind = ErrorKind.VERIFICATION
                 if refresh_error is not None:
                     if self._is_auth_error(refresh_error):
@@ -3002,21 +3862,27 @@ class SyncService:
                         "kind": error_kind.value,
                         "message": message,
                         "failed_action": "create_fields",
+                        "accepted_units": len(created_field_actions),
+                        "unit": "field",
+                        "confirmed_count": 0,
+                        "confirmation": dict(
+                            getattr(self, "_last_action_confirmation", {})
+                        ),
                     },
                 )
-            if self.sync_config.verify_remote_writes:
-                verification = [
-                    (
-                        {
-                            "kind": verification_item["kind"],
-                            "status": "verified",
-                            "ok": True,
-                        }
-                        if verification_item.get("kind") == "create_fields"
-                        else verification_item
-                    )
-                    for verification_item in verification
-                ]
+            verification = [
+                (
+                    {
+                        **item,
+                        "confirmed_count": 1,
+                        "status": "schema_confirmed",
+                        "ok": True,
+                    }
+                    if item.get("kind") == "create_fields"
+                    else item
+                )
+                for item in verification
+            ]
         return SyncResult(
             OutcomeStatus.SUCCESS,
             public_plan,

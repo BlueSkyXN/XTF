@@ -11,6 +11,7 @@ import json
 import logging
 import re
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Dict, Any, Iterator, List, Mapping, Optional, Sequence, Tuple, Union
 
@@ -320,7 +321,7 @@ class SheetAPI:
         unit: str = "range",
         unknown_scope: bool = False,
     ) -> MutationReceipt:
-        unknown = error.kind == "transport"
+        unknown = error.mutation_outcome_unknown
         return MutationReceipt(
             operation=operation,
             backend=_SHEET_BACKEND,
@@ -339,7 +340,7 @@ class SheetAPI:
             ),
             unknown_scope=unknown or unknown_scope,
             raw_metadata={
-                "error": str(error),
+                **error.to_metadata(),
                 "responses": tuple(raw_responses),
                 "unknown_scope": unknown or unknown_scope,
             },
@@ -403,6 +404,7 @@ class SheetAPI:
         body: Mapping[str, Any],
         *,
         retry_transport: bool = True,
+        params: Optional[Mapping[str, str]] = None,
     ) -> Mapping[str, Any]:
         token = encode_path_segment(spreadsheet_token)
         url = f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{token}/{endpoint}"
@@ -412,6 +414,7 @@ class SheetAPI:
             headers=self.auth.get_auth_headers(),
             json=dict(body),
             retry_transport=retry_transport,
+            params=dict(params) if params is not None else None,
         )
         result = FeishuResponseParser.parse(response)
         if not isinstance(result, dict):
@@ -503,9 +506,9 @@ class SheetAPI:
         successful_requests = 0
         failed_request_index = 0
         for chunk in chunker.split(a1, matrix):
-            pending = [chunk]
+            pending = deque([chunk])
             while pending:
-                current = pending.pop(0)
+                current = pending.popleft()
                 current_range = current.a1_range
                 current_values = current.as_lists()
                 failed_request_index += 1
@@ -574,7 +577,7 @@ class SheetAPI:
                             ]
                     if split:
                         requested_ranges += 1
-                        pending[0:0] = split
+                        pending.extendleft(reversed(split))
                         continue
                     return self._typed_failure_receipt(
                         "write",
@@ -622,9 +625,22 @@ class SheetAPI:
         source_slices: List[Mapping[str, int | str]] = []
         successful_rows = 0
         request_index = 0
-        pending = list(anchor_chunker.split(anchor_range, anchor_values))
+        pending = deque(anchor_chunker.split(anchor_range, anchor_values))
+        next_append_row = a1.start_row
         while pending:
-            anchor_chunk = pending.pop(0)
+            anchor_chunk = pending.popleft()
+            if anchor_chunk.a1_range.start_row < next_append_row:
+                old_range = anchor_chunk.a1_range
+                anchor_chunk = RangeChunk(
+                    A1Range(
+                        old_range.sheet_id,
+                        next_append_row,
+                        next_append_row + old_range.row_count - 1,
+                        old_range.start_col,
+                        old_range.end_col,
+                    ),
+                    anchor_chunk.values,
+                )
             request_index += 1
             try:
                 result = self._typed_values_call(
@@ -638,6 +654,7 @@ class SheetAPI:
                         }
                     },
                     retry_transport=False,
+                    params={"insertDataOption": "INSERT_ROWS"},
                 )
             except FeishuAPIError as error:
                 if (
@@ -645,7 +662,7 @@ class SheetAPI:
                     and anchor_chunk.a1_range.row_count > 1
                 ):
                     first_height = anchor_chunk.a1_range.row_count // 2
-                    pending[0:0] = [
+                    split = [
                         RangeChunk(
                             A1Range(
                                 anchor_chunk.a1_range.sheet_id,
@@ -667,6 +684,7 @@ class SheetAPI:
                             anchor_chunk.values[first_height:],
                         ),
                     ]
+                    pending.extendleft(reversed(split))
                     continue
                 return self._typed_failure_receipt(
                     "append",
@@ -687,6 +705,9 @@ class SheetAPI:
                 or len(anchor_ranges) != 1
                 or anchor_ranges[0].row_count != anchor_chunk.a1_range.row_count
                 or anchor_ranges[0].col_count != anchor_width
+                or anchor_ranges[0].sheet_id != a1.sheet_id
+                or anchor_ranges[0].start_col != a1.start_col
+                or anchor_ranges[0].start_row < anchor_chunk.a1_range.start_row
             ):
                 return self._typed_sheet_receipt(
                     "append",
@@ -702,6 +723,7 @@ class SheetAPI:
                 )
 
             actual_anchor = anchor_ranges[0]
+            next_append_row = actual_anchor.end_row + 1
             applied.append(actual_anchor)
             source_slices.append(
                 {
@@ -1146,7 +1168,14 @@ class SheetAPI:
 
         return row_count, col_count
 
-    def get_sheet_data(self, spreadsheet_token: str, range_str: str) -> List[List[Any]]:
+    def get_sheet_data(
+        self,
+        spreadsheet_token: str,
+        range_str: str,
+        *,
+        value_render_option: Optional[str] = None,
+        datetime_render_option: Optional[str] = None,
+    ) -> List[List[Any]]:
         """
         读取电子表格数据
 
@@ -1171,18 +1200,73 @@ class SheetAPI:
         url = f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{token}/values/{encoded_range}"
         headers = self.auth.get_auth_headers()
         params = {}
-        if self.value_render_option:
-            params["valueRenderOption"] = self.value_render_option
-        if self.datetime_render_option:
-            params["dateTimeRenderOption"] = self.datetime_render_option
+        render = (
+            self.value_render_option
+            if value_render_option is None
+            else value_render_option
+        )
+        date_render = (
+            self.datetime_render_option
+            if datetime_render_option is None
+            else datetime_render_option
+        )
+        if render:
+            params["valueRenderOption"] = render
+        if date_render:
+            params["dateTimeRenderOption"] = date_render
 
         response = self.api_client.call_api("GET", url, headers=headers, params=params)
 
         result = FeishuResponseParser.parse(response)
 
-        data = result.get("data", {})
-        value_range = data.get("valueRange", {})
-        return value_range.get("values", [])
+        data = result.get("data")
+        value_range = data.get("valueRange") if isinstance(data, dict) else None
+        if not isinstance(value_range, dict) or "values" not in value_range:
+            raise FeishuAPIError(
+                -1,
+                "Sheet read response 缺少 valueRange.values",
+                response_data=result,
+                kind="invalid_response",
+            )
+        values = value_range["values"]
+        if not isinstance(values, list) or any(
+            not isinstance(row, list) for row in values
+        ):
+            raise FeishuAPIError(
+                -1,
+                "Sheet read values 必须为二维数组",
+                response_data=result,
+                kind="invalid_response",
+            )
+        requested = A1Range.parse(range_str)
+        if len(values) > requested.row_count or any(
+            len(row) > requested.col_count for row in values
+        ):
+            raise FeishuAPIError(
+                -1,
+                "Sheet read 数据超出请求范围",
+                response_data=result,
+                kind="invalid_response",
+            )
+        returned_range = value_range.get("range")
+        if returned_range is not None and returned_range != range_str:
+            try:
+                actual = A1Range.parse(returned_range)
+            except (TypeError, ValueError) as exc:
+                raise FeishuAPIError(
+                    -1, "Sheet read 返回无效范围", kind="invalid_response"
+                ) from exc
+            if (
+                actual.sheet_id != requested.sheet_id
+                or actual.start_row != requested.start_row
+                or actual.start_col != requested.start_col
+                or actual.end_row > requested.end_row
+                or actual.end_col > requested.end_col
+            ):
+                raise FeishuAPIError(
+                    -1, "Sheet read 返回范围与请求不一致", kind="invalid_response"
+                )
+        return values
 
     def identify_formula_columns(
         self, formula_data: List[List[Any]], headers: Optional[List[str]] = None
@@ -1396,12 +1480,7 @@ class SheetAPI:
 
     def column_number_to_letter(self, col_num: int) -> str:
         """将列号转换为字母（1->A, 2->B, ..., 26->Z, 27->AA）"""
-        result = ""
-        while col_num > 0:
-            col_num -= 1
-            result = chr(65 + col_num % 26) + result
-            col_num //= 26
-        return result or "A"
+        return SheetAPI.column_number_to_letter_static(col_num)
 
     def _optimize_column_ranges(
         self,
@@ -1426,6 +1505,11 @@ class SheetAPI:
         sorted_columns = sorted(
             column_data.keys(), key=lambda x: column_positions.get(x, 0)
         )
+
+        # Preserve the first match when legacy callers supply duplicate positions.
+        names_by_position: dict[int, str] = {}
+        for name, position in column_positions.items():
+            names_by_position.setdefault(position, name)
 
         ranges_data = []
         i = 0
@@ -1466,12 +1550,7 @@ class SheetAPI:
             for row_idx in range(max_rows):
                 row_data = []
                 for col_idx in range(start_col, end_col + 1):
-                    # 查找对应的列名
-                    col_name = None
-                    for name, pos in column_positions.items():
-                        if pos == col_idx:
-                            col_name = name
-                            break
+                    col_name = names_by_position.get(col_idx)
 
                     if col_name and col_name in column_data:
                         # 有数据的列

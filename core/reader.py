@@ -1,98 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-数据文件读取模块
+"""Read Excel/CSV files into DataFrames without silently changing headers.
 
-模块概述：
-    此模块提供统一的数据文件读取功能，支持多种文件格式的自动检测
-    和读取。作为 XTF 工具的输入层，负责将各种格式的数据文件转换
-    为 pandas DataFrame 供后续处理。
+Excel uses the Calamine-first helper when available, otherwise pandas. CSV is
+experimental and retries decoding with GBK after a UnicodeDecodeError.
 
-格式支持状态：
-    - Excel (.xlsx/.xls): ✅ 稳定支持，生产就绪
-        - 优先使用 Calamine 引擎（Rust实现，性能提升4-20倍）
-        - 自动降级到 OpenPyXL 引擎（Python实现，稳定可靠）
-    - CSV (.csv): 🧪 实验性支持，测试阶段
-        - 自动处理编码问题（UTF-8/GBK）
-        - 生产环境建议使用 Excel 格式
-
-主要功能：
-    1. 文件格式自动检测（基于扩展名）
-    2. Excel 文件智能读取（引擎自动选择）
-    3. CSV 文件编码自适应
-    4. 统一的错误处理
-    5. 格式支持查询
-
-核心类：
-    DataFileReader:
-        数据文件读取器，提供统一的文件读取接口。
-        根据文件扩展名自动选择合适的读取方式。
-
-读取流程：
-    1. 检查文件是否存在
-    2. 根据扩展名判断文件格式
-    3. 调用对应的读取方法
-    4. 返回 DataFrame 或抛出异常
-
-Excel 读取策略：
-    1. 优先尝试 Calamine 引擎（高性能）
-    2. Calamine 失败则降级到 OpenPyXL
-    3. 两者都失败则抛出异常
-
-CSV 编码处理：
-    1. 首先尝试 UTF-8 编码
-    2. UTF-8 失败则尝试 GBK（中文Windows Excel导出常用）
-    3. 两者都失败则抛出异常并提示手动指定编码
-
-使用示例：
-    >>> from core.reader import DataFileReader
-    >>> reader = DataFileReader()
-    >>>
-    >>> # 读取 Excel 文件
-    >>> df = reader.read_file(Path('data.xlsx'))
-    >>>
-    >>> # 读取 CSV 文件
-    >>> df = reader.read_file(Path('data.csv'))
-    >>>
-    >>> # 带额外参数读取
-    >>> df = reader.read_file(Path('data.xlsx'), sheet_name='Sheet2')
-    >>>
-    >>> # 检查格式支持
-    >>> if DataFileReader.is_supported(Path('file.xlsx')):
-    ...     df = reader.read_file(Path('file.xlsx'))
-
-类方法说明：
-    is_supported(file_path): 检查文件格式是否支持
-    get_supported_formats(): 获取支持的格式列表字符串
-
-依赖关系：
-    内部模块：
-        - utils.excel_reader: 智能Excel读取引擎（可选）
-    外部依赖：
-        - pandas: DataFrame 支持
-        - pathlib: 路径处理
-        - logging: 日志记录
-
-向后兼容性：
-    - Excel 读取逻辑与原有 pd.read_excel() 完全一致
-    - 不影响任何现有 Excel 处理功能
-    - 仅在输入层增加格式识别
-
-注意事项：
-    1. CSV 格式当前为实验性功能，生产环境请使用 Excel
-    2. 文件路径必须是 Path 对象
-    3. 读取失败会抛出相应异常（FileNotFoundError/ValueError）
-    4. 支持传递额外参数到底层 pandas 读取函数
-
-作者: XTF Team
-版本: 1.7.3+
-更新日期: 2026-01-24
+Default reads preserve text and reject blank or duplicate headers. Explicit
+header/name/column/type options are passed through to pandas instead.
 """
 
 import pandas as pd
 import logging
 from pathlib import Path
-from typing import Optional, Dict, Any
 
 # 导入智能Excel读取引擎（性能优化）
 try:
@@ -108,7 +27,7 @@ class DataFileReader:
     数据文件读取器
 
     支持的文件格式：
-    - Excel: .xlsx, .xls (✅ 稳定支持，生产就绪)
+    - Excel: .xlsx, .xls（.xls 需要 Calamine 等支持该格式的引擎）
     - CSV: .csv (🧪 实验性支持，测试阶段)
 
     特性：
@@ -119,8 +38,8 @@ class DataFileReader:
     - 易于扩展新格式
 
     向后兼容性保证：
-    - Excel读取逻辑与原有 pd.read_excel() 完全一致
-    - 不影响任何现有Excel处理功能
+    - 默认读取保留原始表头与文本；显式自定义读取参数传递给 pandas
+    - 空白或重复表头会明确拒绝，不依赖 pandas 自动改名
     - 仅在输入层增加格式识别，处理层和输出层无需修改
     """
 
@@ -162,21 +81,44 @@ class DataFileReader:
 
         self.logger.info(f"检测到文件格式: {file_ext}")
 
-        if file_ext == ".csv":
-            return self._read_csv(file_path, **kwargs)
-        elif file_ext in [".xlsx", ".xls"]:
-            return self._read_excel(file_path, **kwargs)
-        else:
+        if file_ext not in self.SUPPORTED_FORMATS:
             supported = ", ".join(self.SUPPORTED_FORMATS.keys())
-            raise ValueError(
-                f"不支持的文件格式: {file_ext}\n" f"支持的格式: {supported}"
+            raise ValueError(f"不支持的文件格式: {file_ext}\n支持的格式: {supported}")
+        reader = self._read_csv if file_ext == ".csv" else self._read_excel
+        preserve_headers = not any(
+            key in kwargs
+            for key in (
+                "header",
+                "names",
+                "usecols",
+                "dtype",
+                "converters",
+                "index_col",
             )
+        )
+        if not preserve_headers:
+            return reader(file_path, **kwargs)
+        options = dict(kwargs)
+        options.update(header=None, dtype=object)
+        options.setdefault("keep_default_na", False)
+        if options.get("nrows") is not None:
+            options["nrows"] += 1  # The raw read includes the header row.
+        raw = reader(file_path, **options)
+        if raw.empty:
+            return pd.DataFrame()
+        header = list(raw.iloc[0])
+        frame = raw.iloc[1:].copy().reset_index(drop=True)
+        frame.columns = header
+        # Validate before any target reads; pandas must not silently mangle duplicates.
+        from .snapshot import SourceTable
+
+        return SourceTable.from_dataframe(frame).to_dataframe()
 
     def _read_excel(self, file_path: Path, **kwargs) -> pd.DataFrame:
         """
         读取Excel文件
 
-        优先使用 smart_read_excel（Calamine引擎，性能提升4-20倍）
+        优先使用 smart_read_excel（Calamine引擎，性能取决于文件和运行环境）
         smart_read_excel不可用时使用传统的 pd.read_excel
 
         Args:

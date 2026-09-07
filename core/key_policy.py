@@ -98,10 +98,12 @@ class KeyPolicy:
     def _decimal_text(value: Decimal) -> str:
         if not value.is_finite():
             raise ValueError("numeric key must be finite")
-        normalized = value.normalize()
-        if normalized == normalized.to_integral_value():
-            return format(normalized.quantize(Decimal(1)), "f")
-        return format(normalized, "f").rstrip("0").rstrip(".")
+        # Decimal.normalize()/quantize() obey the process precision (normally
+        # 28 digits).  Formatting must not round an identifier at that boundary.
+        text = format(value, "f")
+        if "." in text:
+            text = text.rstrip("0").rstrip(".")
+        return "0" if value.is_zero() else text
 
     def normalize_number(self, value: Any) -> str | None:
         if self.is_empty(value):
@@ -162,31 +164,37 @@ class KeyPolicy:
             return None
         return None if pd.isna(parsed) else parsed
 
-    def normalize_datetime(self, value: Any) -> str | None:
+    def datetime_to_milliseconds(self, value: Any) -> int | None:
+        """Return the wire instant using the same timezone policy as matching."""
         if self.is_empty(value) or isinstance(value, bool):
             return None
-        if isinstance(value, numbers.Real) or isinstance(value, Decimal):
-            milliseconds = self._numeric_timestamp(value)
-            parsed = pd.Timestamp(milliseconds, unit="ms", tz="UTC")
-        elif isinstance(value, str) and value.strip().lstrip("+-").isdigit():
-            milliseconds = self._numeric_timestamp(value.strip())
-            parsed = pd.Timestamp(milliseconds, unit="ms", tz="UTC")
-        else:
-            parsed = self._as_timestamp(value)
-            if parsed is None:
-                return None
-
-        if self.datetime_granularity == "exact":
-            if parsed.tzinfo is None:
-                parsed = parsed.tz_localize("UTC")
-            return str(int(parsed.tz_convert("UTC").value // 1_000_000))
-
-        assert self.datetime_timezone is not None
+        if isinstance(value, (numbers.Real, Decimal)):
+            return self._numeric_timestamp(value)
+        if isinstance(value, str) and value.strip().lstrip("+-").isdigit():
+            return self._numeric_timestamp(value.strip())
+        parsed = self._as_timestamp(value)
+        if parsed is None:
+            return None
         if parsed.tzinfo is None:
-            localized = parsed.tz_localize(self.datetime_timezone)
-        else:
-            localized = parsed.tz_convert(self.datetime_timezone)
-        return localized.date().isoformat()
+            zone = (
+                self.datetime_timezone if self.datetime_granularity == "day" else "UTC"
+            )
+            parsed = parsed.tz_localize(zone)
+        return int(parsed.tz_convert("UTC").value // 1_000_000)
+
+    def normalize_datetime(self, value: Any) -> str | None:
+        milliseconds = self.datetime_to_milliseconds(value)
+        if milliseconds is None:
+            return None
+        if self.datetime_granularity == "exact":
+            return str(milliseconds)
+        assert self.datetime_timezone is not None
+        return (
+            pd.Timestamp(milliseconds, unit="ms", tz="UTC")
+            .tz_convert(self.datetime_timezone)
+            .date()
+            .isoformat()
+        )
 
     def normalize(
         self,

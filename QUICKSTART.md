@@ -84,7 +84,7 @@ dry-run 与正式执行使用同一 planner，可以读取远端状态，但不�
 非破坏性计划：
 
 ```bash
-python3 XTF.py sync --config config.yaml
+python3 XTF.py sync --config config.yaml --verify-remote-writes
 ```
 
 `overwrite`、`clone` 或任何包含 delete/clear action 的计划必须显式授权：
@@ -96,6 +96,24 @@ python3 XTF.py sync --config config-clone.yaml --allow-delete
 ```
 
 这只授权本次命令按计划执行，不代表生产数据操作、Release 或部署授权。
+
+### 写入后等待读回
+
+建议需要确认实际结果时显式启用：
+
+```bash
+python3 XTF.py sync --config config.yaml --verify-remote-writes \
+  --verify-timeout-seconds 10 --verify-interval-seconds 0.5 --json
+```
+
+首次读回立即执行；暂时读到旧值只重试读取，不重新创建、追加或清空。10 秒限制的是
+这一轮后续读取的调度窗口，不是整个命令的硬超时；正在执行的 HTTP 请求仍受其自身超时控制。
+超时退出码为 7，错误码 `XTF_E_CONFIRMATION_TIMEOUT`。这时先读取目标状态，不要自动重跑整个任务。
+
+默认 `verify_remote_writes` 仍为 false，保持旧配置行为；默认成功只代表请求被接受。
+JSON `summary.accepted_by_unit` 和 `confirmed_by_unit` 分别统计，不能混加记录、行、列和字段。
+计数是操作次数，不是去重后的业务记录数。具体规则与真实接口测试见
+[执行算法与 UAT](docs/EXECUTION_AND_UAT.md)。
 
 ## 6. 模式与匹配策略
 
@@ -142,7 +160,7 @@ success | noop | failed | partial | indeterminate
 | `4` | 认证错误 |
 | `5` | 远端资源、读取、计划或 stale snapshot |
 | `6` | 已知 mutation failure / partial |
-| `7` | verification failure |
+| `7` | 写后确认失败或读取等待超时 |
 | `8` | 已发送 mutation 的远端结果未知 |
 
 自动化需要区分 `failed`、`partial` 和 `indeterminate` 时，必须同时读取 `--json` 结果，

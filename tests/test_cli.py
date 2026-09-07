@@ -82,8 +82,6 @@ def test_single_parser_exposes_all_sync_config_leaves():
         "sheet_protect_formulas",
         "sheet_verify_formulas",
         "sheet_formula_max_locations",
-        "sheet_report_column_diff",
-        "sheet_diff_tolerance",
         "sync_mode",
         "index_column",
         "datetime_index_granularity",

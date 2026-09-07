@@ -94,7 +94,6 @@ import logging
 from abc import ABC, abstractmethod
 from collections import deque
 from dataclasses import dataclass
-from enum import Enum
 from typing import Any, Callable, Optional
 
 # ============================================================================
@@ -174,8 +173,6 @@ class FixedWaitRetry(RetryStrategy):
     """固定等待重试策略"""
 
     def get_delay(self, attempt: int) -> float:
-        # attempt参数在固定延迟策略中不使用，但保持接口一致性
-        _ = attempt  # 标记参数已使用
         return self.config.initial_delay
 
 

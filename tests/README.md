@@ -28,7 +28,7 @@ pytest tests/ -v -m "not integration" --tb=short \
   --cov=core --cov=api --cov=utils --cov=xtf_cli --cov-report=term
 ```
 
-质量门禁：
+本地开发检查：
 
 ```bash
 ruff check . --ignore E501,F401
@@ -67,3 +67,13 @@ CI 固定 Ruff `0.15.13`。不要使用本机更新版本产生的全仓新规�
 - mutation failure 必须同时断言 applied prefix 和后续 action 未执行。
 - incomplete pagination、stale snapshot、unknown outcome 和 verification mismatch 必须 fail closed。
 - 真实 Feishu UAT 使用隔离资源和已记录 checksum 的 RC artifact，不属于默认 pytest 路径。
+
+## 2026-09-05 新增回归
+
+`test_review_regressions.py` 与 `test_review_api_contracts.py` 合计 101 个场景，覆盖物理行列、
+常规新增表头、索引类型、真实 Excel/CSV、混合错误重试、接口真实回执、未知写入结果、
+删除后并发变化及 CLI 真实规划器 dry-run。完整套件 552 passed。
+
+本次运行环境未安装 Ruff/Black/MyPy；它们的实际状态为“未执行”。使用
+`python tools/check_project.py --format` 先格式化并运行全部检查；使用
+`python tools/check_project.py --runtime-only` 运行语法、CLI 和测试子集。

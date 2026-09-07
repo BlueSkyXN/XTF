@@ -130,13 +130,6 @@ def _add_config_override_flags(parser: argparse.ArgumentParser) -> None:
         "run Sheet formula verification",
     )
     sheet.add_argument("--sheet-formula-max-locations", type=int)
-    _bool(
-        sheet,
-        "--sheet-report-column-diff",
-        "sheet_report_column_diff",
-        "report column differences",
-    )
-    sheet.add_argument("--sheet-diff-tolerance", type=float)
 
     sync = parser.add_argument_group("Sync")
     sync.add_argument(
@@ -156,6 +149,16 @@ def _add_config_override_flags(parser: argparse.ArgumentParser) -> None:
         "--verify-remote-writes",
         "verify_remote_writes",
         "verify remote mutations",
+    )
+    sync.add_argument(
+        "--verify-timeout-seconds",
+        type=float,
+        help="readback polling window; 0 means one read",
+    )
+    sync.add_argument(
+        "--verify-interval-seconds",
+        type=float,
+        help="initial readback interval in seconds",
     )
     selective = parser.add_argument_group("Selective")
     _bool(
