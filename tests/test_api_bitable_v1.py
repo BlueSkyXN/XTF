@@ -1,4 +1,4 @@
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -123,12 +123,19 @@ def test_v1_batch_create_reuses_one_uuid_token_and_returns_receipt():
     api, transport = make_backend(
         [
             fields_response(("fld_name", "Name", 1)),
-            response({"records": [], "record_id_list": ["rec_new"]}),
+            response(
+                {
+                    "records": [],
+                    "record_id_list": ["rec_new"],
+                    "revision": "rev-2",
+                }
+            ),
         ]
     )
     receipt = api.batch_create("app", "table", [CanonicalRecord(None, {"Name": "A"})])
     assert receipt.outcome is MutationOutcome.ACCEPTED
     assert receipt.record_ids == ("rec_new",)
+    assert receipt.revision == "rev-2"
     params = transport.call_api.call_args_list[1].kwargs["params"]
     assert params["client_token"]
     assert params["user_id_type"] == "open_id"
@@ -152,6 +159,26 @@ def test_v1_transport_failure_is_unknown_outcome_without_replay():
     receipt = api.batch_create("app", "table", [CanonicalRecord(None, {"Name": "A"})])
     assert receipt.outcome is MutationOutcome.UNKNOWN_OUTCOME
     transport.call_api.assert_called_once()
+
+
+def test_v1_business_retry_is_owned_directly_and_reuses_request_shape():
+    limited = Mock()
+    limited.status_code = 200
+    limited.headers = {}
+    limited.json.return_value = {"code": 1254290, "msg": "too many requests"}
+    api, transport = make_backend([limited, fields_response(("fld_name", "Name", 1))])
+    transport.max_retries = 1
+
+    with patch("api.bitable_v1.time.sleep") as sleep:
+        fields = api.list_fields("app", "table")
+
+    assert fields[0].name == "Name"
+    assert transport.call_api.call_count == 2
+    assert (
+        transport.call_api.call_args_list[0].kwargs["params"]
+        == transport.call_api.call_args_list[1].kwargs["params"]
+    )
+    sleep.assert_called_once_with(1.0)
 
 
 def test_v1_missing_schema_is_read_before_mutation_and_unknown_field_is_rejected():

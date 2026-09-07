@@ -14,7 +14,7 @@
     3. 字段类型推荐（基于数据分析）
     4. DataFrame 与记录列表互转
     5. 列号与字母转换（A=1, Z=26, AA=27...）
-    6. 索引值哈希计算（用于记录匹配）
+    6. 索引值规范化（用于记录匹配）
 
 核心类：
     ConversionStats (TypedDict):
@@ -63,7 +63,6 @@
     外部依赖：
         - pandas: 数据处理
         - re: 正则表达式
-        - hashlib: 哈希计算
         - datetime: 日期时间处理
 
 注意事项：
@@ -78,16 +77,17 @@
 """
 
 import re
-import json
-import hashlib
+import math
 import logging
 import datetime as dt
 import numbers
+from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Optional, TypedDict
 
 import pandas as pd
 
 from .config import TargetType
+from .key_policy import KeyPolicy
 
 
 class ConversionStats(TypedDict):
@@ -99,7 +99,18 @@ class ConversionStats(TypedDict):
 class DataConverter:
     """统一数据转换器"""
 
-    def __init__(self, target_type: TargetType):
+    MIN_TIMESTAMP_SECONDS = 946_684_800  # 2000-01-01 UTC
+    MAX_TIMESTAMP_SECONDS = 4_102_444_800  # 2100-01-01 UTC
+    MIN_TIMESTAMP_MILLISECONDS = MIN_TIMESTAMP_SECONDS * 1000
+    MAX_TIMESTAMP_MILLISECONDS = MAX_TIMESTAMP_SECONDS * 1000
+
+    def __init__(
+        self,
+        target_type: TargetType,
+        *,
+        datetime_index_granularity: str = "exact",
+        datetime_index_timezone: Optional[str] = None,
+    ):
         """
         初始化数据转换器
 
@@ -107,6 +118,13 @@ class DataConverter:
             target_type: 目标类型（多维表格或电子表格）
         """
         self.target_type = target_type
+        self.datetime_index_granularity = datetime_index_granularity
+        self.datetime_index_timezone = datetime_index_timezone
+        self.key_policy = KeyPolicy(
+            datetime_granularity=datetime_index_granularity,
+            datetime_timezone=datetime_index_timezone,
+        )
+        self._key_warnings: List[str] = []
         self.logger = logging.getLogger("XTF.converter")
 
         # 类型转换统计
@@ -120,186 +138,130 @@ class DataConverter:
         """重置转换统计"""
         self.conversion_stats = {"success": 0, "failed": 0, "warnings": []}
 
+    def consume_key_warnings(self) -> List[str]:
+        warnings = list(self._key_warnings)
+        self._key_warnings.clear()
+        return warnings
+
     def _is_empty_value(self, value: Any) -> bool:
         """判断值是否为空，兼容 list/dict 等非标量对象。"""
-        if value is None:
-            return True
+        return KeyPolicy.is_empty(value)
 
-        if isinstance(value, str):
-            return value.strip() == ""
+    @classmethod
+    def _numeric_timestamp_to_milliseconds(
+        cls, value: float, *, strict: bool = True
+    ) -> Optional[int]:
+        """Normalize supported epoch seconds/milliseconds in 2000-2100."""
+        if cls.MIN_TIMESTAMP_SECONDS <= value <= cls.MAX_TIMESTAMP_SECONDS:
+            return int(value * 1000)
+        if cls.MIN_TIMESTAMP_MILLISECONDS <= value <= cls.MAX_TIMESTAMP_MILLISECONDS:
+            return int(value)
+        if strict:
+            raise ValueError(
+                "numeric DATETIME index must be epoch seconds or milliseconds "
+                "within 2000-01-01..2100-01-01 UTC"
+            )
+        return None
 
-        if isinstance(value, dict):
-            if "value" in value:
-                return self._is_empty_value(value.get("value"))
-            return len(value) == 0
+    def _normalize_timestamp_index_value(
+        self, value: Any, granularity: Optional[str] = None
+    ) -> Optional[str]:
+        """按显式 granularity/timezone 规范化 DATETIME 索引。"""
+        effective_granularity = granularity or self.datetime_index_granularity
+        policy = (
+            self.key_policy
+            if effective_granularity == self.datetime_index_granularity
+            else KeyPolicy(
+                datetime_granularity=effective_granularity,
+                datetime_timezone=self.datetime_index_timezone,
+            )
+        )
+        return policy.normalize_datetime(value)
 
-        if isinstance(value, (list, tuple, set)):
-            return len(value) == 0 or all(self._is_empty_value(item) for item in value)
-
-        if pd.api.types.is_scalar(value):
-            try:
-                return bool(pd.isna(value))
-            except (TypeError, ValueError):
-                return False
-
-        return False
-
-    def _normalize_number_index_value(self, value: Any) -> Optional[str]:
-        """规范化数字索引值，避免 1 与 1.0 生成不同哈希。"""
-        if self._is_empty_value(value):
-            return None
-
-        if isinstance(value, bool):
-            return "1" if value else "0"
-
+    @staticmethod
+    def _datetime_like_to_milliseconds(value: Any, *, naive_utc: bool) -> Optional[int]:
+        """Convert datetime-like values while preserving the selected naive zone."""
+        if isinstance(value, dt.date) and not isinstance(value, dt.datetime):
+            value = dt.datetime.combine(value, dt.time.min)
         try:
-            number = float(str(value).strip().replace(",", ""))
+            parsed = pd.Timestamp(value)
         except (TypeError, ValueError):
-            return str(value)
-
-        if number.is_integer():
-            return str(int(number))
-        return str(number)
-
-    def _normalize_timestamp_index_value(self, value: Any) -> Optional[str]:
-        """规范化日期索引值，统一为按天比较的 ISO 日期字符串。"""
-        if self._is_empty_value(value):
             return None
-
-        if isinstance(value, pd.Timestamp):
-            value = value.to_pydatetime()
-
-        if isinstance(value, dt.datetime):
-            return value.date().isoformat()
-
-        if isinstance(value, dt.date):
-            return value.isoformat()
-
-        if isinstance(value, numbers.Real) and not isinstance(value, bool):
-            timestamp = int(float(value))
-            if timestamp > 2524608000:
-                seconds = timestamp / 1000
-            elif timestamp > 946684800:
-                seconds = timestamp
-            else:
-                return str(timestamp)
-            # Keep index normalization aligned with _force_to_timestamp(), which
-            # parses date strings as local wall-clock dates before writing them.
-            return dt.datetime.fromtimestamp(seconds).date().isoformat()
-
-        if isinstance(value, str):
-            str_val = value.strip()
-            if str_val.isdigit():
-                return self._normalize_timestamp_index_value(int(str_val))
-
-            for fmt in [
-                "%Y-%m-%d %H:%M:%S",
-                "%Y-%m-%d",
-                "%Y/%m/%d %H:%M:%S",
-                "%Y/%m/%d",
-                "%m/%d/%Y",
-                "%d/%m/%Y",
-                "%Y年%m月%d日",
-                "%m月%d日",
-                "%Y-%m-%d %H:%M",
-                "%Y/%m/%d %H:%M",
-            ]:
-                try:
-                    return dt.datetime.strptime(str_val, fmt).date().isoformat()
-                except ValueError:
-                    continue
-
-        timestamp = self._force_to_timestamp(value, "__index__")
-        if timestamp is None:
+        if pd.isna(parsed):
             return None
-        return self._normalize_timestamp_index_value(timestamp)
+        if parsed.tzinfo is None:
+            if not naive_utc:
+                return int(parsed.to_pydatetime().timestamp() * 1000)
+            parsed = parsed.tz_localize("UTC")
+        return int(parsed.tz_convert("UTC").value // 1_000_000)
 
     def _normalize_index_value(
-        self, value: Any, field_type: Optional[Any] = None
+        self,
+        value: Any,
+        field_type: Optional[Any] = None,
+        datetime_granularity: Optional[str] = None,
     ) -> Optional[str]:
         """将本地值和飞书返回值统一为可比较的索引字符串。"""
+        effective_granularity = datetime_granularity or self.datetime_index_granularity
+        policy = (
+            self.key_policy
+            if effective_granularity == self.datetime_index_granularity
+            else KeyPolicy(
+                datetime_granularity=effective_granularity,
+                datetime_timezone=self.datetime_index_timezone,
+            )
+        )
+        key = policy.normalize(value, field_type)
+        return key.value if key is not None else None
+
+    def convert_strict_key_value(
+        self,
+        value: Any,
+        field_name: str,
+        field_types: Optional[Dict[str, Any]] = None,
+    ) -> Any:
+        """Convert a key to its writable type without changing its match value."""
         if self._is_empty_value(value):
-            return None
+            raise ValueError(f"索引列 '{field_name}' 的值不能为空")
+        schema = field_types.get(field_name) if field_types else None
+        field_type = self._field_schema_type_code(schema)
+        from api.bitable_backend import FieldSchema
 
-        if isinstance(value, dict):
-            if "value" in value and "type" in value:
-                nested_type = value.get("type")
-                return self._normalize_index_value(value.get("value"), nested_type)
+        if isinstance(schema, FieldSchema) and not schema.writable:
+            raise ValueError(f"索引列 '{field_name}' 不可写")
+        if field_type == 2 and isinstance(value, float) and not math.isfinite(value):
+            raise ValueError(f"索引列 '{field_name}' 的数字值必须有限")
+        key = self.key_policy.normalize(value, field_type)
+        if key is None:
+            raise ValueError(f"索引列 '{field_name}' 的值无法归一化: {value}")
 
-            if "text" in value:
-                text_value = str(value.get("text", ""))
-                return text_value if text_value.strip() else None
-
-            if "link_record_ids" in value:
-                return self._normalize_index_value(
-                    value.get("link_record_ids"), field_type
-                )
-
-            if "id" in value:
-                return str(value.get("id"))
-
-            if "file_token" in value:
-                return str(value.get("file_token"))
-
-            normalized_dict = {
-                str(k): self._normalize_index_value(v) for k, v in value.items()
-            }
-            normalized_dict = {
-                k: v for k, v in normalized_dict.items() if v is not None
-            }
-            if not normalized_dict:
-                return None
-            return json.dumps(
-                normalized_dict,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            )
-
-        if isinstance(value, (list, tuple, set)):
-            values = list(value)
-            if field_type == 1 or all(
-                isinstance(item, dict) and "text" in item for item in values
-            ):
-                text_parts = []
-                for item in values:
-                    if isinstance(item, dict) and "text" in item:
-                        text_value = str(item.get("text", ""))
-                        if text_value.strip():
-                            text_parts.append(text_value)
-                    else:
-                        item_value = self._normalize_index_value(item)
-                        if item_value is not None:
-                            text_parts.append(item_value)
-                if not text_parts:
-                    return None
-                return "".join(text_parts)
-
-            normalized_items = [
-                self._normalize_index_value(item, field_type) for item in values
-            ]
-            normalized_items = [item for item in normalized_items if item is not None]
-            if not normalized_items:
-                return None
-            if len(normalized_items) == 1:
-                return normalized_items[0]
-            return json.dumps(
-                normalized_items, ensure_ascii=False, separators=(",", ":")
-            )
-
+        converted: Any
         if field_type == 2:
-            return self._normalize_number_index_value(value)
-
-        if field_type == 5:
-            return self._normalize_timestamp_index_value(value)
-
-        if field_type == 7:
-            if isinstance(value, bool):
-                return "true" if value else "false"
-            converted = self._force_to_boolean(value, "__index__")
-            return "true" if converted else "false"
-
-        return str(value)
+            try:
+                number = Decimal(key.value)
+            except (InvalidOperation, ValueError) as exc:
+                raise ValueError(f"索引列 '{field_name}' 无法无损转换为数字") from exc
+            if not number.is_finite():
+                raise ValueError(f"索引列 '{field_name}' 的数字值必须有限")
+            converted = (
+                int(number) if number == number.to_integral_value() else float(number)
+            )
+            if isinstance(converted, float) and not math.isfinite(converted):
+                raise ValueError(f"索引列 '{field_name}' 的数字超出可写范围")
+        elif field_type == 5:
+            converted = self.key_policy.datetime_to_milliseconds(value)
+        elif field_type == 7:
+            converted = key.value == "true"
+        elif field_type == 1:
+            converted = key.value
+        else:
+            converted = self.convert_field_value_safe(field_name, value, field_types)
+        written_key = self.key_policy.normalize(converted, field_type)
+        if written_key is None or written_key.value != key.value:
+            raise ValueError(
+                f"索引列 '{field_name}' 转换后的写入值与匹配值不同，拒绝有损转换"
+            )
+        return converted
 
     def get_index_value_hash(
         self,
@@ -315,10 +277,8 @@ class DataConverter:
                 if field_types
                 else None
             )
-            index_value = self._normalize_index_value(value, field_type)
-            if index_value is None:
-                return None
-            return hashlib.md5(index_value.encode("utf-8")).hexdigest()
+            key = self.key_policy.normalize(value, field_type)
+            return key.digest if key is not None else None
         return None
 
     @staticmethod
@@ -365,26 +325,25 @@ class DataConverter:
         field_types: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Dict[str, Any]]:
         """构建多维表格记录索引"""
-        index: Dict[str, Dict[str, Any]] = {}
         if not index_column:
-            return index
-
-        for record in records:
-            fields = record.get("fields", {})
-            if index_column in fields:
-                raw_value = fields[index_column]
-                field_type = (
-                    self._field_schema_type_code(field_types.get(index_column))
-                    if field_types
-                    else None
-                )
-                index_value = self._normalize_index_value(raw_value, field_type)
-                if index_value is None:
-                    continue
-                index_hash = hashlib.md5(index_value.encode("utf-8")).hexdigest()
-                index[index_hash] = record
-
-        return index
+            return {}
+        field_type = (
+            self._field_schema_type_code(field_types.get(index_column))
+            if field_types
+            else None
+        )
+        result = self.key_policy.build_index(
+            records,
+            value_getter=lambda record: record.get("fields", {}).get(index_column),
+            field_type=field_type,
+            context=f"目标 Bitable 索引列 '{index_column}' ",
+            allow_empty=True,
+        )
+        if result.empty_count:
+            self._key_warnings.append(
+                f"目标 Bitable 有 {result.empty_count} 条记录的 key 为空；这些记录保持不变"
+            )
+        return dict(result.items)
 
     def _detect_excel_validation(self, df: pd.DataFrame, column_name: str) -> tuple:
         """
@@ -557,15 +516,15 @@ class DataConverter:
         try:
             timestamp = int(s)
 
-            # 秒级时间戳: 1970-2050年
-            if 946684800 <= timestamp <= 2524608000:  # 2000-2050
+            # 秒级时间戳: 2000-2100年
+            if 946684800 <= timestamp <= 4102444800:
                 confidence = (
                     0.9 if 1640995200 <= timestamp <= 1893456000 else 0.7
                 )  # 2022-2030更高置信度
                 return True, confidence
 
-            # 毫秒级时间戳: 2000-2050年
-            elif 946656000000 <= timestamp <= 2524579200000:
+            # 毫秒级时间戳: 2000-2100年
+            elif 946684800000 <= timestamp <= 4102444800000:
                 confidence = 0.85
                 return True, confidence
 
@@ -963,6 +922,113 @@ class DataConverter:
 
         return analysis
 
+    def convert_write_value(
+        self, field_name: str, value: Any, field_types: Dict[str, Any]
+    ) -> Any:
+        """Planning rejects nonempty values that a permissive converter would drop/coerce."""
+        code = self._field_schema_type_code(field_types.get(field_name))
+        if code == 1 and isinstance(value, str):
+            return value
+        if code == 2:
+            if isinstance(value, bool):
+                raise ValueError(f"字段 '{field_name}' 的数字值不能是布尔值")
+            raw = str(value).strip()
+            # Preserve the existing percent-point convention ("12%" -> 12),
+            # but accept punctuation only in unambiguous numeric positions.
+            if not re.fullmatch(
+                r"[￥$]?[-+]?(?:\d{1,3}(?:,\d{3})+|\d+|\d*\.\d+)(?:\.\d+)?(?:[eE][-+]?\d+)?%?",
+                raw,
+            ):
+                raise ValueError(
+                    f"字段 '{field_name}' 需要完整数字，不能从文本猜测数值"
+                )
+            raw = raw.lstrip("￥$").rstrip("%").replace(",", "")
+            try:
+                number = Decimal(raw)
+            except InvalidOperation as error:
+                raise ValueError(
+                    f"字段 '{field_name}' 需要完整数字，不能从文本猜测数值"
+                ) from error
+            if not number.is_finite():
+                raise ValueError(f"字段 '{field_name}' 需要有限数字")
+            converted = (
+                int(number) if number == number.to_integral_value() else float(number)
+            )
+            if (
+                abs(number) > Decimal("1.7976931348623157e308")
+                or (isinstance(converted, int) and abs(converted) > 2**53 - 1)
+                or Decimal(str(converted)) != number
+            ):
+                raise ValueError(
+                    f"字段 '{field_name}' 的数字无法无损转换；请使用文本字段"
+                )
+            return converted
+        if code == 7:
+            if isinstance(value, bool):
+                return value
+            text = str(value).strip().lower()
+            if text not in {
+                "true",
+                "是",
+                "yes",
+                "1",
+                "1.0",
+                "on",
+                "checked",
+                "对",
+                "正确",
+                "ok",
+                "y",
+                "false",
+                "否",
+                "no",
+                "0",
+                "0.0",
+                "off",
+                "unchecked",
+                "错",
+                "错误",
+                "n",
+            }:
+                raise ValueError(f"字段 '{field_name}' 需要明确的是/否，不能按非空判真")
+            if text in {"1.0", "0.0"}:
+                return text == "1.0"
+        if code == 3:
+            if isinstance(value, (list, tuple)):
+                if len(value) != 1:
+                    raise ValueError(f"字段 '{field_name}' 是单选，不能丢弃多余选项")
+                value = value[0]
+            # A comma can be part of an option name; do not split single-select cells.
+            return str(value).strip()
+        if code == 5:
+            if isinstance(value, bool):
+                raise ValueError(f"字段 '{field_name}' 的日期值不能是布尔值")
+            if isinstance(value, (numbers.Real, Decimal)) or (
+                isinstance(value, str) and value.strip().lstrip("+-").isdigit()
+            ):
+                # File numeric dates retain the existing seconds/milliseconds policy.
+                return KeyPolicy(datetime_granularity="exact").datetime_to_milliseconds(
+                    value
+                )
+            if isinstance(value, str):
+                text = value.strip()
+                if not re.match(r"^\d{4}[-/年]", text):
+                    raise ValueError(
+                        f"字段 '{field_name}' 请使用含年份的 ISO 日期（YYYY-MM-DD）"
+                    )
+                if "年" in text:
+                    value = dt.datetime.strptime(text, "%Y年%m月%d日")
+            # Ordinary date fields are instants, independent of index day grouping
+            # and of the machine running CI. Naive values retain the default UTC.
+            millis = self._datetime_like_to_milliseconds(value, naive_utc=True)
+            if millis is None:
+                raise ValueError(f"字段 '{field_name}' 的非空值不是有效日期")
+            return millis
+        converted = self.convert_field_value_safe(field_name, value, field_types)
+        if converted is None and not self._is_empty_value(value):
+            raise ValueError(f"字段 '{field_name}' 的非空值无法转换；未发送任何写请求")
+        return converted
+
     def convert_field_value_safe(
         self, field_name: str, value, field_types: Optional[Dict[str, Any]] = None
     ):
@@ -1091,6 +1157,20 @@ class DataConverter:
                 .replace("%", "")
             )
 
+            # A valid scientific literal is a complete number, not text from
+            # which the leading mantissa should be extracted.
+            if re.fullmatch(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)[eE][+-]?\d+", cleaned):
+                from decimal import Decimal
+                import math
+
+                numeric = Decimal(cleaned)
+                as_float = float(numeric)
+                if not math.isfinite(as_float):
+                    raise ValueError(f"字段 '{field_name}': 数字超出有限数值范围")
+                return (
+                    int(numeric) if numeric == numeric.to_integral_value() else as_float
+                )
+
             try:
                 # 尝试转换为数字
                 if "." in cleaned:
@@ -1157,13 +1237,12 @@ class DataConverter:
 
     def _force_to_timestamp(self, value, field_name: str):
         """强制转换为时间戳"""
+        naive_utc = self.datetime_index_granularity == "exact"
         # 如果已经是数字时间戳
         if isinstance(value, (int, float)):
-            if value > 2524608000:  # 毫秒级
-                return int(value)
-            elif value > 946684800:  # 秒级，转为毫秒级
-                return int(value * 1000)
-            else:
+            try:
+                return self._numeric_timestamp_to_milliseconds(float(value))
+            except ValueError:
                 self.logger.warning(
                     f"字段 '{field_name}': 数字 {value} 不在有效时间戳范围内"
                 )
@@ -1189,7 +1268,6 @@ class DataConverter:
                 "%m/%d/%Y",
                 "%d/%m/%Y",
                 "%Y年%m月%d日",
-                "%m月%d日",
                 "%Y-%m-%d %H:%M",
                 "%Y/%m/%d %H:%M",
             ]
@@ -1197,9 +1275,15 @@ class DataConverter:
             for fmt in date_formats:
                 try:
                     dt_obj = dt.datetime.strptime(str_val, fmt)
-                    return int(dt_obj.timestamp() * 1000)
+                    return self._datetime_like_to_milliseconds(
+                        dt_obj, naive_utc=naive_utc
+                    )
                 except ValueError:
                     continue
+
+            parsed = self._datetime_like_to_milliseconds(str_val, naive_utc=naive_utc)
+            if parsed is not None:
+                return parsed
 
             # 如果都解析失败，记录警告
             self.logger.warning(
@@ -1207,9 +1291,10 @@ class DataConverter:
             )
             return None
 
-        # 处理pandas时间戳
-        if hasattr(value, "timestamp"):
-            return int(value.timestamp() * 1000)
+        # exact 的 naive 值按 UTC；day 保留历史本地业务日语义。
+        parsed = self._datetime_like_to_milliseconds(value, naive_utc=naive_utc)
+        if parsed is not None:
+            return parsed
 
         self.logger.warning(
             f"字段 '{field_name}': 无法将 {type(value).__name__} '{value}' 转换为时间戳"
@@ -1415,19 +1500,36 @@ class DataConverter:
     # ========== 电子表格转换方法 ==========
 
     def build_data_index(
-        self, df: pd.DataFrame, index_column: Optional[str]
+        self,
+        df: pd.DataFrame,
+        index_column: Optional[str],
+        field_types: Optional[Dict[str, Any]] = None,
+        *,
+        allow_empty: bool = True,
+        context: str = "Sheet 索引列",
     ) -> Dict[str, int]:
         """构建电子表格数据索引（哈希 -> 行号）"""
-        index: Dict[str, int] = {}
         if not index_column:
-            return index
-
-        for idx, row in df.iterrows():
-            index_hash = self.get_index_value_hash(row, index_column)
-            if index_hash:
-                index[index_hash] = idx
-
-        return index
+            return {}
+        field_type = (
+            self._field_schema_type_code(field_types.get(index_column))
+            if field_types
+            else None
+        )
+        result = self.key_policy.build_index(
+            df.iterrows(),
+            value_getter=lambda item: (
+                item[1][index_column] if index_column in item[1] else None
+            ),
+            field_type=field_type,
+            context=context,
+            allow_empty=allow_empty,
+        )
+        if result.empty_count:
+            self._key_warnings.append(
+                f"{context}有 {result.empty_count} 条记录的 key 为空；这些记录保持不变"
+            )
+        return {digest: item[0] for digest, item in result.items.items()}
 
     def column_number_to_letter(self, col_num: int) -> str:
         """将列号转换为字母（1->A, 2->B, ..., 26->Z, 27->AA）"""
@@ -1440,6 +1542,8 @@ class DataConverter:
 
     def column_letter_to_number(self, col_letter: str) -> int:
         """将列字母转换为数字（A->1, B->2, ..., Z->26, AA->27）"""
+        if not col_letter or not re.fullmatch(r"[A-Z]+", col_letter):
+            raise ValueError(f"invalid column letter: {col_letter!r}")
         result = 0
         for char in col_letter:
             result = result * 26 + (ord(char) - ord("A") + 1)
@@ -1526,62 +1630,77 @@ class DataConverter:
 
         return positions
 
-    def values_to_df(self, values: List[List[Any]]) -> pd.DataFrame:
-        """将电子表格值格式转换为DataFrame"""
+    def values_to_df(self, values: List[List[Any]], *, layout=None) -> pd.DataFrame:
+        """Project named columns without ever promoting a data row to a header."""
+        if layout is None:
+            layout = self.build_sheet_layout(values)
+        if layout is None:
+            return pd.DataFrame()
+        rows = []
+        for physical_row in layout.physical_row_numbers:
+            offset = physical_row - layout.start_row
+            row = values[offset] if offset < len(values) else []
+            rows.append(
+                [
+                    (
+                        row[column - layout.start_column]
+                        if column - layout.start_column < len(row)
+                        else None
+                    )
+                    for column in layout.header_physical_cols
+                ]
+            )
+        return pd.DataFrame(rows, columns=layout.header_names, dtype=object)
+
+    def build_sheet_layout(
+        self,
+        values: List[List[Any]],
+        *,
+        start_row: int = 1,
+        start_column: int = 1,
+    ):
+        """Retain the physical header and occupied rows of a Sheet read."""
+        from .snapshot import SheetLayout
+
         if not values:
-            return pd.DataFrame()
-
-        # 清理数据：移除完全空的行和列
-        cleaned_values = []
-        for row in values:
-            # 移除行尾的空值
-            while row and (
-                row[-1] is None or row[-1] == "" or str(row[-1]).strip() == ""
-            ):
-                row = row[:-1]
-            # 如果行不为空，则保留
-            if row and any(
-                cell is not None and str(cell).strip() != "" for cell in row
-            ):
-                cleaned_values.append(row)
-
-        if not cleaned_values:
-            return pd.DataFrame()
-
-        # 第一行作为表头
-        headers = cleaned_values[0] if cleaned_values else []
-        data_rows = cleaned_values[1:] if len(cleaned_values) > 1 else []
-
-        # 清理表头：移除空的列名
-        valid_headers = []
-        valid_col_indices = []
-        for i, header in enumerate(headers):
-            if header is not None and str(header).strip() != "":
-                valid_headers.append(str(header).strip())
-                valid_col_indices.append(i)
-
-        # 如果没有有效的表头，返回空DataFrame
-        if not valid_headers:
-            return pd.DataFrame()
-
-        # 清理数据行：只保留有效列的数据
-        cleaned_data_rows = []
-        for row in data_rows:
-            cleaned_row = []
-            for i in valid_col_indices:
-                if i < len(row):
-                    cleaned_row.append(row[i])
-                else:
-                    cleaned_row.append(None)
-            cleaned_data_rows.append(cleaned_row)
-
-        # 创建DataFrame
-        if cleaned_data_rows:
-            df = pd.DataFrame(cleaned_data_rows, columns=valid_headers)
-        else:
-            df = pd.DataFrame(columns=valid_headers)
-
-        return df
+            return None
+        if any(not isinstance(row, (list, tuple)) for row in values):
+            raise ValueError("Sheet values 必须为二维数组")
+        occupied = [
+            idx
+            for idx, row in enumerate(values)
+            if any(not self._is_empty_value(cell) for cell in row)
+        ]
+        if not occupied:
+            return None
+        if occupied[0] != 0:
+            raise ValueError("Sheet 起始行表头为空但下方存在数据，拒绝将数据行作为表头")
+        header_physical_cols = []
+        header_names = []
+        for idx, cell in enumerate(values[0]):
+            if not self._is_empty_value(cell):
+                header_names.append(str(cell).strip())
+                header_physical_cols.append(start_column + idx)
+        if len(set(header_names)) != len(header_names):
+            raise ValueError("目标 Sheet header 包含重复列名")
+        raw_width = max(
+            (
+                idx + 1
+                for row in values
+                for idx, cell in enumerate(row)
+                if not self._is_empty_value(cell)
+            ),
+            default=0,
+        )
+        return SheetLayout(
+            start_row=start_row,
+            start_column=start_column,
+            header_physical_cols=tuple(header_physical_cols),
+            header_names=tuple(header_names),
+            header_to_physical_col=dict(zip(header_names, header_physical_cols)),
+            physical_row_numbers=tuple(start_row + idx for idx in occupied if idx > 0),
+            raw_width=raw_width,
+        )
 
     def get_range_string(
         self, sheet_id: str, start_row: int, start_col: str, end_row: int, end_col: str
@@ -1592,7 +1711,11 @@ class DataConverter:
     # ========== 统一接口方法 ==========
 
     def df_to_records(
-        self, df: pd.DataFrame, field_types: Optional[Dict[str, Any]] = None
+        self,
+        df: pd.DataFrame,
+        field_types: Optional[Dict[str, Any]] = None,
+        *,
+        index_column: Optional[str] = None,
     ) -> List[Dict]:
         """将DataFrame转换为飞书记录格式（多维表格模式）"""
         if self.target_type != TargetType.BITABLE:
@@ -1603,11 +1726,19 @@ class DataConverter:
             fields = {}
             for k, v in row.to_dict().items():
                 if not self._is_empty_value(v):
-                    converted_value = self.convert_field_value_safe(
-                        str(k), v, field_types
-                    )
+                    field_name = str(k)
+                    # Use strict key conversion for the index column so that
+                    # match digest and mutation payload share one canonical value.
+                    if index_column and field_name == index_column:
+                        converted_value = self.convert_strict_key_value(
+                            v, field_name, field_types
+                        )
+                    else:
+                        converted_value = self.convert_field_value_safe(
+                            field_name, v, field_types
+                        )
                     if converted_value is not None:
-                        fields[str(k)] = converted_value
+                        fields[field_name] = converted_value
 
             record = {"fields": fields}
             records.append(record)

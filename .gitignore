@@ -213,3 +213,7 @@ CLAUDE.md
 /fixes
 docs/bug.md
 /local
+
+# API probe results and upstream comparison output
+/api-probe.json
+/upstream-api-drift/

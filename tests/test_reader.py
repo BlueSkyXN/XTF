@@ -319,3 +319,41 @@ class TestEdgeCases:
 
         assert len(df) == 2
         assert "ID" in df.columns
+
+
+@pytest.mark.parametrize(
+    ("calamine", "openpyxl", "primary", "fallback"),
+    [
+        (True, True, "calamine", "openpyxl"),
+        (True, False, "calamine", None),
+        (False, True, "openpyxl", None),
+        (False, False, None, None),
+    ],
+)
+def test_engine_detection_keeps_both_import_probes(
+    monkeypatch, calamine, openpyxl, primary, fallback
+):
+    import builtins
+    from types import ModuleType
+    from utils.excel_reader import get_available_engines
+
+    original_import = builtins.__import__
+    availability = {"python_calamine": calamine, "openpyxl": openpyxl}
+    calls = []
+
+    def import_engine(name, *args, **kwargs):
+        if name in availability:
+            calls.append(name)
+            if not availability[name]:
+                raise ImportError(name)
+            return ModuleType(name)
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", import_engine)
+    assert get_available_engines() == {
+        "calamine": calamine,
+        "openpyxl": openpyxl,
+        "primary": primary,
+        "fallback": fallback,
+    }
+    assert calls == ["python_calamine", "openpyxl"]

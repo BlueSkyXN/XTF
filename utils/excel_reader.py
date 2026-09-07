@@ -1,87 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-Excel 智能读取模块
+"""Excel reading with Calamine-first, OpenPyXL-fallback engine selection.
 
-模块概述：
-    此模块提供 Excel 文件的智能读取功能，自动选择最优的读取引擎。
-    优先使用高性能的 Calamine 引擎（Rust 实现），失败时自动回退
-    到稳定的 OpenPyXL 引擎（Python 实现）。
-
-引擎对比：
-    Calamine (python-calamine):
-        - 实现语言：Rust
-        - 性能：⚡ 读取速度提升 4-20 倍
-        - 支持格式：.xlsx, .xlsm, .xls, .xlsb, .ods
-        - 限制：仅支持读取，不支持写入
-        - 安装：pip install python-calamine
-
-    OpenPyXL:
-        - 实现语言：Python
-        - 性能：📊 标准性能
-        - 支持格式：.xlsx, .xlsm
-        - 优势：稳定可靠，社区成熟
-        - 安装：pip install openpyxl
-
-主要功能：
-    1. 智能读取 Excel 文件（自动选择引擎）
-    2. 检测当前环境可用的引擎
-    3. 打印引擎信息（用于调试）
-
-核心函数：
-    smart_read_excel(file_path, sheet_name, **kwargs):
-        智能读取 Excel 文件，自动选择最优引擎
-
-    get_available_engines():
-        检测当前环境可用的 Excel 读取引擎
-
-    print_engine_info(verbose):
-        打印/返回当前可用的 Excel 引擎信息
-
-引擎选择策略：
-    1. 首先尝试 Calamine 引擎
-    2. Calamine 未安装或读取失败时，使用 OpenPyXL
-    3. 两者都失败时抛出异常
-
-使用示例：
-    # 智能读取（自动选择引擎）
-    >>> from utils.excel_reader import smart_read_excel
-    >>> df = smart_read_excel('data.xlsx')
-    >>> df = smart_read_excel('data.xlsx', sheet_name='Sheet2')
-    >>> df = smart_read_excel('data.xlsx', header=0, dtype={'ID': str})
-
-    # 检测可用引擎
-    >>> from utils.excel_reader import get_available_engines
-    >>> engines = get_available_engines()
-    >>> print(f"主引擎: {engines['primary']}")
-    >>> print(f"备用引擎: {engines['fallback']}")
-
-    # 打印引擎信息
-    >>> from utils.excel_reader import print_engine_info
-    >>> print_engine_info()
-    🚀 Excel引擎: Calamine (高性能模式) + OpenPyXL (备用)
-
-依赖关系：
-    必需依赖：
-        - pandas: 数据处理框架
-    可选依赖：
-        - python-calamine: 高性能 Excel 读取（推荐）
-        - openpyxl: 标准 Excel 读取
-
-性能建议：
-    1. 生产环境建议安装 python-calamine
-    2. 大文件（>10MB）强烈推荐使用 Calamine
-    3. 如需写入 Excel，请直接使用 pandas + openpyxl
-
-注意事项：
-    1. 函数参数会直接传递给 pd.read_excel
-    2. sheet_name 默认为 0（第一个工作表）
-    3. 引擎切换会记录警告日志
-    4. 所有引擎都失败时会抛出异常
-
-作者: XTF Team
-版本: 1.7.3+
-更新日期: 2026-01-24
+Engine imports in get_available_engines are availability probes, not unused
+imports. No engine choice is cached: installed engines can differ between runs.
+OpenPyXL cannot read legacy .xls files; fallback can still fail for that format.
 """
 
 from pathlib import Path
@@ -107,8 +30,7 @@ def smart_read_excel(
     智能读取 Excel 文件，自动选择最优引擎
 
     引擎优先级:
-    1. Calamine (python-calamine) - Rust实现，性能优异
-       - 读取速度: 4-20倍于 OpenPyXL
+    1. Calamine (python-calamine)
        - 支持格式: .xlsx, .xlsm, .xls, .xlsb, .ods
        - 限制: 仅支持读取，不支持写入
 
@@ -210,10 +132,6 @@ def get_available_engines() -> EngineInfo:
             engines["fallback"] = "openpyxl"
     except ImportError:
         pass
-
-    # 如果 Calamine 可用，OpenPyXL 作为备用
-    if engines["calamine"] and engines["openpyxl"]:
-        engines["fallback"] = "openpyxl"
 
     return engines
 

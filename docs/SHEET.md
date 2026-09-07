@@ -1,19 +1,19 @@
 # XTF 电子表格算法设计
 
-> 源码位置：[`core/engine.py`](../core/engine.py) · [`api/sheet.py`](../api/sheet.py)
+> 源码位置：[`core/service.py`](../core/service.py) · [`api/sheet.py`](../api/sheet.py)
 
 ---
 
 ## 目录
 
 - [1. 概述](#1-概述)
-- [2. 三层大数据稳定上传保障](#2-三层大数据稳定上传保障)
+- [2. Typed 分块与失败边界](#2-typed-分块与失败边界)
 - [3. 智能分块策略](#3-智能分块策略)
 - [4. API 接口选择与调用](#4-api-接口选择与调用)
 - [5. 公式保护与双读验证](#5-公式保护与双读验证)
-- [6. 列级差异检测报告](#6-列级差异检测报告)
-- [7. 网格限制处理](#7-网格限制处理)
-- [8. 性能基准](#8-性能基准)
+- [6. 网格限制处理](#6-网格限制处理)
+- [7. 调优起点（非性能保证）](#7-调优起点非性能保证)
+- [8. 物理布局与追加位置](#8-物理布局与追加位置)
 
 ---
 
@@ -23,7 +23,7 @@
 
 | 挑战 | 原因 | XTF 解决方案 |
 |------|------|-------------|
-| **请求体积限制** | 单次 API ≤ 10MB | 三层分块 + 二分重试 |
+| **请求体积限制** | 单次 API 有体积上限 | RangeChunker 预分块 + 90227 有界拆分 |
 | **行列限制** | 单次 5000 行 × 100 列 | 可配置分块参数 |
 | **公式保护** | 覆盖会破坏公式 | 双读检测 + 列级保护 |
 | **范围定位** | A1 记法、列号转换 | 自动范围计算与验证 |
@@ -31,29 +31,26 @@
 
 ---
 
-## 2. 三层大数据稳定上传保障
+## 2. Typed 分块与失败边界
 
 ### 第一层：预分块
 
 在发送 API 请求之前，基于配置参数进行初始分块：
 
 ```
-DataFrame (N 行 × M 列)
+逻辑 A1 range + 矩阵
         ↓
-按行分块: max(batch_size, sheet_write_max_rows)
+RangeChunker 按 write_max_rows × write_max_columns 双向切片
         ↓
-按列分块: sheet_write_max_cols (默认 100)
-        ↓
-生成 K 个子块 → 逐块发送
+生成 typed RangeChunk → 顺序提交 → 累积 actual/applied ranges
 ```
 
 **默认分块参数**：
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `sheet_write_max_rows` | `5000` | 写入分块最大行数 |
-| `sheet_write_max_cols` | `100` | 写入分块最大列数 |
-| `batch_size` | `1000` | 批处理大小 |
+| `target.sheet.write_max_rows` | `5000` | 写入分块最大行数 |
+| `target.sheet.write_max_columns` | `100` | 写入分块最大列数 |
 
 ### 第二层：自动二分重试
 
@@ -76,7 +73,7 @@ DataFrame (N 行 × M 列)
 
 ### 第三层：智能重试与频控
 
-在前两层基础上，应用通用重试和频率控制机制：
+在确定性分块和有界拆分基础上，应用通用重试和频率控制机制：
 
 - **默认模式**：固定延迟 + 固定重试次数
 - **高级模式**：可配置指数退避/线性增长/滑动窗口等策略
@@ -105,16 +102,17 @@ DataFrame (N 行 × M 列)
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `sheet_scan_max_rows` | `5000` | 每块最大行数 |
-| `sheet_scan_max_cols` | `100` | 每块最大列数 |
+| `target.sheet.scan_max_rows` | `5000` | 每块最大行数 |
+| `target.sheet.scan_max_columns` | `100` | 每块最大列数 |
 
-`sheet_scan_max_rows/cols` 是单次读取分块上限，不是完整表的总扫描上限。若工作表
+`target.sheet.scan_max_rows/scan_max_columns` 是单次读取分块上限，不是完整表的总扫描上限。若工作表
 元数据不可用，XTF 只执行该大小的有界诊断读取并将结果标记为不完整；依赖远端
 索引的 `full` / `incremental` / `overwrite` 会停止写入，而不会把截断数据当成完整表。
 
 ### 写入分块
 
-写入采用与读取类似的分块策略，但额外包含二分重试机制：
+typed 写入统一由 `RangeChunker` 计算 A1 范围、矩阵切片和行列偏移。每个请求最多
+`5000` 行、`100` 列；`5001 × 101` 会被拆成四个合规块并按顺序提交。写入采用与读取类似的分块策略，但额外包含二分重试机制：
 
 ```
 待写入数据 → 按(行, 列)预分块 → 逐块写入
@@ -129,10 +127,30 @@ clone 模式下清空数据也需要分块（写入空值）：
 ```
 清空范围 (R 行 × C 列)
         ↓
-按 sheet_write_max_rows × sheet_write_max_cols 分块
+按 target.sheet.write_max_rows × target.sheet.write_max_columns 分块
         ↓
 逐块写入空值 (batch_update)
 ```
+
+空矩阵按块惰性生成；不会先为整个大范围分配一份同尺寸空矩阵。batch update 的每个
+logical range 也先经过同一个 `RangeChunker`，随后逐块顺序提交并在首个失败处停止。
+XTF 不把未经 OpenAPI 或真实 UAT 证明的“单请求可包含多少个 ranges”固化为公共上限。
+
+### Wide append
+
+超过 `100` 列的 append 先只追加第一组不超过 `100` 列的 anchor band。只有服务端返回
+唯一且形状匹配的 actual range 后，XTF 才按该实际行区间对剩余列执行固定范围 write：
+
+```text
+append A:CV → actual A10:CV11
+                 ↓
+fixed write CW10:...11
+```
+
+actual range 缺失、重复或形状不匹配时不猜测落点，立即返回 `indeterminate` 并停止后续
+列带。typed `MutationReceipt` 同时携带 `requested_count`、`accepted_count`、`unit`、
+`actual_ranges`、`failed_batch_index`、`readback` 和 `unknown_scope`，因此 partial prefix
+与未知落点不会被报告成完整成功。
 
 ---
 
@@ -148,7 +166,7 @@ clone 模式下清空数据也需要分块（写入空值）：
 | 读取数据 | GET | `/values/{range}` | 按范围读取单元格 |
 | 写入数据 | PUT | `/values` | 精确重写指定范围 |
 | 追加数据 | POST | `/values_append` | 智能追加到末尾 |
-| 批量更新 | POST | `/values_batch_update` | 多范围同时更新 |
+| 批量更新 | POST | `/values_batch_update` | logical ranges 分块后顺序更新 |
 | 设置格式 | PUT | `/styles` | 设置单元格格式 |
 | 数据验证 | POST | `/dataValidation` | 创建下拉列表 |
 
@@ -178,17 +196,17 @@ get_info(范围) → batch_update(清空) → values PUT(全部写入)
 
 ## 5. 公式保护与双读验证
 
-> 源码：`core/engine.py` → `get_sheet_data_with_validation()`
+> 源码：`core/service.py` → `get_sheet_data_with_validation()`
 
 ### 双读策略
 
-当 `sheet_validate_results: true` 或 `sheet_protect_formulas: true` 时，系统执行双读：
+当 `target.sheet.validate_results: true` 或 `target.sheet.protect_formulas: true` 时，系统执行双读：
 
 ```
-第一次读取：sheet_value_render_option = "Formula"
+第一次读取：target.sheet.value_render_option = "Formula"
     → 获取公式文本，识别哪些列包含公式
 
-第二次读取：sheet_value_render_option = "FormattedValue"
+第二次读取：target.sheet.value_render_option = "FormattedValue"
     → 获取计算后的结果值，用于差异对比
 ```
 
@@ -206,8 +224,8 @@ get_info(范围) → batch_update(清空) → values PUT(全部写入)
   └─ 数据列 → 正常同步
 ```
 
-当 `sheet_protect_formulas: true` 时，仅支持 `sync_mode: full`：
-1. 自动启用 `sheet_validate_results: true`
+当 `target.sheet.protect_formulas: true` 时，仅支持 `sync.mode: full`：
+1. 自动启用 `target.sheet.validate_results: true`
 2. 配置加载时要求有效索引列，用于不移动行地精确匹配
 3. 双读任一步失败或无法确认公式列时停止写入
 4. 从同步列表中移除公式列，数据列使用精确列 range 写入
@@ -217,9 +235,9 @@ get_info(范围) → batch_update(清空) → values PUT(全部写入)
 
 ### 写后 Sheet AI 公式验证
 
-`sheet_verify_formulas: true` 是独立的写后门禁，不由 `sheet_protect_formulas` 自动开启。
+`target.sheet.verify_formulas: true` 是独立的写后门禁，不由公式保护自动开启。
 同步引擎使用 typed mutation receipt 中已成功写入的实际行区间，按
-`start_column + 当前表头宽度` 构造不带 sheet prefix 的 A1 ranges，并调用：
+`start_column + 当前物理数据宽度（包括空表头列）` 构造不带 sheet prefix 的 A1 ranges，并调用：
 
 ```http
 POST /open-apis/sheet_ai/v2/spreadsheets/{token}/tools/invoke_read
@@ -230,60 +248,12 @@ POST /open-apis/sheet_ai/v2/spreadsheets/{token}/tools/invoke_read
 actual range 时不会猜测落点或改扫全表，而是报告验证范围未知。XTF 只验证既有公式，
 不会为新增行生成、复制或平移公式。
 
-`sheet_validate_results` 仍保持写前 `Formula` / `FormattedValue` 双读与差异报告职责，
+`target.sheet.validate_results` 仍保持写前 `Formula` / `FormattedValue` 双读与差异报告职责，
 没有被改造成写后验证。
 
 ---
 
-## 6. 列级差异检测报告
-
-> 源码：`core/engine.py` → `validate_and_report_differences()`, `print_column_diff_report()`
-
-### 差异比较逻辑
-
-| 数据类型 | 比较方式 |
-|----------|----------|
-| 空值 | 双方均为空 → 相等；一方为空 → 不等 |
-| 数字 | 差值 ≤ `sheet_diff_tolerance` → 相等 |
-| 字符串 | 去除首尾空格后精确比较 |
-| 其他 | 转为字符串后比较 |
-
-### 报告结构
-
-```
-════════════════════════════════════════════
-📊 列差异检测报告
-时间: 2024-01-15 10:30:00
-模式: 逻辑同步+结果检测
-════════════════════════════════════════════
-🔒 公式列（已保护，不覆盖）:
-  ✓ 销售额: 120/39749 行结果不一致 (0.30%)
-  → 建议: 检查输入数据列是否变化
-
-📝 数据列（已同步）:
-  ✓ 问题分类: 50 行差异 → 已更新
-  ✓ 状态: 10 行差异 → 已更新
-
-⚠️  异常列:
-  ✗ 金额: 列数据长度不一致
-════════════════════════════════════════════
-总计: 3/19 列有差异
-同步完成: 2/19 列
-保护跳过: 1/19 列
-════════════════════════════════════════════
-```
-
-### 报告分类
-
-| 分类 | 图标 | 说明 |
-|------|------|------|
-| 公式列 | 🔒 | 已保护，仅显示差异统计 |
-| 数据列 | 📝 | 已同步，显示更新行数 |
-| 异常列 | ⚠️ | 比较过程出错 |
-
----
-
-## 7. 网格限制处理
+## 6. 网格限制处理
 
 飞书电子表格的格式化操作不能超出当前网格范围（已有数据的区域）。
 
@@ -304,23 +274,38 @@ actual range 时不会猜测落点或改扫全表，而是报告验证范围未�
 
 ---
 
-## 8. 性能基准
+## 7. 调优起点（非性能保证）
 
-不同数据规模下的参考性能（网络状况良好时）：
-
-| 数据规模 | 推荐 batch_size | 推荐分块行数 | 预计耗时 |
-|----------|----------------|-------------|----------|
-| 1K 行 × 20 列 | 1000 | 5000 | < 10s |
-| 5K 行 × 50 列 | 500 | 5000 | 30-60s |
-| 10K 行 × 50 列 | 500 | 3000 | 1-3min |
-| 50K 行 × 100 列 | 200 | 2000 | 5-15min |
+对 Sheet 目标，`config init --target-type sheet` 的初始值为 `control.batch_size: 1000`、
+`control.rate_limit_delay: 0.1`，以及 `target.sheet` 的读写窗口 `5000` 行 × `100` 列。这些
+是可修改的起点，不是性能基准、时延承诺或 Feishu 服务等级保证。实际吞吐会受数据形状、目标表状态、
+网络、限流和 API 响应影响；应先用 dry-run 和运行结果调整。
 
 **优化建议**：
 
 | 场景 | 建议 |
 |------|------|
-| 频繁超时 | 降低 `sheet_write_max_rows`，增大 `max_retries` |
-| 90227 错误频繁 | 降低 `batch_size` 和分块参数 |
-| 限流 429 | 增大 `rate_limit_delay`，或启用高级频控 |
-| 选择性同步 | 使用 `selective_sync` 减少同步列数 |
-| 公式保护 | 启用 `sheet_protect_formulas` 避免不必要的覆盖 |
+| 频繁超时 | 降低 `target.sheet.write_max_rows`，增大 `control.max_retries` |
+| 90227 错误频繁 | 降低 `control.batch_size` 和 Sheet 读写窗口 |
+| 限流 429 | 增大 `control.rate_limit_delay`，或启用高级频控 |
+| 选择性同步 | 使用 `sync.selective` 或 `--selective --column NAME` 减少同步列数 |
+| 公式保护 | 启用 `target.sheet.protect_formulas` 或 `--sheet-protect-formulas` 避免不必要的覆盖 |
+
+## 8. 物理布局与追加位置
+
+空表头列仍占用物理列；中间空行仍占用物理行。逻辑匹配行相邻不能推出物理行相邻。
+matched update 只合并真正连续的物理行，选择性更新只写实际选中的列。普通 full/incremental
+新增、append_only 和只有表头的目标都按目标表头投影；完全空目标先建立表头。
+
+append action 保存已读取目标最后占用物理行之后的起点。Sheet values_append 使用
+`insertDataOption=INSERT_ROWS`；每个后续 anchor 块从上一块服务端实际结束行之后开始，
+其余列带按对应实际行范围写入，不从表头或中间空位开始寻找写入位置。
+
+overwrite 按原始物理矩阵重建，保留未匹配记录的空列及未命名单元格，不将逻辑紧凑列直接
+当作真实列位置。此模式不提供公式保护，必须遵守现有模式约束。
+
+完整原始内容进入 Sheet 指纹，空行插入也会改变快照。双读或必要的重新读取失败时停止；
+写后读取不能静默接受本次实际写入范围以外的内容变化。多次远端请求并非原子事务。
+
+这些路径已经过本地回归测试，真实 Sheet 行插入、公式和宽表行为仍需按
+[隔离联调步骤](../.local/review-20260905/UAT_RUNBOOK.md) 实测。

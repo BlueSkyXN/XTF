@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import logging
+import math
+import time
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from datetime import datetime, timezone as datetime_timezone
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .auth import FeishuAuth
 from .base import RetryableAPIClient
@@ -23,7 +27,7 @@ from .bitable_backend import (
     field_is_writable,
     field_kind_from_type,
 )
-from .sdk import FeishuAPIError
+from .sdk import FeishuAPIError, FeishuResponseParser
 from .url import encode_path_segment
 
 
@@ -121,41 +125,48 @@ class BaseV3Backend:
         retry_transport: bool = True,
         **kwargs: Any,
     ) -> Dict[str, Any]:
-        response = self.api_client.call_api(
-            method,
-            url,
-            headers=self.auth.get_auth_headers(),
-            retry_transport=retry_transport,
-            **kwargs,
-        )
-        try:
-            payload = response.json()
-        except ValueError as exc:
-            raise BaseV3MatrixError("Base v3 response JSON is invalid") from exc
-        # HTTP errors are deliberately classified before success envelope checks.
-        if response.status_code >= 400:
-            if isinstance(payload, dict):
-                code = payload.get("code", response.status_code)
-                try:
-                    code = int(code)
-                except (TypeError, ValueError):
-                    code = response.status_code
-                raise FeishuAPIError(
-                    code,
-                    str(
-                        payload.get("msg")
-                        or payload.get("message")
-                        or f"HTTP {response.status_code}"
-                    ),
-                    http_status=response.status_code,
-                    response_data=payload,
-                )
-            raise FeishuAPIError(
-                response.status_code,
-                f"HTTP {response.status_code}",
-                http_status=response.status_code,
+        """Share a single attempt budget across HTTP and business retries."""
+        from .base import RequestAttemptBudget
+
+        max_retries = getattr(self.api_client, "max_retries", 3)
+        if not isinstance(max_retries, int):
+            max_retries = 3
+        budget = RequestAttemptBudget(max(0, max_retries) + 1)
+        logger = logging.getLogger("XTF.Base_v3")
+        for attempt in range(max(0, max_retries) + 1):
+            before = budget.remaining
+            response = self.api_client.call_api(
+                method,
+                url,
+                headers=self.auth.get_auth_headers(),
+                retry_transport=retry_transport,
+                attempt_budget=budget,
+                **kwargs,
             )
-        return self._require_envelope(payload)
+            # Alternate transports may not implement shared accounting.
+            if budget.remaining == before:
+                budget.consume()
+            try:
+                result = FeishuResponseParser.parse(response)
+                return self._require_envelope(result)
+            except FeishuAPIError as error:
+                retryable_business_error = (
+                    error.http_status is not None
+                    and error.http_status < 400
+                    and error.code in FeishuResponseParser.RETRYABLE_BIZ_CODES
+                )
+                if not retryable_business_error or not budget.remaining:
+                    raise
+                wait_time = (
+                    error.retry_after
+                    if error.retry_after is not None
+                    else float(2**attempt)
+                )
+                logger.warning(
+                    "Base v3 业务错误码 %s，等待 %ss 后重试", error.code, wait_time
+                )
+                time.sleep(wait_time)
+        raise RuntimeError("Base v3 retry loop exited unexpectedly")
 
     @staticmethod
     def _string_list(value: Any, name: str, *, allow_empty: bool = True) -> List[str]:
@@ -214,6 +225,30 @@ class BaseV3Backend:
             return ids
         return value
 
+    @staticmethod
+    def _canonical_datetime(value: Any, base_timezone: str) -> Any:
+        """Keep a date's instant when records are copied to a different Base.
+
+        Matrix date strings use the response's timezone unless an offset is
+        explicit. Numeric millisecond timestamps and empty values need no change.
+        """
+        if not isinstance(value, str) or not value:
+            return value
+        try:
+            instant = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if instant.tzinfo is None:
+                instant = instant.replace(tzinfo=ZoneInfo(base_timezone))
+            delta = instant.astimezone(datetime_timezone.utc) - datetime(
+                1970, 1, 1, tzinfo=datetime_timezone.utc
+            )
+            return (
+                delta.days * 86400 + delta.seconds
+            ) * 1000 + delta.microseconds // 1000
+        except (ValueError, OverflowError, ZoneInfoNotFoundError) as error:
+            raise BaseV3MatrixError(
+                "datetime cell cannot be interpreted using its Base timezone"
+            ) from error
+
     @classmethod
     def _parse_matrix(cls, data: Dict[str, Any]) -> _MatrixPage:
         timezone = data.get("timezone")
@@ -229,6 +264,8 @@ class BaseV3Backend:
                 "fields, field_id_list, and field_type_list lengths differ",
                 response_data=data,
             )
+        if len(set(names)) != len(names) or len(set(field_ids)) != len(field_ids):
+            raise BaseV3MatrixError("duplicate field names or field IDs in matrix")
         raw_fields = data.get("field_schema", data.get("field_definitions", []))
         if raw_fields and (
             not isinstance(raw_fields, list) or len(raw_fields) != len(names)
@@ -245,6 +282,8 @@ class BaseV3Backend:
             )
         )
         record_ids = cls._string_list(data.get("record_id_list"), "record_id_list")
+        if len(set(record_ids)) != len(record_ids):
+            raise BaseV3MatrixError("duplicate record IDs in matrix")
         rows = data.get("data")
         if not isinstance(rows, list) or any(not isinstance(row, list) for row in rows):
             raise BaseV3MatrixError("data must be an array of rows", response_data=data)
@@ -263,7 +302,11 @@ class BaseV3Backend:
                 CanonicalRecord(
                     record_id,
                     {
-                        field.name: cls._canonical_cell(field, row[pos])
+                        field.name: (
+                            cls._canonical_datetime(row[pos], timezone)
+                            if field.kind is FieldKind.DATETIME
+                            else cls._canonical_cell(field, row[pos])
+                        )
                         for pos, field in enumerate(fields)
                     },
                 )
@@ -289,6 +332,12 @@ class BaseV3Backend:
         if missing is None:
             missing = []
         missing_ids = cls._string_list(missing, "record_not_found")
+        if len(set(missing_ids)) != len(missing_ids) or set(missing_ids) & set(
+            record_ids
+        ):
+            raise BaseV3MatrixError(
+                "record_not_found contains duplicate or present IDs"
+            )
         return _MatrixPage(
             tuple(records),
             fields,
@@ -319,6 +368,8 @@ class BaseV3Backend:
     def list_fields(self, base_token: str, table_id: str) -> tuple[FieldSchema, ...]:
         offset = 0
         result: List[FieldSchema] = []
+        seen_ids: set[str] = set()
+        seen_names: set[str] = set()
         page_limit = min(self.max_page_size, 100)
         total: Optional[int] = None
         while True:
@@ -357,6 +408,10 @@ class BaseV3Backend:
                     raise BaseV3MatrixError(
                         "field entry requires id, name, and string type"
                     )
+                if field_id in seen_ids or name in seen_names:
+                    raise BaseV3MatrixError("duplicate field identity in fields read")
+                seen_ids.add(field_id)
+                seen_names.add(name)
                 result.append(self._field_schema(name, field_id, raw_type, item))
             if len(result) == total:
                 schemas = tuple(result)
@@ -397,6 +452,7 @@ class BaseV3Backend:
         first_timezone: Optional[str] = None
         first_revision: int | str | None = None
         all_records: List[CanonicalRecord] = []
+        seen_record_ids: set[str | None] = set()
         ignored: List[Mapping[str, Any]] = []
         missing: List[str] = []
         last_fields: tuple[FieldSchema, ...] = ()
@@ -449,6 +505,10 @@ class BaseV3Backend:
                 raise BaseV3MatrixError(
                     "record pagination returned an empty page with has_more=true"
                 )
+            page_record_ids = {record.record_id for record in page.records}
+            if seen_record_ids & page_record_ids:
+                raise BaseV3MatrixError("duplicate record IDs across record pages")
+            seen_record_ids.update(page_record_ids)
             all_records.extend(page.records)
             ignored.extend(page.ignored_fields)
             missing.extend(page.record_not_found)
@@ -484,6 +544,7 @@ class BaseV3Backend:
         """Create one field; Base v3 has no multi-field create endpoint."""
         if not isinstance(field_name, str) or not field_name.strip():
             raise ValueError("field_name must be non-empty")
+        original_type = field_type
         if isinstance(field_type, int):
             field_type = {
                 1: "text",
@@ -496,19 +557,24 @@ class BaseV3Backend:
         if not isinstance(field_type, str) or not field_type.strip():
             raise ValueError("field_type must be a supported field type")
         body: Dict[str, Any] = {"name": field_name, "type": field_type}
+        if original_type in (3, 4):
+            body["multiple"] = original_type == 4
         try:
             data = self._call(
-                "POST", self._base_path(base_token, table_id, "fields"), json=body
+                "POST",
+                self._base_path(base_token, table_id, "fields"),
+                json=body,
+                retry_transport=False,
             )
         except FeishuAPIError as exc:
-            if exc.kind == "transport":
+            if exc.mutation_outcome_unknown:
                 return MutationReceipt(
                     operation="create_field",
                     backend=self.api_family,
                     requested_count=1,
                     outcome=MutationOutcome.UNKNOWN_OUTCOME,
                     readback=ReadbackStatus.UNKNOWN,
-                    raw_metadata={"error": str(exc)},
+                    raw_metadata=exc.to_metadata(),
                 )
             raise
         self._field_cache.pop((base_token, table_id), None)
@@ -517,6 +583,7 @@ class BaseV3Backend:
             backend=self.api_family,
             requested_count=1,
             accepted_count=1,
+            unit="field",
             outcome=MutationOutcome.ACCEPTED,
             raw_metadata=data,
         )
@@ -531,6 +598,7 @@ class BaseV3Backend:
         self._validate_ids(record_ids, self.max_batch_get_size)
         body: Dict[str, Any] = {"record_id_list": list(record_ids)}
         if field_names is not None:
+            self._validate_ids(field_names, 100)
             body["select_fields"] = list(field_names)
         data = self._call(
             "POST",
@@ -538,6 +606,13 @@ class BaseV3Backend:
             json=body,
         )
         page = self._parse_matrix(data)
+        returned_ids = {record.record_id for record in page.records}
+        accounted_ids = returned_ids | set(page.record_not_found)
+        if page.has_more or accounted_ids != set(record_ids):
+            raise BaseV3MatrixError(
+                "batch_get did not account for exactly the requested record IDs",
+                response_data=data,
+            )
         return RecordReadResult(
             records=page.records,
             fields=page.fields,
@@ -552,6 +627,8 @@ class BaseV3Backend:
 
     @staticmethod
     def _validate_ids(record_ids: Sequence[str], limit: int) -> None:
+        if isinstance(record_ids, (str, bytes)) or not record_ids:
+            raise ValueError("record IDs must be a non-empty sequence")
         if len(record_ids) > limit:
             raise ValueError(f"batch record count cannot exceed {limit}")
         if any(
@@ -559,6 +636,8 @@ class BaseV3Backend:
             for record_id in record_ids
         ):
             raise ValueError("record IDs must be non-empty strings")
+        if len(set(record_ids)) != len(record_ids):
+            raise ValueError("duplicate record IDs are not allowed")
 
     @staticmethod
     def _validate_records(
@@ -575,6 +654,10 @@ class BaseV3Backend:
                 not isinstance(record.record_id, str) or not record.record_id.strip()
             ):
                 raise ValueError("batch update records require non-empty record_id")
+        if require_ids and len({record.record_id for record in records}) != len(
+            records
+        ):
+            raise ValueError("duplicate update record IDs are not allowed")
 
     def _encode_value(self, schema: FieldSchema | None, value: Any) -> Any:
         if schema is None:
@@ -585,7 +668,20 @@ class BaseV3Backend:
             raise ValueError(f"field {schema.name!r} attachment writes are unsupported")
         if value is None or value == "" or value == []:
             return value
+        if schema.kind is FieldKind.NUMBER:
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+            ):
+                raise ValueError(f"field {schema.name!r} expects a finite number")
+        if schema.kind is FieldKind.CHECKBOX and not isinstance(value, bool):
+            raise ValueError(f"field {schema.name!r} expects a boolean")
         if schema.kind is FieldKind.SELECT:
+            # The shared converter uses a scalar for a single-select cell.
+            # Base v3 requires an array on the wire (v1 does not).
+            if not schema.multiple and isinstance(value, str):
+                value = [value]
             if not isinstance(value, (list, tuple)):
                 raise ValueError(
                     f"field {schema.name!r} select value must be a sequence"
@@ -600,9 +696,15 @@ class BaseV3Backend:
             if not isinstance(value, (list, tuple)):
                 raise ValueError(f"field {schema.name!r} user value must be a sequence")
             values = list(value)
+            if not schema.multiple and len(values) > 1:
+                raise ValueError(f"field {schema.name!r} accepts at most one ID")
             encoded = []
             for item in values:
-                if isinstance(item, dict) and isinstance(item.get("id"), str):
+                if (
+                    isinstance(item, dict)
+                    and isinstance(item.get("id"), str)
+                    and item["id"].strip()
+                ):
                     encoded.append(item)
                 elif isinstance(item, str) and item.strip():
                     encoded.append({"id": item})
@@ -617,7 +719,11 @@ class BaseV3Backend:
             values = list(value)
             encoded = []
             for item in values:
-                if isinstance(item, dict) and isinstance(item.get("id"), str):
+                if (
+                    isinstance(item, dict)
+                    and isinstance(item.get("id"), str)
+                    and item["id"].strip()
+                ):
                     encoded.append(item)
                 elif isinstance(item, str) and item.strip():
                     encoded.append({"id": item})
@@ -642,9 +748,30 @@ class BaseV3Backend:
             if isinstance(value, datetime):
                 return value.isoformat()
             if isinstance(value, str) and value.strip():
+                # Validate syntax without replacing Base's own timezone for naive strings.
+                datetime.fromisoformat(value.replace("Z", "+00:00"))
                 return value
-            raise ValueError(f"field {schema.name!r} datetime expects an ISO string")
+            if (
+                not isinstance(value, bool)
+                and isinstance(value, (int, float))
+                and math.isfinite(value)
+                and value == int(value)
+            ):
+                # Milliseconds are already canonical; never apply a seconds heuristic here.
+                return int(value)
+            raise ValueError(
+                f"field {schema.name!r} datetime expects a string or integer milliseconds"
+            )
         return value
+
+    def validate_records(
+        self,
+        records: Sequence[CanonicalRecord],
+        fields: Sequence[FieldSchema],
+    ) -> None:
+        from .bitable_backend import validate_record_values
+
+        validate_record_values(records, fields, self._encode_value)
 
     def _encode_record(
         self, base_token: str, table_id: str, record: CanonicalRecord
@@ -695,15 +822,37 @@ class BaseV3Backend:
         outcome = (
             MutationOutcome.PARTIAL if ignored or missing else MutationOutcome.ACCEPTED
         )
-        accepted = len(created) if created else requested
+        if len(created) != len(set(created)) or len(created) > requested:
+            raise BaseV3MatrixError(
+                "mutation record_id_list contains duplicates or excess IDs"
+            )
+        accepted = (
+            len(created)
+            if operation == "batch_create"
+            else max(0, requested - len(set(missing)))
+        )
+        if accepted != requested:
+            outcome = MutationOutcome.PARTIAL if accepted else MutationOutcome.REJECTED
+        if (
+            operation == "batch_create"
+            and accepted < requested
+            and not ignored
+            and not missing
+        ):
+            outcome = MutationOutcome.UNKNOWN_OUTCOME
+        revision = data.get("revision", data.get("rev"))
+        if revision is not None and not isinstance(revision, (int, str)):
+            raise BaseV3MatrixError("mutation revision must be int or string")
         return MutationReceipt(
             operation=operation,
             backend=BitableBackendKind.BASE_V3,
             requested_count=requested,
             accepted_count=accepted,
+            unit="record",
             record_ids=tuple(created),
             ignored_fields=tuple(ignored),
             record_not_found=tuple(missing),
+            revision=revision,
             outcome=outcome,
             raw_metadata=data,
         )
@@ -724,17 +873,27 @@ class BaseV3Backend:
                 retry_transport=operation != "batch_create",
             )
         except FeishuAPIError as exc:
-            if exc.kind == "transport":
+            if exc.mutation_outcome_unknown:
                 return MutationReceipt(
                     operation=operation,
                     backend=self.api_family,
                     requested_count=requested,
                     outcome=MutationOutcome.UNKNOWN_OUTCOME,
                     readback=ReadbackStatus.UNKNOWN,
-                    raw_metadata={"error": str(exc)},
+                    raw_metadata=exc.to_metadata(),
                 )
             raise
-        return self._mutation_receipt(operation, requested, data)
+        try:
+            return self._mutation_receipt(operation, requested, data)
+        except FeishuAPIError as exc:
+            return MutationReceipt(
+                operation=operation,
+                backend=self.api_family,
+                requested_count=requested,
+                outcome=MutationOutcome.UNKNOWN_OUTCOME,
+                readback=ReadbackStatus.UNKNOWN,
+                raw_metadata=exc.to_metadata(),
+            )
 
     def batch_create(
         self, base_token: str, table_id: str, records: Sequence[CanonicalRecord]

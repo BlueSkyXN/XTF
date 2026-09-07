@@ -1,6 +1,6 @@
 # tests navigation card
 
-`tests/` contains the pytest suite for config, sync ordering, conversion, file reading, SDK/API contracts, and retry/rate control.
+`tests/` contains the pytest suite for v2 config/runtime, sync ordering, conversion, file reading, typed API contracts, and retry/rate control.
 Read this card before adding or changing tests, fixtures, mocks, markers, coverage expectations, or CI test assumptions.
 Key files: `tests/README.md`, `tests/conftest.py`, and the matching `test_<module>.py`.
 
@@ -14,7 +14,7 @@ Key files: `tests/README.md`, `tests/conftest.py`, and the matching `test_<modul
 
 ## Local rules
 
-- Use `test_api_sdk.py` for shared/public SDK contracts, target API files for wrappers, and `test_engine.py` for orchestration/order.
+- Use `test_api_sdk.py` for shared typed contracts, target API files for wrappers, and `test_service.py` for orchestration/order.
 - For mutation failures, assert both the applied prefix and that later update/create/delete/clear/write calls did not run.
 - For pagination, assert missing/repeated-token failure rather than accepting truncated results; for retries, assert transport and business budgets do not multiply.
 - For destructive-mode bugs, assert exact deletion/clear scope or no-delete behavior where practical.

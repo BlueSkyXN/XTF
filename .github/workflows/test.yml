@@ -1,29 +1,30 @@
 name: Tests
 
 on:
-  push:
-    branches: [main, master, dev]
-    paths:
-      - 'core/**'
-      - 'api/**'
-      - 'utils/**'
-      - 'tests/**'
-      - '*.py'
-      - 'requirements.txt'
-      - 'requirements-dev.txt'
-      - '.github/workflows/test.yml'
   pull_request:
-    branches: [main, master, dev]
+    branches: [main, master, dev, codex/xtf-cli-v2]
     paths:
       - 'core/**'
       - 'api/**'
       - 'utils/**'
+      - 'xtf_cli/**'
       - 'tests/**'
+      - 'tools/**'
+      - 'docs/**'
+      - 'README.md'
+      - 'QUICKSTART.md'
+      - 'contracts/**'
+      - 'constraints*.txt'
+      - 'pytest.ini'
+      - 'pyproject.toml'
       - '*.py'
       - 'requirements.txt'
       - 'requirements-dev.txt'
-      - '.github/workflows/test.yml'
+      - 'config.example.yaml'
+      - 'lite/config.*.example.yaml'
+      - '.github/workflows/**'
   workflow_dispatch:
+  workflow_call:
 
 env:
   PYTHONIOENCODING: utf-8
@@ -44,7 +45,7 @@ jobs:
         run: |
           # Ruff 0.16 enables new default rules across the existing codebase.
           # Pin the last green baseline until a repo-wide migration is scoped.
-          pip install "ruff==0.15.13" black mypy
+          python -m pip install -r requirements.txt -r requirements-dev.txt
 
       - name: Run Ruff
         run: ruff check . --ignore E501,F401
@@ -53,10 +54,10 @@ jobs:
         run: black --check .
 
       - name: Run MyPy
-        run: mypy core/ api/ utils/ --ignore-missing-imports
+        run: mypy core/ api/ utils/ xtf_cli/ --ignore-missing-imports
 
       - name: Check Python syntax
-        run: python -m py_compile XTF.py core/*.py api/*.py utils/*.py
+        run: python -m py_compile XTF.py core/*.py api/*.py utils/*.py xtf_cli/*.py
 
   test:
     name: Unit Tests
@@ -114,12 +115,7 @@ jobs:
           pip install -r requirements-dev.txt
 
       - name: Run tests with coverage
-        if: ${{ hashFiles('tests/**/test_*.py', 'tests/**/*_test.py') != '' }}
-        run: pytest tests/ -v -m "not integration" --tb=short --cov=core --cov=api --cov=utils --cov-report=xml --cov-report=term
-
-      - name: No tests found
-        if: ${{ hashFiles('tests/**/test_*.py', 'tests/**/*_test.py') == '' }}
-        run: echo "No tests found, skipping."
+        run: pytest tests/ -v -m "not integration" --tb=short --cov=core --cov=api --cov=utils --cov=xtf_cli --cov-report=xml --cov-report=term
 
       - name: Upload coverage to Codecov
         if: matrix.os == 'ubuntu-22.04' && matrix.python-version == '3.11'
@@ -139,9 +135,12 @@ jobs:
     if: always()
     steps:
       - name: Check test results
+        env:
+          LINT_RESULT: ${{ needs.lint.result }}
+          TEST_RESULT: ${{ needs.test.result }}
         run: |
-          if [ "${{ needs.lint.result }}" == "failure" ] || [ "${{ needs.test.result }}" == "failure" ]; then
-            echo "Tests failed!"
+          if [ "$LINT_RESULT" != "success" ] || [ "$TEST_RESULT" != "success" ]; then
+            echo "Required jobs did not all succeed: lint=$LINT_RESULT test=$TEST_RESULT"
             exit 1
           fi
           echo "All tests passed!"

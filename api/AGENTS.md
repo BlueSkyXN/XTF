@@ -1,14 +1,14 @@
 # api navigation card
 
-`api/` owns public Feishu SDK contracts, auth/transport, and Bitable/Sheet wrappers.
+`api/` owns XTF-internal Feishu typed contracts, auth/transport, and Bitable/Sheet clients.
 Read before changing exports, constructors, tokens, retries, pagination/batching, mutations, or Sheet ranges/styles/chunks.
-Key files: `__init__.py`, `sdk.py`, `auth.py`, `base.py`, `bitable.py`, `sheet.py`; tests: `tests/test_api_*.py`.
+Key files: `__init__.py`, `sdk.py`, `auth.py`, `base.py`, `bitable_backend.py`, `bitable_v1.py`, `bitable_v3.py`, `sheet.py`; tests: `tests/test_api_*.py`.
 
 ## Local invariants
 
 - Never log full `Authorization`, `app_secret`, `app_token`, `spreadsheet_token`, or tenant tokens.
-- `api.__all__`, `XTFFeishuClient`, typed errors, and direct target-client construction are compatibility surfaces.
-- `FeishuAuth` owns tenant access token retrieval, caching, and refresh; clients created by one `XTFFeishuClient` share its auth and transport.
+- `api.__all__`, typed errors, and direct target-client construction are internal package contracts.
+- `FeishuAuth` owns tenant access token retrieval, caching, and refresh; one runtime shares its auth and transport through explicit bootstrap assembly.
 - Transport owns request exceptions and HTTP 429/5xx retry; Bitable owns retryable business codes. Do not multiply budgets.
 - Typed errors preserve HTTP status, business code/message, `log_id`, retryability, and pacing metadata.
 - Pagination must honor `page_token` and reject missing/repeated cursors; batch helpers stop at first failure and report the already-applied prefix.
@@ -24,9 +24,9 @@ Key files: `__init__.py`, `sdk.py`, `auth.py`, `base.py`, `bitable.py`, `sheet.p
 
 - Do not test unit behavior against real Feishu APIs.
 - Do not hide mutations, flatten typed errors, return truncated pages, or continue batches after failure.
-- Do not change boolean/tuple return contracts used by `core/engine.py` without updating callers and compatibility tests.
+- Do not change typed receipts or read results used by `core/service.py` without updating callers and focused tests.
 
 ## Validation
 
 - Run matching `pytest tests/test_api_<module>.py -v`: `sdk` for contracts, `base` for transport, and target files for wrappers.
-- Run `pytest tests/test_engine.py -v` plus root CI-like checks when a contract used by sync orchestration changes.
+- Run `pytest tests/test_service.py -v` plus root CI-like checks when a contract used by sync orchestration changes.

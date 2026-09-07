@@ -2,7 +2,7 @@
 
 `core/` owns config, conversion, sync orchestration, reader dispatch, and request-control strategies.
 Read before changing config/inference, sync modes, selective or destructive sync, partial failures, retries/rate limits, or Sheet formula protection.
-Key files: `config.py`, `engine.py`, `converter.py`, `reader.py`, `control.py`; matching tests use the same module names.
+Key files: `config.py`, `service.py`, `converter.py`, `reader.py`, `control.py`; matching tests use the same module names.
 
 ## Local invariants
 
@@ -14,7 +14,7 @@ Key files: `config.py`, `engine.py`, `converter.py`, `reader.py`, `control.py`; 
 
 ## Local rules
 
-- Keep raw HTTP behavior in `api/`; `engine.py` consumes `XTFFeishuClient` and target-client contracts.
+- Keep raw HTTP behavior in `api/`; `service.py` consumes typed target-client contracts assembled by `bootstrap.py`.
 - Config key/default changes usually require `config.example.yaml`, docs, tests, and root updates.
 
 ## Do not
@@ -25,6 +25,6 @@ Key files: `config.py`, `engine.py`, `converter.py`, `reader.py`, `control.py`; 
 
 ## Validation
 
-- Use `pytest tests/test_config.py -v`, `test_converter.py`, `test_reader.py`, or `test_control.py` for the matching module.
-- `pytest tests/test_engine.py -v` for sync ordering, partial failures, selective sync, destructive modes, SDK assembly, or formula protection.
+- Use `pytest tests/test_cli_config.py tests/test_runtime_core.py -v`, `test_converter.py`, `test_reader.py`, or `test_control.py` for the matching module.
+- `pytest tests/test_service.py -v` for sync ordering, partial failures, selective sync, destructive modes, runtime assembly, or formula protection.
 - Run root CI-like checks for shared engine, defaults, destructive modes, or cross-target changes.

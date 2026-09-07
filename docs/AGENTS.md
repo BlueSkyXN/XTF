@@ -7,15 +7,19 @@ Key files: `README.md`, `ARCH.md`, `CONFIG.md`, `SYNC.md`, `FIELD_TYPES.md`, `SH
 ## Why this needs guardrails
 
 - Docs describe behavior that can trigger remote writes or deletes in Feishu.
-- CI packages `config.example.yaml` as `config.yaml`; examples can become distributed defaults.
+- The XTF 2.0 package ships `config.example.yaml`; a real `config.yaml` is created only by `XTF config init`.
 - Feishu API assumptions drift; unsupported claims can mislead implementation.
 
 ## Required before changes
 
 - Verify commands, CLI flags, config keys, defaults, sync modes, and error behavior against code, CI, or `config.example.yaml`.
 - Verify Feishu API claims against `docs/feishu-openapi-doc/` or official OpenAPI material when relevant.
-- For SDK/API docs, verify exports, compatibility, typed errors, pagination, retry ownership, and partial batches against `api/` and focused tests.
+- For internal API docs, verify exports, typed errors, pagination, retry ownership, and partial batches against `api/` and focused tests; do not present them as a stable Python SDK.
 - Keep risk wording explicit for `overwrite`, `clone`, credentials, tokens, rate limits, formula protection, and CSV's experimental status.
+- Document the main program only as `python3 XTF.py <subcommand>` (or packaged `XTF <subcommand>`). The removed root-level flat invocation is not an example or compatibility path; flag fragments must identify the subcommand that owns them.
+- Use nested v2 YAML names in user documentation, for example `sync.selective` and `target.sheet.protect_formulas`. Internal flattened resolver names are not user-facing YAML keys. The `lite/` directory has been removed; `.github/workflows/build-1.9-rollback.yml` is the only remaining source of legacy `XTF-Sheet` / `XTF-Bitable` binaries, rebuilt from the pinned 1.9 source commit for rollback purposes only.
+- State dry-run precisely: it may make read-only Feishu API calls and initialize local logs, but it must make zero Feishu mutations. Local tests and CI builds validate code/build contracts only; they never establish real synchronization, Release, deployment, or business UAT.
+- When a public CLI/config/safety contract changes, update the smallest relevant combination of `README.md`, `docs/README.md`, `CONFIG.md`, `SYNC.md`, `ARCH.md`, `config.example.yaml`, and focused tests rather than leaving one route stale.
 
 ## Do not
 

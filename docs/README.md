@@ -1,28 +1,31 @@
 # XTF 文档中心
 
-> XTF (Excel To Feishu) — 企业级 Excel/CSV 到飞书平台的智能同步工具。
-> 支持多维表格 (Bitable) 与电子表格 (Sheet) 双目标，四种同步模式，智能字段管理。
+> XTF 2.0 — flags-first、可 dry-run、可 JSON 自动化的 Excel/CSV/Bitable 到飞书同步 CLI。
 
 ## 📚 核心文档
+
+### [../QUICKSTART.md](../QUICKSTART.md) — 快速开始与迁移
+
+单一 XTF 入口、YAML v2 初始化、dry-run、删除授权、JSON 自动化，以及 1.9 到 2.0 的人工迁移映射。
 
 ### [ARCH.md](./ARCH.md) — 系统架构文档 ⭐
 
 XTF 的整体架构设计、核心组件交互、数据处理流水线与扩展机制。
 
 1. 系统概览与设计哲学
-2. 四层架构（入口 → 配置 → 引擎 → API）
-3. 数据处理流水线（6 步完整流程）
+2. CLI → config resolver → planner/executor → API 分层
+3. 数据处理流水线与结构化 outcome
 4. 错误处理与三层上传保障
 5. 扩展点与二次开发指南
 
 ### [CONFIG.md](./CONFIG.md) — 配置参数详解
 
-完整的配置文件参考手册，含每个字段的类型、默认值、代码位置与实际影响。
+严格 YAML schema v2、完整 CLI override、配置发现和退出码参考。
 
-1. 配置优先级体系（CLI > YAML > 推断 > 默认）
-2. 通用参数、目标平台参数、性能参数
-3. 选择性同步、高级控制、逻辑检测等进阶配置
-4. CLI 参数映射与常用配置场景
+1. CLI / `XTF_APP_SECRET` / YAML / defaults 优先级
+2. source、target、sync、conversion、control 嵌套 schema
+3. `config init/validate/show` 与 flags-first 覆盖
+4. dry-run、删除授权、JSON 和退出码
 
 ### [SYNC.md](./SYNC.md) — 同步模式与选择性同步
 
@@ -61,6 +64,10 @@ XTF 的整体架构设计、核心组件交互、数据处理流水线与扩展�
 4. 预置配置方案（保守 / 渐进 / 激进 / 调试）
 5. 参数调优与性能监控
 
+### [RELEASE_NOTES_2_0.md](./RELEASE_NOTES_2_0.md) — 2.0 变更与发布门禁
+
+Breaking changes、数据安全语义、人工迁移入口，以及仍需完成的 RC/UAT/Release 证据。
+
 ---
 
 ## 📦 参考资料
@@ -78,11 +85,15 @@ AI 友好型飞书 OpenAPI Markdown 文档库，便于查阅与扩展开发。
 ## 🚀 快速开始
 
 1. 安装依赖：`pip install -r requirements.txt`
-2. 复制配置：`cp config.example.yaml config.yaml`
-3. 编辑 `config.yaml`，填入飞书应用凭证和目标表格信息
-4. 多维表格同步：`python XTF.py --target-type bitable --config config.yaml`
-5. 电子表格同步：`python XTF.py --target-type sheet --config config.yaml`
-6. 查看日志：`logs/xtf_*.log`
+2. 查看命令：`python3 XTF.py --help`
+3. 生成 v2 配置：`python3 XTF.py config init --target-type bitable`
+4. 填入实际资源标识，并通过 `--app-secret` 或 `XTF_APP_SECRET` 提供 secret；模板占位值不可直接用于远端操作。
+5. 本地验证：`python3 XTF.py config validate --config config.yaml`，再运行 `python3 XTF.py doctor --config config.yaml`。
+6. 需要验证远端只读可达性时：`python3 XTF.py doctor --config config.yaml --network`。
+7. 精确只读计划：`python3 XTF.py sync --config config.yaml --dry-run --json`。
+8. 审阅 plan 后才正式同步：`python3 XTF.py sync --config config.yaml`；任何 destructive plan 都必须额外传 `--allow-delete`。
+
+`--dry-run` 可进行远端只读调用，但不执行 Feishu mutation；它仍可能创建本地运行日志，且不构成真实业务 UAT。
 
 ---
 
@@ -90,9 +101,11 @@ AI 友好型飞书 OpenAPI Markdown 文档库，便于查阅与扩展开发。
 
 | 文档 | 内容 | 面向读者 |
 |------|------|----------|
+| [../QUICKSTART.md](../QUICKSTART.md) | 快速开始与 1.9→2.0 迁移 | 所有用户 |
 | [ARCH.md](./ARCH.md) | 系统架构与组件设计 | 开发者、架构师 |
 | [CONFIG.md](./CONFIG.md) | 配置参数完整参考 | 所有用户 |
 | [SYNC.md](./SYNC.md) | 同步模式与选择性同步（含 Bitable/Sheet 分版本详解） | 所有用户 |
 | [FIELD_TYPES.md](./FIELD_TYPES.md) | 字段类型策略与转换 | 进阶用户、开发者 |
 | [SHEET.md](./SHEET.md) | 电子表格算法与公式保护 | 进阶用户、开发者 |
 | [CONTROL.md](./CONTROL.md) | 高级重试与频控配置 | 进阶用户 |
+| [RELEASE_NOTES_2_0.md](./RELEASE_NOTES_2_0.md) | 2.0 变更与发布门禁 | 所有用户、发布负责人 |

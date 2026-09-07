@@ -28,18 +28,18 @@ XTF 提供四种字段类型策略，控制如何将 Excel 列映射为飞书字
 | **raw** | 文本 | 🟢 最低 | 数据完整性要求极高 |
 | **base** | 文本 / 数字 / 日期 | 🟢 低 | ⭐ 日常使用（默认推荐） |
 | **auto** | + 单选 / 多选 | 🟡 中 | 有标准化 Excel 模板 |
-| **intelligence** | 全部 8 种类型 | 🔴 高 | 高质量数据 + 进阶用户 |
+| **intelligence** | 六种：文本 / 数字 / 日期 / 单选 / 多选 / 复选框 | 🔴 高 | 高质量数据 + 进阶用户 |
 
 ```bash
-python XTF.py --field-type-strategy base       # 默认推荐
-python XTF.py --field-type-strategy intelligence  # 全面智能
+python3 XTF.py sync --field-type-strategy base          # 默认推荐
+python3 XTF.py sync --field-type-strategy intelligence  # 全面智能
 ```
 
 ---
 
 ## 2. Raw 策略 — 保持原值
 
-> 🛡️ 数据完整性最高，零转换风险
+> 不做智能类型推断；仍受目标接口支持的值类型和文件读取行为约束。
 
 **Bitable 行为**：
 - 所有字段创建为**文本类型** (type=1)
@@ -48,11 +48,11 @@ python XTF.py --field-type-strategy intelligence  # 全面智能
 
 **Sheet 行为**：
 - 不应用任何格式化
-- 保持 Excel 原始数据和格式
+- 写入读取到的单元格值；不复制 Excel 工作簿的全部样式、行高、列宽或对象
 - 不创建下拉列表
 
 **适用场景**：
-- 数据归档：原封不动搬迁
+- 值数据归档：不将它当成 Excel 全格式搬迁工具
 - 敏感数据：不能承受转换错误
 - 调试：排除类型转换问题
 
@@ -72,7 +72,7 @@ python XTF.py --field-type-strategy intelligence  # 全面智能
 - 自动设置日期格式（`yyyy/MM/dd`）
 - 不创建下拉列表
 
-**CSV 兼容性**：✅ 完美支持
+**CSV 兼容性**：🧪 格式仍为实验性；类型分析可用，但不视为与 Excel 等价
 
 ---
 
@@ -90,7 +90,7 @@ python XTF.py --field-type-strategy intelligence  # 全面智能
 - 基于 Excel 数据验证自动创建飞书下拉列表
 - 自动设置日期和数字格式
 
-**CSV 兼容性**：⚠️ 部分受限（CSV 不保留 Excel 数据验证信息）
+**CSV 兼容性**：🧪 实验性且部分受限（CSV 不保留 Excel 数据验证信息）
 
 ---
 
@@ -99,7 +99,7 @@ python XTF.py --field-type-strategy intelligence  # 全面智能
 > 基于置信度算法的全面类型推断
 
 **Bitable 行为**：
-- 所有 8 种字段类型均可推荐
+- 自动推断文本、数字、日期、单选、多选和复选框六类字段（不表示所有已有字段只能是这六类）
 - 基于数据分析和置信度评分决定类型
 - 每个字段附带推荐理由和置信度
 
@@ -117,7 +117,7 @@ python XTF.py --field-type-strategy intelligence  # 全面智能
 | 选择 | `intelligence_choice_confidence` | `0.9` | 超过此值推荐单选/多选 |
 | 布尔 | `intelligence_boolean_confidence` | `0.95` | 超过此值推荐复选框 |
 
-**CSV 兼容性**：✅ 完美支持（基于数据内容分析，不依赖 Excel 验证）
+**CSV 兼容性**：🧪 格式仍为实验性（内容分析不依赖 Excel 验证，但不构成生产等价保证）
 
 ---
 
@@ -328,10 +328,10 @@ python XTF.py --field-type-strategy intelligence  # 全面智能
 
 | 策略 | CSV 兼容性 | 建议 |
 |------|-----------|------|
-| raw | ✅ 完美 | 仅需归档时使用 |
-| base | ✅ 完美 | ⭐ CSV 首选推荐 |
-| auto | ⚠️ 受限 | CSV 无验证信息，等同 base |
-| intelligence | ✅ 完美 | 需要高级类型时使用 |
+| raw | 🧪 实验性 | 仅需原值处理时使用 |
+| base | 🧪 实验性 | CSV 的保守起点 |
+| auto | 🧪 受限 | CSV 无验证信息，等同 base |
+| intelligence | 🧪 实验性 | 内容推断可用，但需额外验证 |
 
 ### 常见问题
 

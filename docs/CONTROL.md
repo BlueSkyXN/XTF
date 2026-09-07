@@ -24,12 +24,12 @@
 
 ## 1. 概述
 
-XTF 默认使用简单的固定延迟和固定重试机制。当需要更精细的控制时，可通过 `enable_advanced_control: true` 启用高级策略系统。
+XTF 默认使用简单的固定延迟和固定重试机制。当需要更精细的控制时，可通过 `control.advanced.enabled: true` 启用高级策略系统。
 
 **架构**：
 
 ```
-AdvancedController (线程安全单例)
+RequestController (由当前 runtime 的 bootstrap 显式创建)
   │
   ├─→ RetryStrategy (重试策略)
   │     选择一种：指数退避 / 线性增长 / 固定等待
@@ -38,13 +38,20 @@ AdvancedController (线程安全单例)
         选择一种：固定等待 / 滑动窗口 / 固定窗口
 ```
 
+controller 不存储在进程全局 singleton 中，也不会由 `api/` 反向导入 `core.control`。
+`core.bootstrap.bootstrap_runtime()` 根据当前配置构造独立 controller，并注入共享的
+`RetryableAPIClient`；未启用高级控制时不构造 controller，仍使用 transport 自身的
+固定间隔和重试设置。
+
 **启用方式**：
 
 ```yaml
-enable_advanced_control: true  # 开启高级控制
+control:
+  advanced:
+    enabled: true
 ```
 
-> 未启用时，系统使用 `rate_limit_delay` + `max_retries` 的简单模式。
+> 未启用时，系统使用 `control.rate_limit_delay` + `control.max_retries` 的简单模式。
 
 ---
 
@@ -66,7 +73,7 @@ enable_advanced_control: true  # 开启高级控制
   第4次重试: 4.0s
   第5次重试: 8.0s
   ...
-  上限: retry_max_wait_time (如设置)
+  上限: control.advanced.retry.max_wait_time (如设置)
 ```
 
 **特点**：
@@ -77,10 +84,13 @@ enable_advanced_control: true  # 开启高级控制
 **配置**：
 
 ```yaml
-retry_strategy_type: "exponential_backoff"
-retry_initial_delay: 0.5    # 初始等待（秒）
-retry_multiplier: 2.0       # 倍增系数
-retry_max_wait_time: 60     # 最大等待时间（秒，可选）
+control:
+  advanced:
+    retry:
+      strategy: exponential_backoff
+      initial_delay: 0.5
+      multiplier: 2.0
+      max_wait_time: 60
 ```
 
 ### 2.2 线性增长 (linear_growth)
@@ -105,9 +115,12 @@ retry_max_wait_time: 60     # 最大等待时间（秒，可选）
 **配置**：
 
 ```yaml
-retry_strategy_type: "linear_growth"
-retry_initial_delay: 0.5    # 初始等待（秒）
-retry_increment: 0.5        # 每次增量（秒）
+control:
+  advanced:
+    retry:
+      strategy: linear_growth
+      initial_delay: 0.5
+      increment: 0.5
 ```
 
 ### 2.3 固定等待 (fixed_wait)
@@ -130,8 +143,11 @@ retry_increment: 0.5        # 每次增量（秒）
 **配置**：
 
 ```yaml
-retry_strategy_type: "fixed_wait"
-retry_initial_delay: 1.0    # 固定等待时间（秒）
+control:
+  advanced:
+    retry:
+      strategy: fixed_wait
+      initial_delay: 1.0
 ```
 
 ---
@@ -152,8 +168,11 @@ retry_initial_delay: 1.0    # 固定等待时间（秒）
 **配置**：
 
 ```yaml
-rate_limit_strategy_type: "fixed_wait"
-rate_limit_delay: 0.01  # 使用通用 rate_limit_delay 参数
+control:
+  rate_limit_delay: 0.01
+  advanced:
+    rate_limit:
+      strategy: fixed_wait
 ```
 
 ### 3.2 滑动窗口 (sliding_window)
@@ -175,9 +194,12 @@ rate_limit_delay: 0.01  # 使用通用 rate_limit_delay 参数
 **配置**：
 
 ```yaml
-rate_limit_strategy_type: "sliding_window"
-rate_limit_window_size: 1.0    # 时间窗口（秒）
-rate_limit_max_requests: 10    # 窗口内最大请求数
+control:
+  advanced:
+    rate_limit:
+      strategy: sliding_window
+      window_size: 1.0
+      max_requests: 10
 ```
 
 ### 3.3 固定窗口 (fixed_window)
@@ -197,9 +219,12 @@ rate_limit_max_requests: 10    # 窗口内最大请求数
 **配置**：
 
 ```yaml
-rate_limit_strategy_type: "fixed_window"
-rate_limit_window_size: 1.0    # 窗口大小（秒）
-rate_limit_max_requests: 10    # 每窗口最大请求数
+control:
+  advanced:
+    rate_limit:
+      strategy: fixed_window
+      window_size: 1.0
+      max_requests: 10
 ```
 
 ---
@@ -224,15 +249,12 @@ rate_limit_max_requests: 10    # 每窗口最大请求数
 适合生产环境、大数据集、网络不稳定场景。
 
 ```yaml
-enable_advanced_control: true
-retry_strategy_type: "exponential_backoff"
-retry_initial_delay: 1.0
-retry_multiplier: 2.0
-retry_max_wait_time: 60
-rate_limit_strategy_type: "sliding_window"
-rate_limit_window_size: 2.0
-rate_limit_max_requests: 5
-max_retries: 5
+control:
+  max_retries: 5
+  advanced:
+    enabled: true
+    retry: {strategy: exponential_backoff, initial_delay: 1.0, multiplier: 2.0, max_wait_time: 60}
+    rate_limit: {strategy: sliding_window, window_size: 2.0, max_requests: 5}
 ```
 
 ### 渐进方案 — 平衡模式
@@ -240,14 +262,12 @@ max_retries: 5
 适合日常使用、中等数据量。
 
 ```yaml
-enable_advanced_control: true
-retry_strategy_type: "exponential_backoff"
-retry_initial_delay: 0.5
-retry_multiplier: 2.0
-rate_limit_strategy_type: "sliding_window"
-rate_limit_window_size: 1.0
-rate_limit_max_requests: 10
-max_retries: 3
+control:
+  max_retries: 3
+  advanced:
+    enabled: true
+    retry: {strategy: exponential_backoff, initial_delay: 0.5, multiplier: 2.0}
+    rate_limit: {strategy: sliding_window, window_size: 1.0, max_requests: 10}
 ```
 
 ### 激进方案 — 性能优先
@@ -255,13 +275,13 @@ max_retries: 3
 适合网络良好、小数据集、限流宽松场景。
 
 ```yaml
-enable_advanced_control: true
-retry_strategy_type: "linear_growth"
-retry_initial_delay: 0.2
-retry_increment: 0.3
-rate_limit_strategy_type: "fixed_wait"
-rate_limit_delay: 0.1
-max_retries: 3
+control:
+  rate_limit_delay: 0.1
+  max_retries: 3
+  advanced:
+    enabled: true
+    retry: {strategy: linear_growth, initial_delay: 0.2, increment: 0.3}
+    rate_limit: {strategy: fixed_wait}
 ```
 
 ### 调试方案 — 详细观察
@@ -269,13 +289,15 @@ max_retries: 3
 适合排查问题、观察 API 行为。
 
 ```yaml
-enable_advanced_control: true
-retry_strategy_type: "fixed_wait"
-retry_initial_delay: 2.0
-rate_limit_strategy_type: "fixed_wait"
-rate_limit_delay: 1.0
-max_retries: 1
-log_level: DEBUG
+control:
+  rate_limit_delay: 1.0
+  max_retries: 1
+  advanced:
+    enabled: true
+    retry: {strategy: fixed_wait, initial_delay: 2.0}
+    rate_limit: {strategy: fixed_wait}
+output:
+  log_level: DEBUG
 ```
 
 ---
@@ -286,21 +308,21 @@ log_level: DEBUG
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `retry_strategy_type` | `str` | `exponential_backoff` | 策略类型 |
-| `retry_initial_delay` | `float` | `0.5` | 初始等待时间（秒） |
-| `retry_multiplier` | `float` | `2.0` | 指数退避乘数 |
-| `retry_increment` | `float` | `0.5` | 线性增长步长 |
-| `retry_max_wait_time` | `float` | `null` | 最大等待时间（秒） |
-| `max_retries` | `int` | `3` | 最大重试次数 |
+| `control.advanced.retry.strategy` | `str` | `exponential_backoff` | 策略类型 |
+| `control.advanced.retry.initial_delay` | `float` | `0.5` | 初始等待时间（秒） |
+| `control.advanced.retry.multiplier` | `float` | `2.0` | 指数退避乘数 |
+| `control.advanced.retry.increment` | `float` | `0.5` | 线性增长步长 |
+| `control.advanced.retry.max_wait_time` | `float` | `null` | 最大等待时间（秒） |
+| `control.max_retries` | `int` | `3` | 最大重试次数 |
 
 ### 频控参数
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `rate_limit_strategy_type` | `str` | `fixed_wait` | 策略类型 |
-| `rate_limit_window_size` | `float` | `1.0` | 时间窗口大小（秒） |
-| `rate_limit_max_requests` | `int` | `10` | 窗口内最大请求数 |
-| `rate_limit_delay` | `float` | `0.01` | 固定等待延迟（秒） |
+| `control.advanced.rate_limit.strategy` | `str` | `fixed_wait` | 策略类型 |
+| `control.advanced.rate_limit.window_size` | `float` | `1.0` | 时间窗口大小（秒） |
+| `control.advanced.rate_limit.max_requests` | `int` | `10` | 窗口内最大请求数 |
+| `control.rate_limit_delay` | `float` | `0.01` | 固定等待延迟（秒） |
 
 ---
 
@@ -320,29 +342,18 @@ INFO  - 批量操作完成: 500/500 条记录, 重试 2 次
 
 | 问题 | 调优方向 |
 |------|----------|
-| 重试次数耗尽仍失败 | 增大 `max_retries`，增大 `retry_initial_delay` |
-| 等待时间过长 | 减小 `retry_multiplier`，减小 `retry_max_wait_time` |
-| 限流频繁触发 | 减小 `rate_limit_max_requests`，增大 `rate_limit_window_size` |
-| 吞吐量不足 | 增大 `rate_limit_max_requests`，减小延迟 |
+| 重试次数耗尽仍失败 | 增大 `control.max_retries` 和 `control.advanced.retry.initial_delay` |
+| 等待时间过长 | 减小 `control.advanced.retry.multiplier` 和 `control.advanced.retry.max_wait_time` |
+| 限流频繁触发 | 减小 `control.advanced.rate_limit.max_requests`，增大 `control.advanced.rate_limit.window_size` |
+| 吞吐量不足 | 增大 `control.advanced.rate_limit.max_requests`，减小 `control.rate_limit_delay` |
 | 突发限流 | 从固定窗口切换到滑动窗口 |
 
-### 飞书 API 频率限制参考
+### 飞书 API 限流处理
 
-**多维表格（Bitable）官方限制**：
-
-| 接口 | 官方限制（程序内嵌上限） | 说明 |
-|------|------------------------|------|
-| 查询记录 (search) | 20 次/秒 | 搜索+分页拉取 |
-| 批量获取 (batch_get) | 20 次/秒 | 按 ID 获取 |
-| 新增记录 (batch_create) | 50 次/秒 | 批量写入 |
-| 更新记录 (batch_update) | 50 次/秒 | 批量更新 |
-| 删除记录 (batch_delete) | 50 次/秒 | 批量删除 |
-| 列出字段 (list_fields) | 20 次/秒 | 字段管理 |
-| 新增字段 (create_field) | 10 次/秒 | 字段创建 |
-
-> 数据来源：[飞书开放平台 API 频率限制](https://open.feishu.cn/document/ukTMukTMukTM/uUzN04SN3QjL1cDN)
->
-> 官方限制直接作为程序内嵌上限，在 `api/bitable.py` 中定义为 `OFFICIAL_RATE_LIMITS` 常量。
+Feishu 的实际频率限制和容量会随 endpoint、应用和服务端策略变化。XTF 不把某一历史
+次数表固化为跨版本保证；运行时以 OpenAPI 响应、`Retry-After` 和显式 control 配置为准。
+需要核对当前服务端限制时，以[飞书开放平台 API 频率限制](https://open.feishu.cn/document/ukTMukTMukTM/uUzN04SN3QjL1cDN)
+及对应 endpoint 文档为准。
 
 **关键业务错误码处理**：
 
@@ -362,9 +373,9 @@ INFO  - 批量操作完成: 500/500 条记录, 重试 2 次
 | `1254040` | FieldNotFound（字段不存在） | ❌ 不重试 |
 
 > 注意：上述错误码以 HTTP 200 返回，HTTP 层面的重试无法捕获。
-> 程序在 `BitableAPI._call_api_with_biz_retry()` 中实现应用层重试。
-> 未列入可重试集合的业务错误会立即抛出 `FeishuAPIError`，由查询调用方处理；
-> Bitable 的既有布尔写接口会记录错误并继续返回 `False`，不会盲目重试。
+> Bitable v1 在 `BitableV1Backend._call()` 中实现应用层重试。
+> 未列入可重试集合的业务错误会立即抛出 `FeishuAPIError`；mutation 结果通过 typed
+> receipt / `SyncResult` 传播，不通过旧布尔写 facade 吞掉错误。
 
 **按错误类型分工的两层重试架构**：
 
@@ -373,34 +384,30 @@ INFO  - 批量操作完成: 500/500 条记录, 重试 2 次
   频控策略（控制发送速率）
     → HTTP 请求
       → transport：网络异常、HTTP 429/5xx          [api/base.py]
-        → Bitable：仅 HTTP 200 的可恢复业务错误码   [api/bitable.py]
+        → Bitable v1：仅 HTTP 200 的可恢复业务错误码 [api/bitable_v1.py]
 ```
 
 - **标准模式**：固定间隔 + HTTP 重试 + 业务重试
 - **高级模式**：高级频控策略 + 高级重试策略 + 业务重试
 - 同一个 HTTP 失败只由 transport 重试，不会在 Bitable 层再次形成嵌套循环
 - standard/advanced transport 耗尽后都保留最终 response，或抛 typed transport error
-- 禁用高级控制会清除进程级 controller，避免后续普通 client 继承旧配置
-
-> 详细分析：`local/retry-mechanism-analysis.md`
+- 禁用高级控制时，当前 runtime 不创建 controller；不存在供后续 client 继承的进程全局状态
 
 **建议的频控配置**：
 
 ```yaml
-# 查询密集型（大量数据拉取）
-rate_limit_strategy_type: "sliding_window"
-rate_limit_window_size: 1.0
-rate_limit_max_requests: 20   # 查询 API 官方上限
-
-# 写入密集型（大量数据同步）
-rate_limit_strategy_type: "sliding_window"
-rate_limit_window_size: 1.0
-rate_limit_max_requests: 50   # 写入 API 官方上限
+control:
+  advanced:
+    enabled: true
+    rate_limit:
+      strategy: sliding_window
+      window_size: 1.0
+      max_requests: 20  # 根据已验证的接口配额调整
 ```
 
 | 接口 | 限制 | 建议 |
 |------|------|------|
-| 多维表格查询操作 | 20 次/秒 | `rate_limit_max_requests: 20` |
-| 多维表格写入操作 | 50 次/秒 | `rate_limit_max_requests: 50` |
-| 电子表格读写 | ~100 次/秒 | `rate_limit_max_requests: 10-20` |
-| 单次请求体积 | ≤ 10MB | 使用分块 + 二分重试 |
+| 多维表格查询操作 | 20 次/秒 | `control.advanced.rate_limit.max_requests: 20` |
+| 多维表格写入操作 | 50 次/秒 | 按实例实际配额设置 |
+| 电子表格读写 | ~100 次/秒 | 按实例实际配额设置 |
+| 单次请求体积 | 以服务端 endpoint 限制为准 | 使用分块 + 90227 有界拆分 |
