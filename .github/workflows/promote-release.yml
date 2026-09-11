@@ -163,5 +163,5 @@ jobs:
             release_flags+=(--prerelease --latest=false)
           fi
           gh release create "$TAG" --verify-tag --draft --notes-file release-notes.txt "${release_flags[@]}"
-          gh release upload "$TAG" packages/ALL-XTF-*-${VERSION}.zip packages/FULL-XTF-${VERSION}.zip RELEASE_TESTED.json
+          gh release upload "$TAG" packages/ALL-XTF-*-"${VERSION}".zip "packages/FULL-XTF-${VERSION}.zip" RELEASE_TESTED.json
           gh release edit "$TAG" --draft=false

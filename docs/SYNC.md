@@ -289,6 +289,7 @@ python3 XTF.py sync --source-type bitable --mode full --config config.yaml --dry
 
 **特点**：
 - 会清空整个工作表范围
+- `target.sheet.start_row` / `start_column` 只决定重写数据的起点，不缩小 clone 的清空范围；起点之外的数据也会被清空。
 - 会重写表头
 - 支持写入后自动配置字段格式（`conversion.strategy`）
 

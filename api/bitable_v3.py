@@ -813,12 +813,7 @@ class BaseV3Backend:
         created = data.get("record_id_list", [])
         if created is None:
             created = []
-        if not isinstance(created, list) or any(
-            not isinstance(item, str) for item in created
-        ):
-            raise BaseV3MatrixError(
-                "record_id_list must be a list of strings", response_data=data
-            )
+        created = BaseV3Backend._string_list(created, "record_id_list")
         outcome = (
             MutationOutcome.PARTIAL if ignored or missing else MutationOutcome.ACCEPTED
         )

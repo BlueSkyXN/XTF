@@ -85,7 +85,7 @@ def smart_read_excel(
         # 所有引擎都失败
         error_msg = f"❌ 无法读取 Excel 文件 {file_path.name}: {e}"
         logger.error(error_msg)
-        raise Exception(error_msg) from e
+        raise ValueError(error_msg) from e
 
 
 def get_available_engines() -> EngineInfo:

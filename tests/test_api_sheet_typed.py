@@ -67,6 +67,69 @@ def test_write_values_returns_fixed_actual_range_and_payload():
     }
 
 
+@pytest.mark.parametrize("operation", ["write", "batch_update", "clear"])
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"updatedRange": "sh1!A1:B1"},
+        {"updatedRange": "sh1!A1:C2"},
+        {"updatedRange": "sh1!A2:B3"},
+        {"updatedRange": "other!A1:B2"},
+        {"updatedRange": "invalid"},
+        {"updatedRange": None},
+        {"range": "sh1!A1:B2", "updatedRange": "invalid"},
+    ],
+)
+def test_fixed_mutation_rejects_inconsistent_scope_before_next_chunk(
+    operation, metadata
+):
+    api, client = make_api(
+        response({"code": 0, "data": metadata}),
+        response(),
+    )
+    api.write_max_rows = 2
+    values = [[1, 2], [3, 4], [5, 6]]
+    if operation == "write":
+        receipt = api.write_values("token", "sh1!A1:B3", values)
+    elif operation == "batch_update":
+        receipt = api.batch_update_values(
+            "token", [{"range": "sh1!A1:B3", "values": values}]
+        )
+    else:
+        receipt = api.clear_values("token", "sh1!A1:B3")
+
+    assert receipt.outcome is MutationOutcome.UNKNOWN_OUTCOME
+    assert receipt.unknown_scope is True
+    assert receipt.accepted_count == 0
+    assert receipt.actual_ranges == ()
+    assert receipt.failed_batch_index == 1
+    assert client.call_api.call_count == 1
+
+
+@pytest.mark.parametrize("operation", ["write", "batch_update", "clear"])
+def test_fixed_mutation_scope_mismatch_keeps_earlier_successful_chunks(operation):
+    api, client = make_api(
+        response({"code": 0, "data": {"updatedRange": "sh1!A1:A1"}}),
+        response({"code": 0, "data": {"updatedRange": "sh1!A9:A9"}}),
+        response(),
+    )
+    api.write_max_rows = 1
+    if operation == "write":
+        receipt = api.write_values("token", "sh1!A1:A3", [[1], [2], [3]])
+    elif operation == "batch_update":
+        receipt = api.batch_update_values(
+            "token", [{"range": "sh1!A1:A3", "values": [[1], [2], [3]]}]
+        )
+    else:
+        receipt = api.clear_values("token", "sh1!A1:A3")
+
+    assert receipt.outcome is MutationOutcome.UNKNOWN_OUTCOME
+    assert receipt.accepted_count == 1
+    assert receipt.actual_ranges == (A1Range.parse("sh1!A1:A1"),)
+    assert receipt.failed_batch_index == 2
+    assert client.call_api.call_count == 2
+
+
 def test_write_values_split_records_successful_leaf_ranges_only():
     too_large = FeishuAPIError(90227, "too large")
     api, client = make_api(

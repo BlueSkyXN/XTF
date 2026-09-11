@@ -2,6 +2,8 @@
 
 2026-09-05 更新。本包已实现原方案中的执行等待、全计划编码检查、真实写入执行器和既有二进制测试后原样发布；真实服务和远端工作流尚未运行。
 
+下文“实施状态”是 2026-09-05 的历史快照；2026-09-11 本地修复与验证结果见 [发布说明](RELEASE_NOTES_2_0.md)，不能用旧的工具缺失或未构建描述代替当前状态。
+
 ```text
 PR ---------------------> Tests（离线、13 个 OS/Python 组合）
 
@@ -88,7 +90,7 @@ XTF_UAT_SPREADSHEET
 XTF_UAT_SHEET_ID
 ```
 
-这组名称与 `XTF_PROBE_*` 不同。Base 临时表每次创建后删除；Sheet 预建并预留空的 `A1:T200`，标题以 `XTF_UAT_` 开头，至少 200×20。资源、命令、清理范围及故障恢复详见 `EXECUTION_AND_UAT.md`。首次应逐套手动运行 `Feishu Isolated Write UAT`。
+这组名称与 `XTF_PROBE_*` 不同。Base 临时表每次创建后删除；Sheet 必须预建、整张为空且专用，标题以 `XTF_UAT_` 开头，至少 200×20。样例使用 `A1:T200`，但 clone 验收会清空整张工作表。资源、命令、清理范围及故障恢复详见 `EXECUTION_AND_UAT.md`。首次应逐套手动运行 `Feishu Isolated Write UAT`。
 
 live 写入与产物测试使用同一个 concurrency group `xtf-feishu-isolated-uat`，cancel-in-progress=false；四平台 live 矩阵 max-parallel=1。同一组资源不得另行并行使用。普通 PR 不运行带真实凭据的写入任务。
 

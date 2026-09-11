@@ -364,6 +364,7 @@ class SheetAPI:
     ) -> Tuple[Tuple[A1Range, ...], bool]:
         """Extract server ranges; fixed writes may fall back to requested ranges."""
         found: List[A1Range] = []
+        invalid = False
         accepted_keys = {
             "range",
             "updatedRange",
@@ -373,11 +374,14 @@ class SheetAPI:
         }
 
         def visit(value: Any) -> None:
+            nonlocal invalid
             if isinstance(value, Mapping):
                 for key, item in value.items():
                     if key in accepted_keys:
                         parsed = self._typed_range_from_value(item)
-                        if parsed is not None and parsed not in found:
+                        if parsed is None:
+                            invalid = True
+                        elif parsed not in found:
                             found.append(parsed)
                     visit(item)
             elif isinstance(value, list):
@@ -385,6 +389,8 @@ class SheetAPI:
                     visit(item)
 
         visit(result)
+        if invalid:
+            return tuple(found), True
         if found:
             return tuple(found), False
         if allow_fallback:
@@ -589,9 +595,24 @@ class SheetAPI:
                         raw_responses=responses,
                         unit="range",
                     )
-                ranges, _ = self._typed_actual_ranges(
+                ranges, unknown = self._typed_actual_ranges(
                     result, [current_range.text], allow_fallback=True
                 )
+                if unknown or ranges != (current_range,):
+                    return self._typed_sheet_receipt(
+                        "write",
+                        requested_ranges,
+                        applied,
+                        {"data": {"responses": responses + [result]}},
+                        accepted=successful_requests,
+                        unit="range",
+                        unknown_scope=True,
+                        failed_batch_index=failed_request_index,
+                        outcome=MutationOutcome.UNKNOWN_OUTCOME,
+                        extra_metadata={
+                            "error": "Sheet 返回的实际写入范围无效或与请求范围不一致"
+                        },
+                    )
                 applied.extend(ranges or (current_range,))
                 responses.append(result)
                 successful_requests += 1
@@ -882,7 +903,7 @@ class SheetAPI:
             ranges, unknown = self._typed_actual_ranges(
                 result, (chunk.a1_range.text,), allow_fallback=True
             )
-            if unknown:
+            if unknown or ranges != (chunk.a1_range,):
                 return self._typed_sheet_receipt(
                     operation,
                     requested_ranges,
@@ -893,6 +914,9 @@ class SheetAPI:
                     unknown_scope=True,
                     failed_batch_index=request_index,
                     outcome=MutationOutcome.UNKNOWN_OUTCOME,
+                    extra_metadata={
+                        "error": "Sheet 返回的实际写入范围无效或与请求范围不一致"
+                    },
                 )
             applied.extend(ranges or (chunk.a1_range,))
             responses.append(result)

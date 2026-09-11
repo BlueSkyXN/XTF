@@ -1,8 +1,30 @@
 # XTF 2.0 Release Notes（RC1 源码修订）
 
-> 本次状态：2026-09-05，版本 `2.0.0-rc1`。本地完整非集成测试 552 passed；真实飞书联调、当前代码的四平台构建和远端 CI 未执行。Ruff、Black、MyPy 未安装，未执行。历史分支或旧源码生成的 artifact 不代表本修订包已验证。详见 [本次报告](../.local/review-20260905/REVIEW.md)。
+## 2026-09-11 收尾缺陷修复
 
-## 本次源码修订
+版本仍为 `2.0.0-rc1`。下表记录本次源码修复的本地验证，不代表已发布的二进制。提交与合并状态见 [Pull requests](https://github.com/BlueSkyXN/XTF/pulls?q=is%3Apr)，对应提交的远端测试与四平台构建结果见 [GitHub Actions](https://github.com/BlueSkyXN/XTF/actions)。
+
+- Sheet 固定写入、批量写入及清空会拒绝无效或不一致的实际范围，保留已成功批次，不误报全部成功。
+- Sheet 索引规范化规则绑定到执行计划，避免数字编号在 freshness 检查时被重新推断成时间戳。
+- Sheet clone 的清空范围包含工作表 ID，保持整张工作表清空；配置起点仅决定后续写入位置。
+- Bitable clone 创建字段后验证原有 schema 和记录未被其他操作改变，再推进快照；覆盖 v1/v3、多字段和可见性延迟。
+- Base v3 创建回执拒绝空白记录 ID，并停止后续批次。
+- 配置模板先验证再原子替换，失败保留旧配置；YAML 工作表名称与整数序号不再混淆；Excel 读取失败保留输入错误退出码。
+- 高级重试尊重 Retry-After 和剩余等待预算；发布脚本的 ShellCheck 引用提示已修正。
+- Sheet UAT 在启动前检查整张专用工作表为空；普通更新/追加保留 A1 哨兵，clone 则要求清空该哨兵。
+
+| 验证层 | 本地结果 |
+|---|---|
+| 完整非集成测试 | 859 passed，覆盖率 80% |
+| Ruff、Black、MyPy、Python 编译、diff 检查 | 通过 |
+| actionlint（含 ShellCheck） | 通过 |
+| 真实飞书 UAT、tag、Release | 未执行 |
+
+普通运行仍无跨 API 原子事务或成功前缀自动回滚。线上 revision 传播、租户能力及真实同步结果仍须通过隔离 UAT 验证。
+
+## 2026-09-05 历史源码修订
+
+以下条目与文末历史状态表保留当时的交接背景，不应作为当前工作区或 GitHub 交付状态。
 
 - Sheet 按物理行列写入；空列、跨空行、表头乱序、起始偏移、普通新增和覆盖重建得到统一处理。
 - 追加范围从已占用尾行之后开始，使用 INSERT_ROWS，后续分块跟随服务端实际范围。
@@ -59,7 +81,7 @@ python3 XTF.py sync --config config.yaml
 `overwrite` / `clone` 和任何 delete/clear plan 仍需 `--allow-delete`。真实生产 mutation 不因
 Release 审批或本地测试通过而自动获得授权。
 
-## 本修订的完成状态
+## 2026-09-05 历史完成状态
 
 | 项目 | 本次状态 |
 |---|---|
