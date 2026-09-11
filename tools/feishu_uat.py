@@ -209,12 +209,22 @@ class LiveRun:
         save_json(self.manifest_path, self.manifest)
         if self.suite == "sheet":
             info = self.sheet_fixture_info()
-            # This is a dedicated pre-provisioned fixture; never clear it to make setup pass.
-            values = self.sheet.get_sheet_data(
-                self.parent,
-                f"{self.sheet_id}!{SHEET_REGION}",
-                value_render_option="Formula",
-            )
+            # clone 清空整张工作表；不能只检查样例区域，也不能清空数据来让 setup 通过。
+            original_render = self.sheet.value_render_option
+            try:
+                self.sheet.value_render_option = "Formula"
+                values = self.sheet.get_sheet_data_chunked(
+                    self.parent,
+                    self.sheet_id,
+                    1,
+                    info.grid_properties["row_count"],
+                    "A",
+                    self.sheet.column_number_to_letter(
+                        info.grid_properties["column_count"]
+                    ),
+                )
+            finally:
+                self.sheet.value_render_option = original_render
             require(
                 sheet_values_equal([], values),
                 "UAT sheet is not empty; use the previous manifest to clean its known run",
@@ -662,9 +672,15 @@ class LiveRun:
             "empty Sheet clone did not clear values",
         )
         require(
-            self.sheet.get_sheet_data(self.parent, f"{self.resource_id}!A1:A1")
-            == [[self.manifest["run_name"]]],
-            "empty clone changed outside sentinel",
+            sheet_values_equal(
+                [],
+                self.sheet.get_sheet_data(
+                    self.parent,
+                    f"{self.resource_id}!A1:A1",
+                    value_render_option="Formula",
+                ),
+            ),
+            "whole-sheet clone did not clear the outside sentinel",
         )
         self.checks.append("sheet_empty_clone_clear_only")
         # Both a known good formula and an intentional error exercise the extension response.

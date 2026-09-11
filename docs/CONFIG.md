@@ -139,6 +139,10 @@ source:
 --source-type file --file data.xlsx --excel-sheet Sheet1
 ```
 
+YAML 中 `source.file.sheet_name` 的字符串按工作表名称读取，整数按从 0 开始的序号读取。
+例如 `sheet_name: "0"` 选择名称为 `0` 的工作表，`sheet_name: 0` 选择第一张工作表。
+CLI 的 `--excel-sheet` 纯数字参数仍按序号处理；数字名称请通过 YAML 字符串指定。
+
 `.xlsx` / `.xls` 是稳定主格式，CSV 仍为实验性支持。
 
 ### 另一张 Bitable

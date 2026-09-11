@@ -112,6 +112,7 @@ class SyncService:
         self._planned_target_snapshot: Optional[
             Union[BitableSnapshot, SheetSnapshot]
         ] = None
+        self._planned_sheet_index_field_types: Dict[str, Any] = {}
         self._planned_bitable_schema_fingerprint: Optional[str] = None
         self._expected_bitable_schema_fingerprint: Optional[str] = None
         self._expected_bitable_revision: int | str | None = None
@@ -1353,7 +1354,7 @@ class SyncService:
         if not isinstance(self.api, SheetAPI):
             return None
         end_col = self.api.column_number_to_letter(col_count)
-        return f"A1:{end_col}{row_count}"
+        return f"{self._sheet_target().sheet_id}!A1:{end_col}{row_count}"
 
     def get_current_sheet_data(self) -> pd.DataFrame:
         """获取当前电子表格数据"""
@@ -1644,8 +1645,8 @@ class SyncService:
             field_names 列表，None 表示获取全部字段
         """
         if mode == "clone":
-            # clone 模式只需 record_id（API 固定返回），使用空 field_names 返回最小字段集
-            return []
+            # clone 的 freshness 指纹覆盖全部字段，规划和执行须使用相同投影。
+            return None
 
         index_col = self.sync_config.index.column
         if not index_col:
@@ -1874,8 +1875,13 @@ class SyncService:
             if isinstance(action, CreateFieldAction):
                 fingerprint = getattr(self, "_planned_bitable_schema_fingerprint", None)
                 if fingerprint:
+                    schema_expected: Dict[str, Any] = {"fingerprint": fingerprint}
+                    if effective_mode is SyncMode.CLONE and isinstance(
+                        snapshot, BitableSnapshot
+                    ):
+                        schema_expected["record_snapshot"] = snapshot
                     precondition = SnapshotPrecondition(
-                        "bitable_schema", {"fingerprint": fingerprint}
+                        "bitable_schema", schema_expected
                     )
             elif isinstance(snapshot, BitableSnapshot):
                 expected: Dict[str, Any] = {
@@ -1947,6 +1953,7 @@ class SyncService:
                     "fingerprint": snapshot.content_fingerprint,
                     "header": snapshot.header,
                     "index_mapping": snapshot.index_mapping,
+                    "index_field_types": dict(self._planned_sheet_index_field_types),
                     "actual_ranges": snapshot.actual_ranges,
                     "grid": snapshot.grid,
                 }
@@ -2589,6 +2596,7 @@ class SyncService:
         *,
         index_mapping: Mapping[str, int],
         formula_columns: Optional[set[Union[str, int]]] = None,
+        index_field_types: Optional[Mapping[str, Any]] = None,
     ) -> SheetSnapshot:
         read_range = getattr(self, "_last_sheet_read_range", None)
         snapshot = SheetSnapshot.from_dataframe(
@@ -2603,6 +2611,7 @@ class SyncService:
             formula_values=getattr(self, "_last_sheet_formula_values", None),
         )
         self._planned_target_snapshot = snapshot
+        self._planned_sheet_index_field_types = dict(index_field_types or {})
         return snapshot
 
     def _plan_file_sheet(self, df: pd.DataFrame) -> ExecutionPlan:
@@ -2705,6 +2714,7 @@ class SyncService:
             current_df,
             index_mapping=current_index,
             formula_columns=formula_columns,
+            index_field_types=index_field_types,
         )
 
         sync_df = df
@@ -2841,6 +2851,7 @@ class SyncService:
     def plan(self, df: Optional[pd.DataFrame] = None) -> ExecutionPlan:
         """Build a complete mutation plan using reads and local classification only."""
         self._planned_target_snapshot = None
+        self._planned_sheet_index_field_types = {}
         self._planned_bitable_fields = ()
         self._planned_bitable_schema_fingerprint = None
         self._last_sheet_layout = None
@@ -2907,7 +2918,9 @@ class SyncService:
             and (key := self._bitable_snapshot_key(record, schema)) is not None
         }
 
-    def _current_sheet_snapshot(self) -> SheetSnapshot:
+    def _current_sheet_snapshot(
+        self, *, index_field_types: Optional[Mapping[str, Any]] = None
+    ) -> SheetSnapshot:
         # Re-read grid metadata as rows/columns can have been inserted since plan.
         self._sheet_grid_cache = None
         self._sheet_grid_cache_key = None
@@ -2919,7 +2932,12 @@ class SyncService:
             if self.sync_config.index.column not in frame.columns and not frame.empty:
                 raise RuntimeError("目标 Sheet freshness read 的表头已变化")
             if self.sync_config.index.column in frame.columns:
-                field_types = self._sheet_index_field_types(frame, frame)
+                # 复用计划中的规则；目标与自身比较会把普通数字编号误推断为时间戳。
+                field_types = (
+                    dict(index_field_types)
+                    if index_field_types is not None
+                    else self._sheet_index_field_types(frame, frame)
+                )
                 mapping = self.converter.build_data_index(
                     frame,
                     self.sync_config.index.column,
@@ -3021,7 +3039,9 @@ class SyncService:
                 self._expected_bitable_revision = current.revision
                 return True
             if precondition.kind.startswith("sheet_"):
-                current_sheet = self._current_sheet_snapshot()
+                current_sheet = self._current_sheet_snapshot(
+                    index_field_types=precondition.expected.get("index_field_types")
+                )
                 baseline = self._expected_sheet_snapshot
                 if precondition.kind == "sheet_empty":
                     if current_sheet.header or current_sheet.index_mapping:
@@ -3139,6 +3159,72 @@ class SyncService:
                     field.name == action.field_name for field in fields
                 ):
                     return False
+                if isinstance(action, CreateFieldAction):
+                    unchanged_fields = tuple(
+                        field for field in fields if field.name != action.field_name
+                    )
+                    expected_fingerprint = (
+                        self._expected_bitable_schema_fingerprint
+                        or precondition.expected.get("fingerprint")
+                    )
+                    if (
+                        self._schema_fingerprint(unchanged_fields)
+                        != expected_fingerprint
+                    ):
+                        raise RuntimeError(
+                            "创建字段后其他 schema 发生变化；停止后续写入"
+                        )
+                    previous = (
+                        self._expected_bitable_snapshot
+                        or precondition.expected.get("record_snapshot")
+                    )
+                    if isinstance(previous, BitableSnapshot):
+                        current = self._read_current_bitable_snapshot()
+                        if {
+                            (field.id, field.name, field.kind)
+                            for field in current.schema
+                        } != {(field.id, field.name, field.kind) for field in fields}:
+                            return False
+                        before = {
+                            record.record_id: dict(record.fields)
+                            for record in previous.records
+                        }
+                        after = {
+                            record.record_id: dict(record.fields)
+                            for record in current.records
+                        }
+                        if (
+                            current.backend != previous.backend
+                            or current.timezone != previous.timezone
+                            or len(before) != len(previous.records)
+                            or len(after) != len(current.records)
+                            or before.keys() != after.keys()
+                            or any(
+                                not cells_equal(
+                                    values.get(field.name),
+                                    after[record_id].get(field.name),
+                                    field,
+                                    previous.timezone,
+                                )
+                                for record_id, values in before.items()
+                                for field in previous.schema
+                            )
+                            or any(
+                                not self.converter._is_empty_value(
+                                    record.fields.get(action.field_name)
+                                )
+                                and not (
+                                    action.suggested_type == 7
+                                    and record.fields.get(action.field_name) is False
+                                )
+                                for record in current.records
+                            )
+                        ):
+                            raise RuntimeError(
+                                "创建字段后出现未预期的记录变化；停止后续写入"
+                            )
+                        self._expected_bitable_snapshot = current
+                        self._expected_bitable_revision = current.revision
                 self._expected_bitable_schema_fingerprint = self._schema_fingerprint(
                     fields
                 )
@@ -3186,7 +3272,9 @@ class SyncService:
                 self._expected_bitable_revision = current.revision
             elif precondition.kind.startswith("sheet_"):
                 previous_sheet = self._expected_sheet_snapshot
-                current_sheet = self._current_sheet_snapshot()
+                current_sheet = self._current_sheet_snapshot(
+                    index_field_types=precondition.expected.get("index_field_types")
+                )
                 if (
                     isinstance(action, (WriteColumnsAction, AppendRowsAction))
                     and previous_sheet is not None

@@ -142,6 +142,82 @@ def test_review_inserted_blank_row_invalidates_planned_physical_coordinates():
     engine._execute_action.assert_not_called()
 
 
+@pytest.mark.parametrize("saved_rows", [2, 3])
+def test_fixed_sheet_write_never_verifies_only_a_shortened_server_range(saved_rows):
+    state = []
+    engine = sheet_service(state, verify_remote_writes=True, verify_timeout_seconds=0)
+
+    def write_response(method, token, endpoint, body, **kwargs):
+        requested = body["valueRange"]
+        state[:] = deepcopy(requested["values"][:saved_rows])
+        sheet_id = requested["range"].split("!")[0]
+        return {
+            "code": 0,
+            "data": {"updatedRange": f"{sheet_id}!A1:B{saved_rows}"},
+        }
+
+    engine.api._typed_values_call = Mock(side_effect=write_response)
+    engine.api.get_sheet_data = Mock(side_effect=lambda *a, **k: deepcopy(state))
+    plan = engine.plan(pd.DataFrame({"ID": [1, 2], "Name": ["one", "two"]}))
+
+    outcome = engine.execute_plan(plan)
+
+    if saved_rows == 3:
+        assert outcome.status is OutcomeStatus.SUCCESS
+        assert outcome.verification[0]["confirmed_count"] == 3
+        assert outcome.to_dict()["summary"]["confirmation_complete"] is True
+    else:
+        assert outcome.status is OutcomeStatus.INDETERMINATE
+        assert not outcome.ok
+        assert not any(
+            item.get("status") == "verified" for item in outcome.verification
+        )
+        assert outcome.error["confirmed_count"] == 0
+    assert engine.api._typed_values_call.call_count == 1
+
+
+@pytest.mark.parametrize("mode", ["full", "incremental"])
+@pytest.mark.parametrize("as_text", [False, True])
+def test_sheet_freshness_keeps_planned_numeric_index_semantics(mode, as_text):
+    source_id, target_id = 1704067201, 1704067200
+    if as_text:
+        source_id, target_id = str(source_id), str(target_id)
+    engine = sheet_service([["ID", "Name"], [target_id, "old"]], mode=mode)
+    plan = engine.plan(pd.DataFrame({"ID": [source_id], "Name": ["new"]}))
+    engine._execute_action = Mock(return_value=True)
+
+    outcome = engine.execute_plan(plan)
+
+    assert outcome.status is OutcomeStatus.SUCCESS, outcome.error
+    engine._execute_action.assert_called_once_with(plan.actions[0])
+
+
+def test_sheet_index_semantics_are_bound_to_each_plan():
+    engine = sheet_service([["ID", "Name"], [1704067200, "old"]])
+    plan = engine.plan(pd.DataFrame({"ID": [1704067201], "Name": ["new"]}))
+    engine.plan(pd.DataFrame({"ID": [1704067200], "Name": ["changed"]}))
+    engine._execute_action = Mock(return_value=True)
+
+    outcome = engine.execute_plan(plan)
+
+    assert outcome.status is OutcomeStatus.SUCCESS, outcome.error
+    engine._execute_action.assert_called_once_with(plan.actions[0])
+
+
+def test_sheet_freshness_retains_cross_form_datetime_index_matching():
+    engine = sheet_service([["ID", "Name"], [1704067200, "old"]])
+    plan = engine.plan(
+        pd.DataFrame({"ID": [pd.Timestamp("2024-01-01T00:00:00Z")], "Name": ["new"]})
+    )
+    assert isinstance(plan.actions[0], WriteColumnsAction)
+    engine._execute_action = Mock(return_value=True)
+
+    outcome = engine.execute_plan(plan)
+
+    assert outcome.status is OutcomeStatus.SUCCESS, outcome.error
+    engine._execute_action.assert_called_once_with(plan.actions[0])
+
+
 @pytest.mark.parametrize("columns", [["ID", "ID"], ["ID", ""], ["ID", " "]])
 def test_review_ambiguous_source_headers_fail_before_destructive_plan(columns):
     engine = sheet_service([["ID", "Name"], [1, "old"]], mode="clone")

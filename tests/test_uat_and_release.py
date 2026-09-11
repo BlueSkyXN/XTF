@@ -115,11 +115,70 @@ def test_sheet_fixture_uses_real_typed_metadata_and_never_clears_nonempty_setup(
             grid_properties={"row_count": 200, "column_count": 20},
         ),
     )
-    runner.sheet.get_sheet_data.return_value = [["already used"]]
+    runner.sheet.get_sheet_data_chunked.return_value = [["already used"]]
     with pytest.raises(AssertionError, match="not empty"):
         runner.acquire()
     runner.sheet.clear_values.assert_not_called()
     assert not runner.resource_id
+
+
+@pytest.mark.parametrize("occupied", [False, True])
+def test_sheet_uat_checks_entire_grid_before_whole_sheet_clone(
+    tmp_path, uat_env, occupied
+):
+    runner = uat.LiveRun("sheet", tmp_path / "m.json")
+    runner.sheet = Mock(value_render_option="UnformattedValue")
+    runner.sheet.query_sheets.return_value = (
+        SheetMetadata(
+            "sheet1",
+            "XTF_UAT_fixture",
+            grid_properties={"row_count": 201, "column_count": 21},
+        ),
+    )
+    runner.sheet.column_number_to_letter.return_value = "U"
+    runner.sheet.get_sheet_data.return_value = []
+    runner.sheet.get_sheet_data_chunked.return_value = (
+        [["outside reserved sample area"]] if occupied else []
+    )
+    if occupied:
+        with pytest.raises(AssertionError, match="not empty"):
+            runner.acquire()
+    else:
+        runner.acquire()
+    runner.sheet.get_sheet_data_chunked.assert_called_once_with(
+        "spreadsheet", "sheet1", 1, 201, "A", "U"
+    )
+    assert runner.sheet.value_render_option == "UnformattedValue"
+    assert bool(runner.resource_id) is not occupied
+    runner.sheet.clear_values.assert_not_called()
+
+
+def test_sheet_uat_expects_clone_to_remove_outside_sentinel(tmp_path, uat_env):
+    from api import MutationOutcome
+
+    runner = uat.LiveRun("sheet", tmp_path / "m.json")
+    runner.resource_id = "sheet1"
+    runner.manifest = {"run_name": NAME}
+    runner.sheet = Mock()
+    runner.sync = Mock()
+    runner.sheet.write_values.return_value = Mock(outcome=MutationOutcome.ACCEPTED)
+    runner.sheet.get_sheet_data.side_effect = [
+        [["Name", "ID", "Score"], ["oldA", "a", 1], [None] * 3, ["oldB", "b", 2]],
+        [[NAME]],
+        [["Name", "ID", "Score"], ["newA", "a", 11], [None] * 3, ["newB", "b", 22]],
+        [["newC", "c", 33]],
+        [[NAME]],
+        [],
+        [],
+        [[{"type": "formula", "text": "=1+1"}], [{"type": "formula", "text": "=1/0"}]],
+        [[2]],
+    ]
+    runner.sheet.verify_formulas.side_effect = [
+        Mock(passed=True, raw={"total_formulas": 1}),
+        Mock(status="errors_found", total_errors=1, has_more=False),
+    ]
+    runner.exercise_sheet()
+    assert "sheet_empty_clone_clear_only" in runner.checks
 
 
 def test_v3_acquire_records_id_before_schema_read_failure(tmp_path, uat_env):

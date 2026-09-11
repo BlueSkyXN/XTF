@@ -199,17 +199,17 @@ class RetryableAPIClient:
                 last_response = response
 
                 # 检查是否需要重试的响应状态
-                if response.status_code == 429 and budget.remaining:  # 频率限制
+                if (
+                    response.status_code == 429 or response.status_code >= 500
+                ) and budget.remaining:
                     last_failure_had_response = True
-                    raise requests.exceptions.RequestException(
-                        f"Rate limit exceeded: {response.status_code}"
+                    error = requests.exceptions.RequestException(
+                        f"HTTP retry requested: {response.status_code}"
                     )
-
-                if response.status_code >= 500 and budget.remaining:  # 服务器错误
-                    last_failure_had_response = True
-                    raise requests.exceptions.RequestException(
-                        f"Server error: {response.status_code}"
+                    error.retry_after = FeishuResponseParser._parse_retry_after(
+                        response
                     )
+                    raise error
 
                 return response
 

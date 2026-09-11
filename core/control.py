@@ -132,10 +132,15 @@ class RetryStrategy(ABC):
             return False
         return True
 
-    def wait(self, attempt: int) -> bool:
+    def wait(
+        self, attempt: int, *, minimum_delay: float = 0.0, elapsed_time: float = 0.0
+    ) -> bool:
         """执行等待，返回是否应该继续重试"""
-        delay = self.get_delay(attempt)
-        if self.config.max_wait_time is not None and delay > self.config.max_wait_time:
+        delay = max(self.get_delay(attempt), minimum_delay)
+        if (
+            self.config.max_wait_time is not None
+            and delay > self.config.max_wait_time - elapsed_time
+        ):
             return False
         time.sleep(delay)
         return True
@@ -397,7 +402,11 @@ class RequestController:
                     raise
 
                 # 执行重试等待
-                if not self.retry_strategy.wait(attempt):
+                if not self.retry_strategy.wait(
+                    attempt,
+                    minimum_delay=getattr(e, "retry_after", None) or 0.0,
+                    elapsed_time=elapsed_time,
+                ):
                     self.logger.error(f"重试等待超时，已尝试 {attempt + 1} 次: {e}")
                     raise
 

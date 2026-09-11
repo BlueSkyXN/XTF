@@ -8,6 +8,7 @@ import os
 from collections.abc import Mapping, MutableMapping
 from dataclasses import dataclass
 from pathlib import Path
+import tempfile
 from typing import Any
 
 import yaml  # type: ignore[import-untyped]
@@ -697,7 +698,12 @@ def _set(
         "sheet_datetime_render_option",
     }:
         value = None
-    if name == "excel_sheet_name" and isinstance(value, str) and value.isdigit():
+    if (
+        source == "cli"
+        and name == "excel_sheet_name"
+        and isinstance(value, str)
+        and value.isdigit()
+    ):
         value = int(value)
     values[name] = value
     sources[name] = source
@@ -857,18 +863,32 @@ def write_template(
             f"refusing to overwrite existing file: {path}; use --force",
             EXIT_CONFIG,
         )
+    document = make_template(source_type, target_type)
+    temporary: Path | None = None
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w", encoding="utf-8") as stream:
-            yaml.safe_dump(
-                make_template(source_type, target_type),
-                stream,
-                allow_unicode=True,
-                sort_keys=False,
-                default_flow_style=False,
-            )
-    except OSError as exc:
+        content = yaml.safe_dump(
+            document, allow_unicode=True, sort_keys=False, default_flow_style=False
+        )
+        destination = path.resolve()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        mode = destination.stat().st_mode & 0o777 if destination.exists() else None
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=destination.parent,
+            prefix=f".{destination.name}.",
+            delete=False,
+        ) as stream:
+            temporary = Path(stream.name)
+            stream.write(content)
+        if mode is not None:
+            temporary.chmod(mode)
+        os.replace(temporary, destination)
+    except (OSError, yaml.YAMLError) as exc:
         raise _config_error(f"cannot write configuration template: {exc}") from exc
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def is_sensitive(name: str) -> bool:
